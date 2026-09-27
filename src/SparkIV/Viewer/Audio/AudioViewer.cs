@@ -46,6 +46,7 @@ namespace SparkIV.Viewer.Audio
       var view = new AudioView();
       var controller = new AudioViewController(view);
       controller.AudioFile = audioFile;
+      controller.SetOriginalFile(data, file.Name);
 
       return view;
     }

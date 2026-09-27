@@ -34,40 +34,59 @@ namespace WaveLib
     private AutoResetEvent m_PlayEvent = new AutoResetEvent(false);
     private IntPtr m_WaveOut;
 
-    private WaveNative.WaveHdr m_Header;
-    private byte[] m_HeaderData;
-    private GCHandle m_HeaderHandle;
-    private GCHandle m_HeaderDataHandle;
+    // The driver keeps using the WAVEHDR (and the sample data) until the buffer is done, so
+    // both live in native memory. A header inside a managed object gets moved by the GC, which
+    // makes the driver skip or replay buffers.
+    private static readonly int HeaderSize = Marshal.SizeOf(typeof(WaveNative.WaveHdr));
+    private static readonly int UserOffset = (int)Marshal.OffsetOf(typeof(WaveNative.WaveHdr), "dwUser");
 
-    private bool m_Playing;
+    private IntPtr m_Header;
+    private IntPtr m_Data;
+    private int m_Size;
+    private GCHandle m_Self;
 
-    internal static void WaveOutProc(IntPtr hdrvr, int uMsg, int dwUser, ref WaveNative.WaveHdr wavhdr, int dwParam2)
+    // True from waveOutWrite until the driver reported MM_WOM_DONE for this buffer.
+    private volatile bool m_Playing;
+
+    internal static void WaveOutProc(IntPtr hdrvr, int uMsg, IntPtr dwInstance, IntPtr wavhdr, IntPtr dwParam2)
     {
-      if (uMsg == WaveNative.MM_WOM_DONE)
+      if (uMsg != WaveNative.MM_WOM_DONE || wavhdr == IntPtr.Zero)
+        return;
+
+      try
       {
-        try
-        {
-          GCHandle h = (GCHandle)wavhdr.dwUser;
-          WaveOutBuffer buf = (WaveOutBuffer)h.Target;
+        IntPtr user = Marshal.ReadIntPtr(wavhdr, UserOffset);
+        if (user == IntPtr.Zero)
+          return;
+
+        var buf = GCHandle.FromIntPtr(user).Target as WaveOutBuffer;
+        if (buf != null)
           buf.OnCompleted();
-        }
-        catch
-        {
-        }
+      }
+      catch
+      {
+        // Never let an exception escape into the winmm callback thread.
       }
     }
 
     public WaveOutBuffer(IntPtr waveOutHandle, int size)
     {
       m_WaveOut = waveOutHandle;
+      m_Size = size;
+      m_Self = GCHandle.Alloc(this);
 
-      m_HeaderHandle = GCHandle.Alloc(m_Header, GCHandleType.Pinned);
-      m_Header.dwUser = (IntPtr)GCHandle.Alloc(this);
-      m_HeaderData = new byte[size];
-      m_HeaderDataHandle = GCHandle.Alloc(m_HeaderData, GCHandleType.Pinned);
-      m_Header.lpData = m_HeaderDataHandle.AddrOfPinnedObject();
-      m_Header.dwBufferLength = size;
-      WaveOutHelper.Try(WaveNative.waveOutPrepareHeader(m_WaveOut, ref m_Header, Marshal.SizeOf(m_Header)));
+      m_Data = Marshal.AllocHGlobal(size);
+      m_Header = Marshal.AllocHGlobal(HeaderSize);
+
+      var header = new WaveNative.WaveHdr
+                     {
+                       lpData = m_Data,
+                       dwBufferLength = size,
+                       dwUser = GCHandle.ToIntPtr(m_Self)
+                     };
+      Marshal.StructureToPtr(header, m_Header, false);
+
+      WaveOutHelper.Try(WaveNative.waveOutPrepareHeader(m_WaveOut, m_Header, HeaderSize));
     }
     ~WaveOutBuffer()
     {
@@ -75,26 +94,39 @@ namespace WaveLib
     }
     public void Dispose()
     {
-      if (m_Header.lpData != IntPtr.Zero)
+      if (m_Playing)
       {
-        WaveNative.waveOutUnprepareHeader(m_WaveOut, ref m_Header, Marshal.SizeOf(m_Header));
-        m_HeaderHandle.Free();
-        m_Header.lpData = IntPtr.Zero;
+        // The driver may still call back with this header. Leaking a few KB is better than
+        // letting it touch freed memory.
+        GC.SuppressFinalize(this);
+        return;
       }
+
+      if (m_Header != IntPtr.Zero)
+      {
+        WaveNative.waveOutUnprepareHeader(m_WaveOut, m_Header, HeaderSize);
+        Marshal.FreeHGlobal(m_Header);
+        m_Header = IntPtr.Zero;
+      }
+      if (m_Data != IntPtr.Zero)
+      {
+        Marshal.FreeHGlobal(m_Data);
+        m_Data = IntPtr.Zero;
+      }
+      if (m_Self.IsAllocated)
+        m_Self.Free();
       m_PlayEvent.Close();
-      if (m_HeaderDataHandle.IsAllocated)
-        m_HeaderDataHandle.Free();
       GC.SuppressFinalize(this);
     }
 
     public int Size
     {
-      get { return m_Header.dwBufferLength; }
+      get { return m_Size; }
     }
 
     public IntPtr Data
     {
-      get { return m_Header.lpData; }
+      get { return m_Data; }
     }
 
     public bool Play()
@@ -102,7 +134,10 @@ namespace WaveLib
       lock (this)
       {
         m_PlayEvent.Reset();
-        m_Playing = WaveNative.waveOutWrite(m_WaveOut, ref m_Header, Marshal.SizeOf(m_Header)) == WaveNative.MMSYSERR_NOERROR;
+        // Set before writing: the done callback can arrive before waveOutWrite returns.
+        m_Playing = true;
+        if (WaveNative.waveOutWrite(m_WaveOut, m_Header, HeaderSize) != WaveNative.MMSYSERR_NOERROR)
+          m_Playing = false;
         return m_Playing;
       }
     }
@@ -110,17 +145,22 @@ namespace WaveLib
     {
       if (m_Playing)
       {
-        m_Playing = m_PlayEvent.WaitOne();
+        m_PlayEvent.WaitOne();
       }
       else
       {
         Thread.Sleep(0);
       }
     }
+    /// <returns>False if the driver didn't release the buffer in time.</returns>
+    public bool WaitForCompletion(int timeout)
+    {
+      return !m_Playing || m_PlayEvent.WaitOne(timeout) || !m_Playing;
+    }
     public void OnCompleted()
     {
-      m_PlayEvent.Set();
       m_Playing = false;
+      m_PlayEvent.Set();
     }
   }
 
@@ -131,8 +171,9 @@ namespace WaveLib
     private WaveOutBuffer m_CurrentBuffer;
     private Thread m_Thread;
     private BufferFillEventHandler m_FillProc;
-    private bool m_Finished;
+    private volatile bool m_Finished;
     private byte m_zero;
+    private int m_BlockAlign;
 
     private WaveNative.WaveDelegate m_BufferProc = new WaveNative.WaveDelegate(WaveOutBuffer.WaveOutProc);
 
@@ -142,10 +183,19 @@ namespace WaveLib
     }
 
     public WaveOutPlayer(int device, WaveFormat format, int bufferSize, int bufferCount, BufferFillEventHandler fillProc)
+      : this(device, format, 0, bufferSize, bufferCount, fillProc)
     {
+    }
+    /// <param name="channelMask">Speaker mask (WAVE_FORMAT_EXTENSIBLE) for more than two channels, 0 for plain PCM.</param>
+    public WaveOutPlayer(int device, WaveFormat format, int channelMask, int bufferSize, int bufferCount, BufferFillEventHandler fillProc)
+    {
+      m_BlockAlign = format.nBlockAlign;
       m_zero = format.wBitsPerSample == 8 ? (byte)128 : (byte)0;
       m_FillProc = fillProc;
-      WaveOutHelper.Try(WaveNative.waveOutOpen(out m_WaveOut, device, format, m_BufferProc, 0, WaveNative.CALLBACK_FUNCTION));
+      if (channelMask != 0)
+        WaveOutHelper.Try(WaveNative.waveOutOpen(out m_WaveOut, device, new WaveFormatExtensible(format, channelMask), m_BufferProc, IntPtr.Zero, WaveNative.CALLBACK_FUNCTION));
+      else
+        WaveOutHelper.Try(WaveNative.waveOutOpen(out m_WaveOut, device, format, m_BufferProc, IntPtr.Zero, WaveNative.CALLBACK_FUNCTION));
       AllocateBuffers(bufferSize, bufferCount);
       m_Thread = new Thread(new ThreadStart(ThreadProc));
       m_Thread.Start();
@@ -175,6 +225,33 @@ namespace WaveLib
         }
       //GC.SuppressFinalize(this);
     }
+    public void Pause()
+    {
+      if (m_WaveOut != IntPtr.Zero)
+        WaveNative.waveOutPause(m_WaveOut);
+    }
+    public void Resume()
+    {
+      if (m_WaveOut != IntPtr.Zero)
+        WaveNative.waveOutRestart(m_WaveOut);
+    }
+    /// <summary>
+    /// Sample frames played by the device since it was opened.
+    /// </summary>
+    public long GetPlayedFrames()
+    {
+      if (m_WaveOut == IntPtr.Zero)
+        return 0;
+
+      var time = new WaveNative.MmTime { wType = WaveNative.TIME_SAMPLES };
+      if (WaveNative.waveOutGetPosition(m_WaveOut, ref time, Marshal.SizeOf(time)) != WaveNative.MMSYSERR_NOERROR)
+        return 0;
+
+      // The driver may fall back to another format than the one requested.
+      if (time.wType == WaveNative.TIME_BYTES)
+        return (uint)time.u / m_BlockAlign;
+      return (uint)time.u;
+    }
     private void ThreadProc()
     {
       while (!m_Finished)
@@ -192,7 +269,9 @@ namespace WaveLib
           Marshal.Copy(b, 0, m_CurrentBuffer.Data, b.Length);
 
         }
-        m_CurrentBuffer.Play();
+        // Don't queue anything after Dispose has reset the device.
+        if (!m_Finished)
+          m_CurrentBuffer.Play();
       }
       WaitForAllBuffers();
     }
@@ -240,14 +319,16 @@ namespace WaveLib
       m_CurrentBuffer = m_CurrentBuffer == null ? m_Buffers : m_CurrentBuffer.NextBuffer;
       m_CurrentBuffer.WaitFor();
     }
+    // Every queued buffer gets exactly one MM_WOM_DONE; wait for all of them (the old loop
+    // skipped the last buffer) so FreeBuffers never frees memory the driver still uses.
     private void WaitForAllBuffers()
     {
       WaveOutBuffer Buf = m_Buffers;
-      while (Buf.NextBuffer != m_Buffers)
+      do
       {
-        Buf.WaitFor();
+        Buf.WaitForCompletion(2000);
         Buf = Buf.NextBuffer;
-      }
+      } while (Buf != m_Buffers);
     }
   }
 }

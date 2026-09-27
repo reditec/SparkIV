@@ -69,7 +69,12 @@
   <ItemGroup>
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Audio\AudioPlayer.cs" />
+    <Compile Include="Audio\AudioTrack.cs" />
     <Compile Include="Audio\AudioWave.cs" />
+    <Compile Include="Audio\PcmDecoder.cs" />
+    <Compile Include="Audio\SeekTrackBar.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Audio\AudioFile.cs" />
     <Compile Include="Audio\AudioView.cs">
       <SubType>UserControl</SubType>
