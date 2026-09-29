@@ -6,7 +6,7 @@ wave hash that is still unresolved in GTA IV, The Lost and Damned and The Ballad
 (PC, Complete Edition), so that names found later (community lists, other game versions) can
 be checked against it.
 
-State: 142 unresolved waves (141 distinct hashes) out of 143,338 in 3,286 sound banks.
+State: 70 unresolved waves (69 distinct hashes) out of 143,338 in 3,286 sound banks.
 All 3,568 archive entry names are resolved. Hashes are written the way SparkIV shows them
 (`0x` + lower-case hex without leading zeros).
 
@@ -45,6 +45,10 @@ of the same search are word salad.
   9,886 contexts are still unknown; one of them is listed below.
 - **Listening.** Knowing what is said (for example "we gonna need something bigger than that")
   made small, targeted searches possible (`NEED_BIG_CAR_01` to `_05`).
+- **Naming patterns of neighbours.** `MISSION_COMPLETE_1` holds `HAPPYLEVELS6_LEFT/_RIGHT`; the
+  mission complete jingles in the `SMCnn` banks turned out to be `SHORTSTINGnn_L/_R`. Wrong channel
+  endings never produce colliding pairs, so a pattern test that yields no pairs at all rules out
+  the ending, and one that yields many points to the right one.
 - **Dialogue codes.** Scripted speech is named `MISSION_LINECODE_TAKE` (`E2T5_IA1_01`); the
   missing codes are gaps in the sequence of the bank.
 
@@ -124,51 +128,6 @@ Searched for these nine hashes without a plausible match (charset `A-Z 0-9 _`):
 
 Content comes from the sound objects that play the wave (names in code format) or from
 listening.
-
-### pc/audio/sfx/gps.rpf (72)
-
-Mission complete jingles. Every bank `SMCnn` holds one stereo pair (both channels have exactly the same
-length), played by the sound objects `MISSION_COMPLETE_nn` -> `MC_nn_L` / `MC_nn_R`. `SMC18` (an accent
-like after a passed mission) and `SMC71` have no sound object and are probably unused.
-
-| Bank | Hashes |
-|------|--------|
-| `SMC6` | `0x6f90a6df` `0xc50951cf` |
-| `SMC7` | `0x56370e0a` `0x59b19503` |
-| `SMC10` | `0xac3b6d5d` `0xc0d19691` |
-| `SMC11` | `0xc235e9f8` `0xd8a696dd` |
-| `SMC15` | `0x947e73fb` `0xce60e7bf` |
-| `SMC18` | `0x4528844c` `0xa459c2c5` |
-| `SMC24` | `0x234d62f5` `0x79280ea9` |
-| `SMC25` | `0x60284791` `0x9a003b44` |
-| `SMC27` | `0x96052f4f` `0x9c873c57` |
-| `SMC28` | `0x57d64945` `0xdf0d577d` |
-| `SMC33` | `0x82d2bf42` `0xa7b308ee` |
-| `SMC34` | `0x1beaf9b8` `0xa935944f` |
-| `SMC35` | `0x614f3f8a` `0xaf28db3c` |
-| `SMC42` | `0x72289467` `0x88b11d` |
-| `SMC43` | `0x1398e624` `0x8f845df9` |
-| `SMC50` | `0xb4262f36` `0xf67133cf` |
-| `SMC51` | `0x8fc77bb8` `0xc24260b1` |
-| `SMC52` | `0x5b427a69` `0xc6094ff9` |
-| `SMC53` | `0x77c703ad` `0xb35cfad4` |
-| `SMC54` | `0x2f77766e` `0xd8f9496f` |
-| `SMC55` | `0xd3376193` `0xea580fd8` |
-| `SMC56` | `0x8fb55dca` `0xe2e0841f` |
-| `SMC57` | `0xd0cde6e2` `0xe6f2933f` |
-| `SMC58` | `0x5e3ced63` `0xf3f4f69` |
-| `SMC59` | `0x43ee1a2d` `0x44c71be3` |
-| `SMC60` | `0x19307a08` `0xf811b7cb` |
-| `SMC61` | `0x6d23d560` `0xad5555c6` |
-| `SMC62` | `0x3362818b` `0xcc79b387` |
-| `SMC63` | `0x13f7d4a1` `0x8dce4854` |
-| `SMC64` | `0x15ee5469` `0xa6d6763b` |
-| `SMC65` | `0x1843673e` `0x46b6c420` |
-| `SMC66` | `0x49942292` `0x7814ff93` |
-| `SMC67` | `0x1b565954` `0xedc4fe2e` |
-| `SMC68` | `0x40f1a4a7` `0xb1cf866d` |
-| `SMC69` | `0x4e14e653` `0xc519d45f` |
-| `SMC71` | `0x51212971` `0xea7e5c29` |
 
 ### pc/audio/sfx/resident.rpf (48)
 
