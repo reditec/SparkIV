@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -118,30 +118,12 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <assembly alias="System.Drawing" name="System.Drawing, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" />
-  <data name="btnStop.Image" type="System.Drawing.Bitmap, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
-    <value>
-        iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6
-        JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAACXBIWXMAAAsJAAALCQES+kc+AAAAjUlE
-        QVQ4T2P4//8/RRhMXM5r/H8pt+H/xfRqovDpsJz/e9WdgVqhBpwKyvh/zCXm/0GzAKLwbkW7/7OEdRAG
-        HHWM/L9Xw+X/DnFTovAKUYP/rYJqowaMGkBlA/Zpuv5fI2b0f66ILlF4kpDW/0p+ZYQBs4V1/5fxK/1P
-        55UjCqfwyv5P4ZFFGEA+/s8AAGWcQ435mA2EAAAAAElFTkSuQmCC
-</value>
-  </data>
-  <data name="btnPlay.Image" type="System.Drawing.Bitmap, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
-    <value>
-        iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6
-        JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAACXBIWXMAAAsJAAALCQES+kc+AAAB4klE
-        QVQ4T2Nw2u6l6LrDl9N4kw2D0modBrFlCgx8iyUZuBeJMXAtEiWIGQL2RmRGHkh45bErsMhmqyunwUYr
-        kgxicNnhk+m5K+i//Tb3/3bb3F85bvckySAG880OmUDn/1dZo/dfdY3+fxCbFIMYzDbbZ+qtN/8vtlzx
-        P/8Sqf/iy5VIMghugOgy+f9Agf9ACZIMwjAAhrEZBDTglfVWlyKgek6ZlWoMAkukcRuAbBDQpv9CS2X+
-        iyyT+8+7WOI/1xyRV5zTRfK5Zomw4TdgIRDPE/3POU34P0eH0H/2Mv7/bBl8/9nSePcC2WacfUI4XADS
-        OB+ocboIRGMJUGM8z3/WIO5jrMHcNmxJvAwc1QIMnJOE0QyAaZwB1NgJ1FgK1JgA1BjMfYY1kNuVLZaH
-        gb2In4GjXZAB6CoGoOsgBuiuN/svuFQarJGzC+rURF6QxktAjX5gjQV8DBytQI1TQRpFGICWQaIRGLqZ
-        iqu1/3NOFv7PXg7UmATWeAOoMZwtGqgxH6ixBahxCqpGGGaQW6WRCZT8z57N9581hPseayBXAlhjHlBj
-        M26NcAOAAZUJ9OsT1kieNLYoHmb2HKDGJqDGyUCNc3FrhGEGYFTIsVcKsIEDpxGoERiywHgmqBGCRRkA
-        Zz46mWXG2+sAAAAASUVORK5CYII=
-</value>
-  </data>
+  <metadata name="imlIndent.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+    <value>122, 17</value>
+  </metadata>
+  <metadata name="toolTip.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+    <value>222, 17</value>
+  </metadata>
   <metadata name="tsToolbar.TrayLocation" type="System.Drawing.Point, System.Drawing, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
     <value>17, 17</value>
   </metadata>

@@ -45,6 +45,38 @@ namespace WaveLib
     }
   }
 
+  // WAVEFORMATEXTENSIBLE, needed for more than two channels so Windows knows the speaker of each channel.
+  [StructLayout(LayoutKind.Sequential, Pack = 2)]
+  public class WaveFormatExtensible
+  {
+    public short wFormatTag;
+    public short nChannels;
+    public int nSamplesPerSec;
+    public int nAvgBytesPerSec;
+    public short nBlockAlign;
+    public short wBitsPerSample;
+    public short cbSize;
+    public short wValidBitsPerSample;
+    public int dwChannelMask;
+    public Guid SubFormat;
+
+    private static readonly Guid KsDataFormatSubtypePcm = new Guid("00000001-0000-0010-8000-00aa00389b71");
+
+    public WaveFormatExtensible(WaveFormat format, int channelMask)
+    {
+      wFormatTag = unchecked((short)0xFFFE);
+      nChannels = format.nChannels;
+      nSamplesPerSec = format.nSamplesPerSec;
+      nAvgBytesPerSec = format.nAvgBytesPerSec;
+      nBlockAlign = format.nBlockAlign;
+      wBitsPerSample = format.wBitsPerSample;
+      cbSize = 22;
+      wValidBitsPerSample = format.wBitsPerSample;
+      dwChannelMask = channelMask;
+      SubFormat = KsDataFormatSubtypePcm;
+    }
+  }
+
   internal class WaveNative
   {
     // consts
@@ -61,7 +93,8 @@ namespace WaveLib
     public const int TIME_BYTES = 0x0004;  // current byte offset 
 
     // callbacks
-    public delegate void WaveDelegate(IntPtr hdrvr, int uMsg, int dwUser, ref WaveHdr wavhdr, int dwParam2);
+    // dwInstance/dwParam are DWORD_PTR. dwParam1 is the WAVEHDR, which must stay at a fixed native address.
+    public delegate void WaveDelegate(IntPtr hdrvr, int uMsg, IntPtr dwInstance, IntPtr wavhdr, IntPtr dwParam2);
 
     // structs 
 
@@ -75,7 +108,15 @@ namespace WaveLib
       public int dwFlags; // assorted flags (see defines)
       public int dwLoops; // loop control counter
       public IntPtr lpNext; // PWaveHdr, reserved for driver
-      public int reserved; // reserved for driver
+      public IntPtr reserved; // reserved for driver (DWORD_PTR)
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MmTime
+    {
+      public int wType;
+      public int u; // sample or byte count, depending on wType
+      public int padding; // the union is 8 bytes wide (SMPTE)
     }
 
     private const string mmdll = "winmm.dll";
@@ -84,13 +125,15 @@ namespace WaveLib
     [DllImport(mmdll)]
     public static extern int waveOutGetNumDevs();
     [DllImport(mmdll)]
-    public static extern int waveOutPrepareHeader(IntPtr hWaveOut, ref WaveHdr lpWaveOutHdr, int uSize);
+    public static extern int waveOutPrepareHeader(IntPtr hWaveOut, IntPtr lpWaveOutHdr, int uSize);
     [DllImport(mmdll)]
-    public static extern int waveOutUnprepareHeader(IntPtr hWaveOut, ref WaveHdr lpWaveOutHdr, int uSize);
+    public static extern int waveOutUnprepareHeader(IntPtr hWaveOut, IntPtr lpWaveOutHdr, int uSize);
     [DllImport(mmdll)]
-    public static extern int waveOutWrite(IntPtr hWaveOut, ref WaveHdr lpWaveOutHdr, int uSize);
+    public static extern int waveOutWrite(IntPtr hWaveOut, IntPtr lpWaveOutHdr, int uSize);
     [DllImport(mmdll)]
-    public static extern int waveOutOpen(out IntPtr hWaveOut, int uDeviceID, WaveFormat lpFormat, WaveDelegate dwCallback, int dwInstance, int dwFlags);
+    public static extern int waveOutOpen(out IntPtr hWaveOut, int uDeviceID, WaveFormat lpFormat, WaveDelegate dwCallback, IntPtr dwInstance, int dwFlags);
+    [DllImport(mmdll)]
+    public static extern int waveOutOpen(out IntPtr hWaveOut, int uDeviceID, WaveFormatExtensible lpFormat, WaveDelegate dwCallback, IntPtr dwInstance, int dwFlags);
     [DllImport(mmdll)]
     public static extern int waveOutReset(IntPtr hWaveOut);
     [DllImport(mmdll)]
@@ -100,7 +143,7 @@ namespace WaveLib
     [DllImport(mmdll)]
     public static extern int waveOutRestart(IntPtr hWaveOut);
     [DllImport(mmdll)]
-    public static extern int waveOutGetPosition(IntPtr hWaveOut, out int lpInfo, int uSize);
+    public static extern int waveOutGetPosition(IntPtr hWaveOut, ref MmTime lpInfo, int uSize);
     [DllImport(mmdll)]
     public static extern int waveOutSetVolume(IntPtr hWaveOut, int dwVolume);
     [DllImport(mmdll)]

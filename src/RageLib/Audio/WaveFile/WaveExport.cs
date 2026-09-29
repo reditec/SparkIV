@@ -42,6 +42,35 @@ namespace RageLib.Audio.WaveFile
       header.Write(new BinaryWriter(outStream));
     }
 
+    /// <summary>
+    /// Writes all channels of a multichannel track (stereo, LCR, 5.0) into one WAV file with speaker mask.
+    /// </summary>
+    public static void ExportChannels(AudioFile file, AudioTrack track, Stream outStream)
+    {
+      WaveHeader header = new WaveHeader(true);
+
+      // Skip the header
+      outStream.Seek(header.HeaderSize, SeekOrigin.Begin);
+
+      // Write the data, channels interleaved in WAV order (L, R, C, LS, RS)
+      var decoder = new PcmDecoder(file, track);
+      var samples = new short[4096 * decoder.Channels];
+      var bytes = new byte[samples.Length * 2];
+      while (!decoder.EndOfTrack)
+      {
+        int frames = decoder.Read(samples, 4096);
+        System.Buffer.BlockCopy(samples, 0, bytes, 0, frames * decoder.Channels * 2);
+        outStream.Write(bytes, 0, frames * decoder.Channels * 2);
+      }
+
+      // Create header and write it
+      outStream.Seek(0, SeekOrigin.Begin);
+      header.FileSize = (int)outStream.Length;
+      header.SamplesPerSecond = track.SamplesPerSecond;
+      header.ChannelMask = track.ChannelMask;
+      header.Write(new BinaryWriter(outStream));
+    }
+
     public static void ExportMultichannel(AudioFile file, Stream outStream)
     {
       WaveHeader header = new WaveHeader(true);
