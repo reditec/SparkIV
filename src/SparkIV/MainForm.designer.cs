@@ -54,6 +54,7 @@ namespace SparkIV
             this.splitContainer = new System.Windows.Forms.SplitContainer();
             this.lvFiles = new System.Windows.Forms.ListView();
             this.lvcName = ((System.Windows.Forms.ColumnHeader)(new System.Windows.Forms.ColumnHeader()));
+            this.lvcType = ((System.Windows.Forms.ColumnHeader)(new System.Windows.Forms.ColumnHeader()));
             this.lvcSize = ((System.Windows.Forms.ColumnHeader)(new System.Windows.Forms.ColumnHeader()));
             this.lvcResource = ((System.Windows.Forms.ColumnHeader)(new System.Windows.Forms.ColumnHeader()));
             this.toolStripContainer1 = new System.Windows.Forms.ToolStripContainer();
@@ -71,8 +72,10 @@ namespace SparkIV
             this.tss2 = new System.Windows.Forms.ToolStripSeparator();
             this.tsbPreview = new System.Windows.Forms.ToolStripButton();
             this.tsbEdit = new System.Windows.Forms.ToolStripButton();
-            this.tslFilter = new System.Windows.Forms.ToolStripLabel();
             this.tstFilterBox = new System.Windows.Forms.ToolStripTextBox();
+            this.ssStatus = new System.Windows.Forms.StatusStrip();
+            this.tsslItems = new System.Windows.Forms.ToolStripStatusLabel();
+            this.tsslSelection = new System.Windows.Forms.ToolStripStatusLabel();
             this.tsContainer.ContentPanel.SuspendLayout();
             this.tsContainer.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.splitContainer)).BeginInit();
@@ -81,14 +84,19 @@ namespace SparkIV
             this.splitContainer.SuspendLayout();
             this.toolStripContainer1.ContentPanel.SuspendLayout();
             this.toolStripContainer1.TopToolStripPanel.SuspendLayout();
+            this.toolStripContainer1.BottomToolStripPanel.SuspendLayout();
             this.toolStripContainer1.SuspendLayout();
             this.tsToolbar.SuspendLayout();
+            this.ssStatus.SuspendLayout();
             this.SuspendLayout();
             // 
             // tvDir
             // 
             this.tvDir.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tvDir.HideSelection = false;
+            this.tvDir.HotTracking = true;
+            this.tvDir.ItemHeight = 20;
+            this.tvDir.ShowLines = false;
             this.tvDir.Location = new System.Drawing.Point(0, 0);
             this.tvDir.Name = "tvDir";
             this.tvDir.Size = new System.Drawing.Size(192, 100);
@@ -132,6 +140,7 @@ namespace SparkIV
             this.lvFiles.AllowDrop = true;
             this.lvFiles.Columns.AddRange(new System.Windows.Forms.ColumnHeader[] {
             this.lvcName,
+            this.lvcType,
             this.lvcSize,
             this.lvcResource});
             this.lvFiles.Dock = System.Windows.Forms.DockStyle.Fill;
@@ -151,17 +160,23 @@ namespace SparkIV
             // lvcName
             // 
             this.lvcName.Text = "Name";
-            this.lvcName.Width = 280;
-            // 
+            this.lvcName.Width = 260;
+            //
+            // lvcType
+            //
+            this.lvcType.Text = "Type";
+            this.lvcType.Width = 140;
+            //
             // lvcSize
-            // 
+            //
             this.lvcSize.Text = "Size";
+            this.lvcSize.TextAlign = System.Windows.Forms.HorizontalAlignment.Right;
             this.lvcSize.Width = 80;
-            // 
+            //
             // lvcResource
-            // 
+            //
             this.lvcResource.Text = "Resource";
-            this.lvcResource.Width = 100;
+            this.lvcResource.Width = 130;
             // 
             // toolStripContainer1
             // 
@@ -179,8 +194,12 @@ namespace SparkIV
             this.toolStripContainer1.Text = "toolStripContainer1";
             // 
             // toolStripContainer1.TopToolStripPanel
-            // 
+            //
             this.toolStripContainer1.TopToolStripPanel.Controls.Add(this.tsToolbar);
+            //
+            // toolStripContainer1.BottomToolStripPanel
+            //
+            this.toolStripContainer1.BottomToolStripPanel.Controls.Add(this.ssStatus);
             // 
             // tsToolbar
             // 
@@ -201,7 +220,6 @@ namespace SparkIV
             this.tss2,
             this.tsbPreview,
             this.tsbEdit,
-            this.tslFilter,
             this.tstFilterBox});
             this.tsToolbar.LayoutStyle = System.Windows.Forms.ToolStripLayoutStyle.HorizontalStackWithOverflow;
             this.tsToolbar.Location = new System.Drawing.Point(0, 0);
@@ -341,19 +359,36 @@ namespace SparkIV
             this.tsbEdit.TextImageRelation = System.Windows.Forms.TextImageRelation.ImageAboveText;
             this.tsbEdit.Click += new System.EventHandler(this.tsbEdit_Click);
             // 
-            // tslFilter
-            // 
-            this.tslFilter.Name = "tslFilter";
-            this.tslFilter.Size = new System.Drawing.Size(36, 51);
-            this.tslFilter.Text = "Fil&ter:";
-            // 
             // tstFilterBox
-            // 
+            //
+            this.tstFilterBox.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right;
+            this.tstFilterBox.Margin = new System.Windows.Forms.Padding(1, 0, 8, 0);
             this.tstFilterBox.Name = "tstFilterBox";
-            this.tstFilterBox.Size = new System.Drawing.Size(100, 54);
-            this.tstFilterBox.ToolTipText = "Type all or part of a file name.\r\nSearch is case-sensitive.";
-            this.tstFilterBox.Click += new System.EventHandler(this.tstFilterBox_Click);
+            this.tstFilterBox.Size = new System.Drawing.Size(180, 54);
+            this.tstFilterBox.ToolTipText = "Type all or part of a name to filter the list.";
             this.tstFilterBox.TextChanged += new System.EventHandler(this.tstFilterBox_TextChanged);
+            //
+            // ssStatus
+            //
+            this.ssStatus.Dock = System.Windows.Forms.DockStyle.None;
+            this.ssStatus.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.tsslItems,
+            this.tsslSelection});
+            this.ssStatus.Location = new System.Drawing.Point(0, 0);
+            this.ssStatus.Name = "ssStatus";
+            this.ssStatus.Size = new System.Drawing.Size(716, 22);
+            this.ssStatus.TabIndex = 0;
+            //
+            // tsslItems
+            //
+            this.tsslItems.BorderSides = System.Windows.Forms.ToolStripStatusLabelBorderSides.Right;
+            this.tsslItems.Name = "tsslItems";
+            this.tsslItems.Size = new System.Drawing.Size(0, 17);
+            //
+            // tsslSelection
+            //
+            this.tsslSelection.Name = "tsslSelection";
+            this.tsslSelection.Size = new System.Drawing.Size(0, 17);
             // 
             // MainForm
             // 
@@ -379,10 +414,14 @@ namespace SparkIV
             this.toolStripContainer1.ContentPanel.ResumeLayout(false);
             this.toolStripContainer1.TopToolStripPanel.ResumeLayout(false);
             this.toolStripContainer1.TopToolStripPanel.PerformLayout();
+            this.toolStripContainer1.BottomToolStripPanel.ResumeLayout(false);
+            this.toolStripContainer1.BottomToolStripPanel.PerformLayout();
             this.toolStripContainer1.ResumeLayout(false);
             this.toolStripContainer1.PerformLayout();
             this.tsToolbar.ResumeLayout(false);
             this.tsToolbar.PerformLayout();
+            this.ssStatus.ResumeLayout(false);
+            this.ssStatus.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -394,6 +433,7 @@ namespace SparkIV
         private System.Windows.Forms.SplitContainer splitContainer;
         private System.Windows.Forms.ListView lvFiles;
         private System.Windows.Forms.ColumnHeader lvcName;
+        private System.Windows.Forms.ColumnHeader lvcType;
         private System.Windows.Forms.ColumnHeader lvcSize;
         private System.Windows.Forms.ColumnHeader lvcResource;
         private System.Windows.Forms.ToolStripContainer toolStripContainer1;
@@ -411,7 +451,9 @@ namespace SparkIV
         private System.Windows.Forms.ToolStripSeparator tss2;
         private System.Windows.Forms.ToolStripButton tsbPreview;
         private System.Windows.Forms.ToolStripButton tsbEdit;
-        private System.Windows.Forms.ToolStripLabel tslFilter;
         private System.Windows.Forms.ToolStripTextBox tstFilterBox;
+        private System.Windows.Forms.StatusStrip ssStatus;
+        private System.Windows.Forms.ToolStripStatusLabel tsslItems;
+        private System.Windows.Forms.ToolStripStatusLabel tsslSelection;
     }
 }

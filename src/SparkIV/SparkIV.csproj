@@ -99,6 +99,9 @@
     <Compile Include="Editor\Textures\HyperTextTextureEditor.cs" />
     <Compile Include="Editor\Textures\ModelTextureEditor.cs" />
     <Compile Include="Editor\Textures\TextureEditor.cs" />
+    <Compile Include="Explorer\FileTypes.cs" />
+    <Compile Include="Explorer\NativeMethods.cs" />
+    <Compile Include="Explorer\ShellIcons.cs" />
     <Compile Include="ListViewItemComparer.cs" />
     <Compile Include="MainForm.cs">
       <SubType>Form</SubType>

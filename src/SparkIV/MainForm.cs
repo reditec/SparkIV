@@ -35,13 +35,14 @@ using File = RageLib.FileSystem.Common.File;
 using IODirectory = System.IO.Directory;
 using IOFile = System.IO.File;
 using Ookii.Dialogs.WinForms;
+using SparkIV.Explorer;
 
 namespace SparkIV
 {
   public partial class MainForm : ExtendedForm
   {
     private static readonly Color CustomDataForeColor = SystemColors.HotTrack;
-    private const int SizeColumn = 1;
+    private const int SizeColumn = 2;
 
     private FileSystem _fs;
     private int _sortColumn = -1;
@@ -51,6 +52,8 @@ namespace SparkIV
 
     private Directory _selectedDir;
 
+    private readonly ShellIcons _icons = new ShellIcons();
+
     public MainForm()
     {
       InitializeComponent();
@@ -59,11 +62,31 @@ namespace SparkIV
       tslAbout.Text = "SparkIV " + ver.Major + "." + ver.Minor + "." + ver.Build + " (Beta)" + "\n" +
                       "(C)2008-2019, Ahmed";
 
+      tvDir.ImageList = _icons.ImageList;
+      lvFiles.SmallImageList = _icons.ImageList;
+      lvFiles.ShowGroups = true;
+
+      // ListView.DoubleBuffered is protected; without it the Explorer theme flickers on hover.
+      typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(lvFiles, true, null);
+
       SetInitialUIState();
 
       lvFiles.AllowDrop = true;
       lvFiles.DragDrop += lvFiles_DragDrop;
       lvFiles.DragEnter += lvFiles_DragEnter;
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+      base.OnLoad(e);
+
+      // The same look as Windows Explorer: hover and selection highlight, chevrons instead of +/- in the tree.
+      NativeMethods.SetWindowTheme(lvFiles.Handle, "Explorer", null);
+      NativeMethods.SetWindowTheme(tvDir.Handle, "Explorer", null);
+      NativeMethods.SendMessage(tvDir.Handle, NativeMethods.TVM_SETEXTENDEDSTYLE,
+                                (IntPtr)(NativeMethods.TVS_EX_DOUBLEBUFFER | NativeMethods.TVS_EX_FADEINOUTEXPANDOS),
+                                (IntPtr)(NativeMethods.TVS_EX_DOUBLEBUFFER | NativeMethods.TVS_EX_FADEINOUTEXPANDOS));
+      NativeMethods.SendMessage(tstFilterBox.TextBox.Handle, NativeMethods.EM_SETCUEBANNER, (IntPtr)1, "Filter");
     }
 
     private void lvFiles_DragEnter(object sender, DragEventArgs e)
@@ -147,20 +170,10 @@ namespace SparkIV
       }
     }
 
-    private string FriendlySize(int size)
+    private static string FriendlySize(long size)
     {
-      if (size < 1024)
-      {
-        return size + " B";
-      }
-      else if (size < 1024 * 1024)
-      {
-        return size / (1024) + " KB";
-      }
-      else
-      {
-        return size / (1024 * 1024) + " MB";
-      }
+      // Like Explorer's details view: always whole kilobytes, rounded up.
+      return (size == 0 ? 0 : (size + 1023) / 1024).ToString("N0") + " KB";
     }
 
     private void PopulateListView()
@@ -185,58 +198,132 @@ namespace SparkIV
       lvFiles.BeginUpdate();
 
       lvFiles.Items.Clear();
+      lvFiles.Groups.Clear();
+
+      var groups = new Dictionary<string, ListViewGroup>();
+      var groupOrder = new Dictionary<ListViewGroup, int>();
 
       using (new WaitCursor(this))
       {
         foreach (var item in dir)
         {
-          if (!item.IsDirectory)
+          if (filterString != "" && item.Name.IndexOf(filterString, StringComparison.OrdinalIgnoreCase) < 0)
           {
-            File file = item as File;
+            continue;
+          }
 
-            if (filterString == "" || file.Name.IndexOf(filterString) > -1)
+          FileType type = item.IsDirectory ? FileTypes.Folder : FileTypes.ForFile(item.Name);
+
+          ListViewGroup group;
+          if (!groups.TryGetValue(type.Group, out group))
+          {
+            group = new ListViewGroup(type.Group);
+            groups.Add(type.Group, group);
+            groupOrder.Add(group, type.GroupOrder);
+          }
+
+          ListViewItem lvi = new ListViewItem(item.Name, group);
+          lvi.Tag = item;
+          lvi.ImageKey = item.IsDirectory ? _icons.KeyForFolder() : _icons.KeyFor(type);
+          lvi.SubItems.Add(type.Name);
+
+          File file = item as File;
+          if (file == null)
+          {
+            lvi.SubItems.Add("");
+            lvi.SubItems.Add("");
+          }
+          else
+          {
+            lvi.SubItems.Add(FriendlySize(file.Size));
+
+            /*
+            string compressed = file.IsCompressed ? "Yes (" + FriendlySize(file.CompressedSize) + ")" : "No";
+            lvi.SubItems.Add(compressed);
+             */
+
+            string resources = file.IsResource ? "Yes" : "No";
+            if (file.IsResource)
             {
+              string rscType = Enum.IsDefined(file.ResourceType.GetType(), file.ResourceType)
+                                   ?
+                                       file.ResourceType.ToString()
+                                   : string.Format("Unknown 0x{0:x}", (int)file.ResourceType);
+              resources += " (" + rscType + ")";
+            }
+            lvi.SubItems.Add(resources);
 
-              ListViewItem lvi = lvFiles.Items.Add(file.Name);
-              lvi.Tag = file;
-
-              lvi.SubItems.Add(FriendlySize(file.Size));
-
-              /*
-              string compressed = file.IsCompressed ? "Yes (" + FriendlySize(file.CompressedSize) + ")" : "No";
-              lvi.SubItems.Add(compressed);
-               */
-
-              string resources = file.IsResource ? "Yes" : "No";
-              if (file.IsResource)
-              {
-                string rscType = Enum.IsDefined(file.ResourceType.GetType(), file.ResourceType)
-                                     ?
-                                         file.ResourceType.ToString()
-                                     : string.Format("Unknown 0x{0:x}", (int)file.ResourceType);
-                resources += " (" + rscType + ")";
-              }
-              lvi.SubItems.Add(resources);
-
-              if (file.IsCustomData)
-              {
-                lvi.ForeColor = CustomDataForeColor;
-              }
-
-              if (selectedFileNames.Contains(file.Name))
-              {
-                lvi.Selected = true;
-              }
-
+            if (file.IsCustomData)
+            {
+              lvi.ForeColor = CustomDataForeColor;
             }
           }
+
+          lvFiles.Items.Add(lvi);
+
+          if (selectedFileNames.Contains(item.Name))
+          {
+            lvi.Selected = true;
+          }
         }
+      }
+
+      // Groups are shown in the order they were added: folders first, then the file types.
+      var ordered = new List<ListViewGroup>(groups.Values);
+      ordered.Sort((a, b) => groupOrder[a].CompareTo(groupOrder[b]));
+      foreach (var group in ordered)
+      {
+        group.Header = group.Header + " (" + group.Items.Count + ")";
+        lvFiles.Groups.Add(group);
       }
 
       lvFiles.EndUpdate();
 
       lvFiles.ListViewItemSorter = comparer;
       lvFiles.Sort();
+
+      UpdateStatus();
+    }
+
+    private void UpdateStatus()
+    {
+      if (_fs == null)
+      {
+        tsslItems.Text = "";
+        tsslSelection.Text = "";
+        return;
+      }
+
+      tsslItems.Text = lvFiles.Items.Count == 1 ? "1 item" : lvFiles.Items.Count + " items";
+
+      int count = lvFiles.SelectedItems.Count;
+      if (count == 0)
+      {
+        tsslSelection.Text = "";
+        return;
+      }
+
+      long size = 0;
+      bool onlyFiles = true;
+      foreach (ListViewItem item in lvFiles.SelectedItems)
+      {
+        File file = item.Tag as File;
+        if (file != null)
+        {
+          size += file.Size;
+        }
+        else
+        {
+          onlyFiles = false;
+        }
+      }
+
+      string text = count == 1 ? "1 item selected" : count + " items selected";
+      if (onlyFiles)
+      {
+        text += "  " + FriendlySize(size);
+      }
+      tsslSelection.Text = text;
     }
 
     private void CreateDirectoryNode(TreeNode node, Directory dir)
@@ -249,9 +336,38 @@ namespace SparkIV
         {
           Directory subdir = item as Directory;
           TreeNode subnode = node.Nodes.Add(subdir.Name);
+          subnode.ImageKey = subnode.SelectedImageKey = _icons.KeyForFolder();
           CreateDirectoryNode(subnode, subdir);
         }
       }
+    }
+
+    private void OpenDirectory(Directory dir)
+    {
+      TreeNode node = FindNode(tvDir.Nodes, dir);
+      if (node != null)
+      {
+        node.Expand();
+        tvDir.SelectedNode = node;
+      }
+    }
+
+    private static TreeNode FindNode(TreeNodeCollection nodes, Directory dir)
+    {
+      foreach (TreeNode node in nodes)
+      {
+        if (node.Tag == dir)
+        {
+          return node;
+        }
+
+        TreeNode found = FindNode(node.Nodes, dir);
+        if (found != null)
+        {
+          return found;
+        }
+      }
+      return null;
     }
 
     private void SetInitialUIState()
@@ -265,7 +381,6 @@ namespace SparkIV
       tsbExportSelected.Enabled = false;
       tsbPreview.Enabled = false;
       tsbEdit.Enabled = false;
-      tslFilter.Enabled = false;
       tstFilterBox.Enabled = false;
     }
 
@@ -278,21 +393,25 @@ namespace SparkIV
       tsbExportAll.Enabled = true;
       tsbImport.Enabled = true;
       tsbExportSelected.Enabled = true;
-      tslFilter.Enabled = true;
       tstFilterBox.Enabled = true;
 
       // Redisable some buttons (will be autoenabled based on selection)
       tsbPreview.Enabled = false;
       tsbEdit.Enabled = false;
 
-      _sortColumn = -1;
-      lvFiles.ListViewItemSorter = null;
+      // Sorted by name, like Explorer.
+      _sortColumn = 0;
+      lvFiles.Sorting = SortOrder.Ascending;
+      lvFiles.ListViewItemSorter = new ListViewItemComparer(0, false);
 
       splitContainer.Panel1Collapsed = !_fs.HasDirectoryStructure;
 
       tvDir.Nodes.Clear();
 
       TreeNode root = tvDir.Nodes.Add(_fs.RootDirectory.Name);
+      root.ImageKey = root.SelectedImageKey = _fs is RealFileSystem
+                                                ? _icons.KeyForFolder()
+                                                : _icons.KeyFor(FileTypes.ForFile(".rpf"));
       CreateDirectoryNode(root, _fs.RootDirectory);
 
       root.ExpandAll();
@@ -390,6 +509,15 @@ namespace SparkIV
       }
     }
 
+    /// <summary>
+    /// GTA IV: The Complete Edition: one GTAIV.exe and the episodes in the TLAD and TBoGT subfolders.
+    /// </summary>
+    private static bool IsCompleteEdition(string gamePath)
+    {
+      return IOFile.Exists(Path.Combine(gamePath, "GTAIV.exe")) &&
+             (IODirectory.Exists(Path.Combine(gamePath, "TBoGT")) || IODirectory.Exists(Path.Combine(gamePath, "TLAD")));
+    }
+
     private void LoadGameDirectory(KeyUtil keyUtil, string gameName)
     {
       using (new WaitCursor(this))
@@ -397,12 +525,36 @@ namespace SparkIV
         FileSystem fs = new RealFileSystem();
 
         string gamePath = keyUtil.FindGameDirectory();
+
+        // The Complete Edition has no EFLC.exe and only registers GTA IV: GTAIV.exe runs all three games and holds the same key.
+        if (keyUtil is KeyUtilEFLC && (gamePath == null || !IOFile.Exists(Path.Combine(gamePath, keyUtil.ExecutableName))))
+        {
+          string ivPath = new KeyUtilGTAIV().FindGameDirectory();
+          if (ivPath != null && IsCompleteEdition(ivPath))
+          {
+            gamePath = ivPath;
+          }
+        }
+
+        if (gamePath != null && !IOFile.Exists(Path.Combine(gamePath, keyUtil.ExecutableName)))
+        {
+          if (keyUtil is KeyUtilEFLC && IsCompleteEdition(gamePath))
+          {
+            keyUtil = new KeyUtilGTAIV();
+          }
+          else
+          {
+            gamePath = null;
+          }
+        }
+
         while (gamePath == null)
         {
           var fbd = new VistaFolderBrowserDialog
           {
             Description =
-                  "Could not find the " + gameName + " game directory. Please select the directory containing " + keyUtil.ExecutableName,
+                  "Could not find the " + gameName + " game directory. Please select the directory containing " + keyUtil.ExecutableName +
+                  (keyUtil is KeyUtilEFLC ? " (or GTAIV.exe of the Complete Edition)" : ""),
             ShowNewFolderButton = false
           };
 
@@ -417,6 +569,11 @@ namespace SparkIV
           }
           if (System.IO.File.Exists(Path.Combine(fbd.SelectedPath, keyUtil.ExecutableName)))
           {
+            gamePath = fbd.SelectedPath;
+          }
+          else if (keyUtil is KeyUtilEFLC && IsCompleteEdition(fbd.SelectedPath))
+          {
+            keyUtil = new KeyUtilGTAIV();
             gamePath = fbd.SelectedPath;
           }
         }
@@ -536,7 +693,7 @@ namespace SparkIV
     {
       if (_fs == null) return;
 
-      if (lvFiles.SelectedItems.Count == 1)
+      if (lvFiles.SelectedItems.Count == 1 && lvFiles.SelectedItems[0].Tag is File)
       {
         File file = lvFiles.SelectedItems[0].Tag as File;
 
@@ -567,7 +724,7 @@ namespace SparkIV
           }
         }
       }
-      else if (lvFiles.SelectedItems.Count > 1)
+      else if (lvFiles.SelectedItems.Count > 0)
       {
         FolderBrowserDialog fbd = new FolderBrowserDialog();
         fbd.Description = "Export Selected...";
@@ -585,8 +742,19 @@ namespace SparkIV
             foreach (ListViewItem item in lvFiles.SelectedItems)
             {
               File file = item.Tag as File;
-              byte[] data = file.GetData();
-              IOFile.WriteAllBytes(Path.Combine(path, file.Name), data);
+              if (file != null)
+              {
+                byte[] data = file.GetData();
+                IOFile.WriteAllBytes(Path.Combine(path, file.Name), data);
+              }
+              else
+              {
+                // A selected folder is exported with everything in it.
+                var dir = (Directory)item.Tag;
+                string dirPath = Path.Combine(path, dir.Name);
+                IODirectory.CreateDirectory(dirPath);
+                ExtractToPath(dir, dirPath + "\\");
+              }
             }
           }
 
@@ -712,7 +880,10 @@ namespace SparkIV
       if (lvFiles.SelectedItems.Count == 1)
       {
         var file = lvFiles.SelectedItems[0].Tag as File;
-        PreviewFile(file);
+        if (file != null)
+        {
+          PreviewFile(file);
+        }
       }
     }
 
@@ -722,7 +893,24 @@ namespace SparkIV
       if (lvFiles.SelectedItems.Count == 1)
       {
         var file = lvFiles.SelectedItems[0].Tag as File;
-        EditFile(file);
+        if (file != null)
+        {
+          EditFile(file);
+        }
+      }
+    }
+
+    /// <summary>Opens a folder or previews/edits a file, like a double-click in Explorer.</summary>
+    private void ActivateItem(ListViewItem item)
+    {
+      var dir = item.Tag as Directory;
+      if (dir != null)
+      {
+        OpenDirectory(dir);
+      }
+      else
+      {
+        PreviewOrEditFile(item.Tag as File);
       }
     }
 
@@ -742,9 +930,7 @@ namespace SparkIV
       ListViewHitTestInfo hitTest = lvFiles.HitTest(e.X, e.Y);
       if (hitTest.Item != null)
       {
-        var file = hitTest.Item.Tag as File;
-
-        PreviewOrEditFile(file);
+        ActivateItem(hitTest.Item);
       }
     }
 
@@ -754,12 +940,17 @@ namespace SparkIV
       {
         if (lvFiles.SelectedItems.Count == 1)
         {
-          var file = lvFiles.SelectedItems[0].Tag as File;
-          PreviewOrEditFile(file);
+          ActivateItem(lvFiles.SelectedItems[0]);
         }
       }
 
-      if (e.KeyCode == Keys.Delete)
+      if (e.KeyCode == Keys.Back && _selectedDir != null && _selectedDir.ParentDirectory != null)
+      {
+        OpenDirectory(_selectedDir.ParentDirectory);
+        e.Handled = true;
+      }
+
+      if (e.KeyCode == Keys.Delete && lvFiles.SelectedItems.Count > 0 && lvFiles.SelectedItems[0].Tag is File)
       {
         DialogResult dialogResult = MessageBox.Show("Are you sure to delete this file : " + lvFiles.SelectedItems[0].Text, "Delete", MessageBoxButtons.YesNo);
         if (dialogResult == DialogResult.Yes)
@@ -823,17 +1014,11 @@ namespace SparkIV
 
     private void lvFiles_SelectedIndexChanged(object sender, EventArgs e)
     {
-      if (lvFiles.SelectedItems.Count == 1)
-      {
-        var file = lvFiles.SelectedItems[0].Tag as File;
-        tsbPreview.Enabled = Viewers.HasViewer(file);
-        tsbEdit.Enabled = Editors.HasEditor(file);
-      }
-      else
-      {
-        tsbPreview.Enabled = false;
-        tsbEdit.Enabled = false;
-      }
+      var file = lvFiles.SelectedItems.Count == 1 ? lvFiles.SelectedItems[0].Tag as File : null;
+      tsbPreview.Enabled = file != null && Viewers.HasViewer(file);
+      tsbEdit.Enabled = file != null && Editors.HasEditor(file);
+
+      UpdateStatus();
     }
 
     private void MainForm_FormClosed(object sender, FormClosedEventArgs e)
@@ -842,6 +1027,7 @@ namespace SparkIV
       {
         _fs.Close();
       }
+      _icons.Dispose();
     }
 
     private void tslAbout_Click(object sender, EventArgs e)
@@ -850,11 +1036,6 @@ namespace SparkIV
     }
 
     #endregion
-
-    private void tstFilterBox_Click(object sender, EventArgs e)
-    {
-
-    }
 
     private void MainForm_Load(object sender, EventArgs e)
     {

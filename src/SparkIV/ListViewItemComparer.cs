@@ -62,9 +62,12 @@ namespace SparkIV
         }
         else
         {
+          // Folders have no size and sort before files.
           File fileX = ((ListViewItem)x).Tag as File;
           File fileY = ((ListViewItem)y).Tag as File;
-          return (fileX.Size - fileY.Size) * (_descending ? -1 : 1);
+          long sizeX = fileX != null ? fileX.Size : -1;
+          long sizeY = fileY != null ? fileY.Size : -1;
+          return sizeX.CompareTo(sizeY) * (_descending ? -1 : 1);
         }
       }
       catch
