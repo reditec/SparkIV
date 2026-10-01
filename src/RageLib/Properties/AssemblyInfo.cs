@@ -45,3 +45,6 @@ using System.Reflection;
 
 [assembly: AssemblyVersion("0.6.2.0")]
 [assembly: AssemblyFileVersion("0.6.2.0")]
+
+// RageLib uses WinForms, WPF, winmm and the registry.
+[assembly: System.Runtime.Versioning.SupportedOSPlatform("windows6.1")]

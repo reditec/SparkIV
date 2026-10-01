@@ -127,7 +127,7 @@ namespace RageLib.Common
         {
           var tempKey = new byte[32];
           fs.Seek(offset, SeekOrigin.Begin);
-          fs.Read(tempKey, 0, 32);
+          fs.ReadExactly(tempKey, 0, 32);
 
           var hash = BitConverter.ToString(SHA1.Create().ComputeHash(tempKey)).Replace("-", "");
           if (hash == validHash)

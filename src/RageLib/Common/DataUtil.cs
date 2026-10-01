@@ -31,16 +31,14 @@ namespace RageLib.Common
       byte[] data = new byte[dataIn.Length];
       dataIn.CopyTo(data, 0);
 
-      // Create our Rijndael class
-      Rijndael rj = Rijndael.Create();
-      rj.BlockSize = 128;
-      rj.KeySize = 256;
-      rj.Mode = CipherMode.ECB;
-      rj.Key = KeyStore.AESKey;
-      rj.IV = new byte[16];
-      rj.Padding = PaddingMode.None;
+      // AES-256 is Rijndael with a 128-bit block, which is what the archives use.
+      using Aes aes = Aes.Create();
+      aes.KeySize = 256;
+      aes.Mode = CipherMode.ECB;
+      aes.Key = KeyStore.AESKey;
+      aes.Padding = PaddingMode.None;
 
-      ICryptoTransform transform = rj.CreateDecryptor();
+      using ICryptoTransform transform = aes.CreateDecryptor();
 
       int dataLen = data.Length & ~0x0F;
 

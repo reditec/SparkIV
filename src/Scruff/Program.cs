@@ -47,22 +47,29 @@ namespace Scruff
 
     static int Main(string[] args)
     {
-      string gtaPath = KeyUtil.FindGTADirectory();
-      while (gtaPath == null)
+      // EFLC.exe, or GTAIV.exe (GTA IV and the Complete Edition, which has no EFLC.exe). Both hold the same key.
+      KeyUtil keyUtil = new KeyUtilEFLC();
+      string gtaPath = keyUtil.FindGameDirectory();
+      if (gtaPath == null || !File.Exists(Path.Combine(gtaPath, keyUtil.ExecutableName)))
+      {
+        keyUtil = new KeyUtilGTAIV();
+        gtaPath = keyUtil.FindGameDirectory();
+      }
+      if (gtaPath == null || !File.Exists(Path.Combine(gtaPath, keyUtil.ExecutableName)))
       {
         Console.Error.WriteLine("ERROR");
-        Console.Error.WriteLine("Could not find GTAIV directory. Please install GTAIV or copy EFLC.exe\n" +
-                            "to the same path as Scruff.");
+        Console.Error.WriteLine("Could not find the GTAIV or EFLC directory. Please install the game or copy\n" +
+                            "GTAIV.exe or EFLC.exe to the same path as Scruff.");
         return 1;
       }
 
-      byte[] key = KeyUtil.FindKey(gtaPath);
+      byte[] key = keyUtil.FindKey(gtaPath);
       if (key == null)
       {
         Console.Error.WriteLine("ERROR");
-        Console.Error.WriteLine("Your EFLC.exe seems to be modified or is a newer version than this tool\n" +
+        Console.Error.WriteLine("Your " + keyUtil.ExecutableName + " seems to be modified or is a newer version than this tool\n" +
                                 "supports. If it is a newer version, please check for an update of Scruff.\n" +
-                                "Scruff can not run without a supported EFLC.exe file.");
+                                "Scruff can not run without a supported " + keyUtil.ExecutableName + " file.");
         return 1;
       }
 

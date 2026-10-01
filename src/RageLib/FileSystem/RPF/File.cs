@@ -144,7 +144,7 @@ namespace RageLib.FileSystem.RPF
     {
       var buffer = new byte[length];
       _stream.Seek(offset, SeekOrigin.Begin);
-      _stream.Read(buffer, 0, length);
+      _stream.ReadAtLeast(buffer, length, throwOnEndOfStream: false);
       return buffer;
     }
 

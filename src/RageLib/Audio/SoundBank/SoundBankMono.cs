@@ -71,7 +71,7 @@ namespace RageLib.Audio.SoundBank
       }
 
       soundBankStream.Seek(Header.headerSize + waveInfo.offset + blockIndex * 2048, SeekOrigin.Begin);
-      soundBankStream.Read(block, 0, blockSize);
+      soundBankStream.ReadAtLeast(block.AsSpan(0, blockSize), blockSize, throwOnEndOfStream: false);
 
       int nibblePairCount = 0;
 

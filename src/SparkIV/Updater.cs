@@ -44,7 +44,7 @@ namespace SparkIV
 
         if (result == DialogResult.Yes)
         {
-          Process.Start(DownloadListUrl);
+          OpenUrl(DownloadListUrl);
         }
       }
       else
@@ -82,12 +82,12 @@ namespace SparkIV
 
               if (result == DialogResult.Yes)
               {
-                Process.Start(DownloadListUrl);
+                OpenUrl(DownloadListUrl);
               }
             }
             else
             {
-              Process.Start(url);
+              OpenUrl(url);
               Application.Exit();
             }
           }
@@ -101,14 +101,22 @@ namespace SparkIV
       }
     }
 
+    // On .NET (Core) Process.Start no longer goes through the shell, so a URL has to ask for it.
+    private static void OpenUrl(string url)
+    {
+      Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
     private static string GetWebString(string url)
     {
       string result;
       try
       {
-        var client = new System.Net.WebClient();
-        client.CachePolicy = new System.Net.Cache.RequestCachePolicy(System.Net.Cache.RequestCacheLevel.NoCacheNoStore);
-        result = client.DownloadString(url);
+        using (var client = new System.Net.Http.HttpClient())
+        {
+          client.DefaultRequestHeaders.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true, NoStore = true };
+          result = client.GetStringAsync(url).GetAwaiter().GetResult();
+        }
       }
       catch (Exception ex)
       {
