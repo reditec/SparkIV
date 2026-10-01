@@ -59,6 +59,7 @@ namespace SparkIV.WinUI.Viewers
       }
       ByExtension[".xml"] = new XmlViewer();
       ByExtension[".sco"] = new ScriptViewer();
+      ByExtension[".ivaud"] = new AudioViewer();
     }
 
     /// <summary>The hex view, for any file.</summary>

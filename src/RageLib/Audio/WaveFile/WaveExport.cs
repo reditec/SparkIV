@@ -23,7 +23,7 @@ using RageLib.Audio.SoundBank;
 
 namespace RageLib.Audio.WaveFile
 {
-  static class WaveExport
+  public static class WaveExport
   {
     public static void Export(AudioFile file, AudioWave wave, Stream outStream)
     {

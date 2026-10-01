@@ -39,7 +39,16 @@ namespace SparkIV.WinUI.Viewers
       AppWindow.Resize(new Windows.Graphics.SizeInt32(1100, 760));
 
       Root.Loaded += async (sender, args) => await LoadAsync();
+
+      // A view that holds something open (the audio view: its player and sound bank) is disposed with the window.
+      Closed += (sender, args) =>
+      {
+        _closed = true;
+        (ViewHost.Content as IDisposable)?.Dispose();
+      };
     }
+
+    private bool _closed;
 
     /// <summary>Puts the window in front of the main window and gives it the focus.</summary>
     public void BringToFront()
@@ -57,6 +66,11 @@ namespace SparkIV.WinUI.Viewers
       {
         byte[] data = await Task.Run(() => _file.GetData());
         object loaded = await Task.Run(() => _viewer.Load(_file, data));
+        if (_closed)
+        {
+          (loaded as IDisposable)?.Dispose();
+          return;
+        }
         var context = new ViewerContext(this, _file, data, ShowMessage);
         ViewHost.Content = _viewer.CreateView(context, loaded);
       }
