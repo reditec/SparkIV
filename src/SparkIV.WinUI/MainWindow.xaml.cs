@@ -51,6 +51,9 @@ namespace SparkIV.WinUI
 
       Closed += (sender, args) => _volumes.Dispose();
 
+      // Also when the list item has already handled the release itself.
+      FileList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(FileList_PointerReleased), true);
+
       UpdateSortHeaders();
       UpdateCommands();
     }
@@ -99,7 +102,7 @@ namespace SparkIV.WinUI
 
         ResetVolumes();
         Volume volume = await Task.Run(() => _volumes.OpenFolder(gamePath));
-        ShowVolume(volume, gameName + "  ·  " + gamePath);
+        ShowVolume(volume, gameName + "  \u00B7  " + gamePath);
       });
     }
 
@@ -223,11 +226,34 @@ namespace SparkIV.WinUI
         File file = item.File;
         await RunBusyAsync(async () => Navigate((await OpenNestedAsync(host, file)).Root));
       }
-      else
+      else if (item.File != null && Viewers.ViewerRegistry.Find(item.Name) is Viewers.IViewer viewer)
       {
-        ShowMessage(InfoBarSeverity.Informational, "No viewer yet",
-                    "Viewing " + item.TypeName + " files comes in a later step. Use Export to save the file.");
+        OpenViewer(item.File, viewer);
       }
+      else if (item.File != null)
+      {
+        File file = item.File;
+        string extension = System.IO.Path.GetExtension(item.Name);
+        string kind = extension.Length > 1 ? extension.ToLowerInvariant() + " files" : "files without an extension";
+        ShowMessage(InfoBarSeverity.Informational, "No viewer for " + kind + " yet",
+                    "SparkIV can't show " + item.Name + " (" + item.TypeName + ") yet. You can look at its bytes or export it.",
+                    "Open as binary", () => OpenViewer(file, Viewers.ViewerRegistry.Binary));
+      }
+    }
+
+    private void OpenViewer(File file, Viewers.IViewer viewer)
+    {
+      if (_current == null)
+      {
+        return;
+      }
+      string where = string.Join(" \u203A ", _current.Path().Select(l => l.Name));
+      OpenViewerWhenInputDone(() =>
+      {
+        var window = new Viewers.ViewerWindow(file, viewer, where);
+        window.Activate();
+        window.BringToFront();
+      });
     }
 
     #endregion
@@ -469,8 +495,50 @@ namespace SparkIV.WinUI
     {
       if ((e.OriginalSource as FrameworkElement)?.DataContext is EntryItem item)
       {
+        e.Handled = true;
+        _pointerStillDown = true;
         await ActivateAsync(item);
       }
+    }
+
+    // A double-click is reported on the second press. When the button goes up, the list focuses the
+    // item, which brings the main window back to the front; so a viewer window opens only after that.
+    private bool _pointerStillDown;
+    private Action? _pendingViewer;
+
+    private void OpenViewerWhenInputDone(Action open)
+    {
+      if (!_pointerStillDown)
+      {
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => open());
+        return;
+      }
+
+      _pendingViewer = open;
+
+      // In case the button goes up somewhere the list doesn't see it.
+      var timer = DispatcherQueue.CreateTimer();
+      timer.Interval = TimeSpan.FromMilliseconds(500);
+      timer.IsRepeating = false;
+      timer.Tick += (sender, args) => OpenPendingViewer();
+      timer.Start();
+    }
+
+    private void FileList_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+      _pointerStillDown = false;
+      if (_pendingViewer != null)
+      {
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, OpenPendingViewer);
+      }
+    }
+
+    private void OpenPendingViewer()
+    {
+      _pointerStillDown = false;
+      Action? open = _pendingViewer;
+      _pendingViewer = null;
+      open?.Invoke();
     }
 
     private async void FileList_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -492,6 +560,14 @@ namespace SparkIV.WinUI
       if (FileList.SelectedItem is EntryItem item)
       {
         await ActivateAsync(item);
+      }
+    }
+
+    private void ContextOpenBinary_Click(object sender, RoutedEventArgs e)
+    {
+      if (FileList.SelectedItem is EntryItem item && item.File != null)
+      {
+        OpenViewer(item.File, Viewers.ViewerRegistry.Binary);
       }
     }
 
@@ -672,21 +748,7 @@ namespace SparkIV.WinUI
 
     #region Helpers
 
-    private void ApplyCaptionButtonColors()
-    {
-      bool dark = Root.ActualTheme == ElementTheme.Dark;
-      byte c = dark ? (byte)0xFF : (byte)0x00;
-      var titleBar = AppWindow.TitleBar;
-
-      titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-      titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-      titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(0xFF, c, c, c);
-      titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(0x80, c, c, c);
-      titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(0x18, c, c, c);
-      titleBar.ButtonHoverForegroundColor = Windows.UI.Color.FromArgb(0xFF, c, c, c);
-      titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(0x30, c, c, c);
-      titleBar.ButtonPressedForegroundColor = Windows.UI.Color.FromArgb(0xFF, c, c, c);
-    }
+    private void ApplyCaptionButtonColors() => TitleBarColors.Apply(this, Root);
 
     private void UpdateCommands()
     {
@@ -718,11 +780,22 @@ namespace SparkIV.WinUI
       }
     }
 
-    private void ShowMessage(InfoBarSeverity severity, string title, string message)
+    private void ShowMessage(InfoBarSeverity severity, string title, string message, string? actionLabel = null, Action? action = null)
     {
       Info.Severity = severity;
       Info.Title = title;
       Info.Message = message;
+      Info.ActionButton = null;
+      if (actionLabel != null && action != null)
+      {
+        var button = new Button { Content = actionLabel };
+        button.Click += (sender, args) =>
+        {
+          Info.IsOpen = false;
+          action();
+        };
+        Info.ActionButton = button;
+      }
       Info.IsOpen = true;
     }
 

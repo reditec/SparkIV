@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --fg: rgba(255, 255, 255, 0.89);
+    --dim: rgba(255, 255, 255, 0.40);
+    --bg: #252525;
+    --edge: rgba(255, 255, 255, 0.08);
+    --thumb: rgba(255, 255, 255, 0.30);
+    --sel: rgba(0, 120, 212, 0.45);
+    --gw: 1ch;
+  }
+  body.light {
+    --fg: rgba(0, 0, 0, 0.89);
+    --dim: rgba(0, 0, 0, 0.40);
+    --bg: #fbfbfb;
+    --edge: rgba(0, 0, 0, 0.08);
+    --thumb: rgba(0, 0, 0, 0.30);
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    overflow: auto;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/19px "Cascadia Mono", Consolas, "Courier New", monospace;
+    tab-size: 4;
+    cursor: text;
+  }
+  /* Without wrapping the document is as wide as its longest line, so one line is always one row. */
+  #doc { width: max-content; min-width: 100%; padding: 6px 0; outline: none; caret-color: var(--fg); }
+  body.wrap #doc { width: auto; }
+  .b { content-visibility: auto; }
+  .l { display: flex; }
+  /* The number stays in view when scrolling sideways; it is not part of the text you select or copy. */
+  .n {
+    position: sticky; left: 0; flex: none; z-index: 1;
+    width: var(--gw); padding: 0 10px 0 12px;
+    text-align: right; color: var(--dim); background: var(--bg);
+    border-right: 1px solid var(--edge);
+    user-select: none; -webkit-user-modify: read-only; cursor: default;
+  }
+  .n::before { content: attr(data-n); }
+
+  /* Folding: a box in the gutter next to each "{" collapses the block up to its "}" */
+  body.folds .n { padding-right: 24px; }
+  .fb {
+    position: absolute; right: 6px; top: 4px; width: 9px; height: 9px;
+    border: 1px solid var(--dim); border-radius: 2px; cursor: pointer;
+  }
+  .fb::before, .fb::after { content: ""; position: absolute; background: var(--fg); }
+  .fb::before { left: 2px; right: 2px; top: 4px; height: 1px; }
+  .l.folded .fb::after { top: 2px; bottom: 2px; left: 4px; width: 1px; }
+  .fb:hover { border-color: var(--fg); }
+  .l.h { display: none; }
+  .l.folded .t::after {
+    content: "\2026" " }"; margin-left: 6px; padding: 0 4px;
+    color: var(--dim); border: 1px solid var(--edge); border-radius: 3px;
+  }
+  .l.flash .t { background: var(--edge); }
+  .t { white-space: pre; padding: 0 10px; }
+  body.wrap .t { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; min-width: 0; }
+  ::selection { background: var(--sel); }
+
+  /* Highlighting, in the colours of Visual Studio Code's Dark+ and Light+ themes */
+  .kw { color: #569cd6; } .cf { color: #c586c0; } .fn { color: #dcdcaa; } .na { color: #4ec9b0; }
+  .va { color: #9cdcfe; } .nu { color: #b5cea8; } .st { color: #ce9178; } .co { color: #6a9955; }
+  .op { color: #569cd6; } .lb { color: #4ec9b0; } .ad { color: var(--dim); }
+  body.light .kw, body.light .op { color: #0000ff; } body.light .cf { color: #af00db; } body.light .fn { color: #795e26; }
+  body.light .na, body.light .lb { color: #267f99; } body.light .va { color: #001080; } body.light .nu { color: #098658; }
+  body.light .st { color: #a31515; } body.light .co { color: #008000; }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: var(--thumb); background-clip: content-box; border: 4px solid transparent; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { border-width: 3px; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+</style>
+</head>
+<body>
+<!-- Editable only to get a real caret (click, arrow keys, Shift+arrows); every change is refused below. -->
+<div id="doc" contenteditable="true" spellcheck="false" autocorrect="off" autocapitalize="off" translate="no"></div>
+<script>
+  "use strict";
+  const doc = document.getElementById("doc");
+  const LINE_HEIGHT = 19;
+  const BLOCK = 256;
+  let lines = [""];
+  let language = "";
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>]/g, c => c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;");
+  }
+
+  // --- Syntax highlighting: each highlighter turns one line into HTML; the text itself stays unchanged ---
+
+  const span = (cls, s) => '<span class="' + cls + '">' + escapeHtml(s) + "</span>";
+
+  const SCRIPT_KEYWORDS = new Set(["void", "function", "auto", "var", "int", "float", "bool", "char", "true", "false", "params", "vars"]);
+  const SCRIPT_CONTROL = new Set(["if", "else", "while", "for", "do", "switch", "case", "default", "break", "continue", "return", "NOT", "AND", "OR"]);
+  const SCRIPT_TOKEN = /(\/\/.*)|("(?:[^"\\]|\\.)*"?)|(@[0-9a-fA-F]+\b)|(\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?f?\b)|([A-Za-z_][A-Za-z0-9_]*)(\s*\()?/g;
+  // "1a2: PushS 5" in the disassembly and the control-flow view.
+  const SCRIPT_ADDRESS = /^(\s*)([0-9a-fA-F]+)(: )([A-Za-z_][A-Za-z0-9_]*)?/;
+
+  function highlightScript(line) {
+    let out = "";
+    let rest = 0;
+    const address = SCRIPT_ADDRESS.exec(line);
+    if (address) {
+      out = escapeHtml(address[1]) + span("ad", address[2] + address[3]) + (address[4] ? span("op", address[4]) : "");
+      rest = address[0].length;
+    }
+    SCRIPT_TOKEN.lastIndex = rest;
+    let m;
+    while ((m = SCRIPT_TOKEN.exec(line)) !== null) {
+      out += escapeHtml(line.substring(rest, m.index));
+      rest = SCRIPT_TOKEN.lastIndex;
+      if (m[1] !== undefined) out += span("co", m[1]);
+      else if (m[2] !== undefined) out += span("st", m[2]);
+      else if (m[3] !== undefined) out += span("lb", m[3]);
+      else if (m[4] !== undefined) out += span("nu", m[4]);
+      else {
+        const word = m[5];
+        const call = m[6] || "";
+        let cls = "";
+        if (SCRIPT_CONTROL.has(word)) cls = "cf";
+        else if (SCRIPT_KEYWORDS.has(word)) cls = "kw";
+        else if (call) cls = /^[A-Z0-9_]+$/.test(word) && /[A-Z]/.test(word) ? "na" : "fn";
+        else if (/^(?:var|temp)\d+$|^[lg]_|^[GL]$/.test(word)) cls = "va";
+        out += (cls ? span(cls, word) : escapeHtml(word)) + escapeHtml(call);
+      }
+    }
+    return out + escapeHtml(line.substring(rest));
+  }
+
+  // Game data files (.dat, .ide, .ipl ...): # comments, section names, numbers.
+  // A name at the start of a line followed by values ("minMoveForce  0" in .tune, "ADMIRAL 1800.0 ..." in handling.dat) is a key.
+  const DATA_TOKEN = /(#.*|\/\/.*)|("(?:[^"\\]|\\.)*"?)|((?:^|(?<=[\s,]))-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?=[\s,]|$))|(^\s*[a-z][a-z0-9_]*\s*$)|(^\s*[A-Za-z_][\w.]*(?=[ \t]+\S))/g;
+
+  function highlightData(line) {
+    let out = "";
+    let rest = 0;
+    let m;
+    DATA_TOKEN.lastIndex = 0;
+    while ((m = DATA_TOKEN.exec(line)) !== null) {
+      if (m[0].length === 0) { DATA_TOKEN.lastIndex++; continue; }
+      out += escapeHtml(line.substring(rest, m.index));
+      rest = DATA_TOKEN.lastIndex;
+      if (m[5] !== undefined) {
+        // Keep the indentation outside the coloured key.
+        const key = m[0].trimStart();
+        out += escapeHtml(m[0].substring(0, m[0].length - key.length)) + span("va", key);
+      } else {
+        out += span(m[1] !== undefined ? "co" : m[2] !== undefined ? "st" : m[3] !== undefined ? "nu" : "kw", m[0]);
+      }
+    }
+    return out + escapeHtml(line.substring(rest));
+  }
+
+  // XML: tags, attributes, values and comments, which may run over several lines.
+  const XML_TOKEN = /(<!--)|(<\/?[\w:.-]+|<\?[\w:.-]+|\/?>|\?>)|([\w:.-]+)(?==)|("[^"]*"?|'[^']*'?)/g;
+
+  function highlightXml(line, state) {
+    let out = "";
+    let i = 0;
+    while (i < line.length) {
+      if (state.comment) {
+        const end = line.indexOf("-->", i);
+        const stop = end < 0 ? line.length : end + 3;
+        out += span("co", line.substring(i, stop));
+        i = stop;
+        if (end >= 0) state.comment = false;
+        continue;
+      }
+      XML_TOKEN.lastIndex = i;
+      const m = XML_TOKEN.exec(line);
+      if (!m) { out += escapeHtml(line.substring(i)); break; }
+      out += escapeHtml(line.substring(i, m.index));
+      i = XML_TOKEN.lastIndex;
+      if (m[1] !== undefined) { state.comment = true; i = m.index; }
+      else if (m[2] !== undefined) { out += span("kw", m[2]); state.inTag = !m[2].endsWith(">"); }
+      else if (m[3] !== undefined) out += state.inTag ? span("va", m[3]) : escapeHtml(m[3]);
+      else out += state.inTag ? span("st", m[4]) : escapeHtml(m[4]);
+    }
+    return out;
+  }
+
+  function highlighter(name) {
+    let render;
+    if (name === "script") render = highlightScript;
+    else if (name === "data") render = highlightData;
+    else if (name === "xml") { const state = { comment: false, inTag: false }; render = line => highlightXml(line, state); }
+    else return escapeHtml;
+    return line => line.length > LONG_LINE ? highlightLong(line, render) : render(line);
+  }
+
+  // A line with tens of thousands of tokens (the variable list of a big script) would become as many
+  // elements, and every fold, scroll or caret move would have to lay all of them out again. Only its
+  // start is highlighted token by token; the rest is a single piece of text.
+  const LONG_LINE = 2000;
+
+  function highlightLong(line, render) {
+    let cut = line.lastIndexOf(" ", LONG_LINE);
+    if (cut <= 0) cut = LONG_LINE;
+    const rest = line.substring(cut);
+    // The rest of "auto var2, var3, ..." is variables only, so it keeps their colour.
+    const cls = language === "script" && /^\s*auto\s/.test(line) ? "va" : "";
+    return render(line.substring(0, cut)) + (cls ? span(cls, rest) : escapeHtml(rest));
+  }
+
+  function show(text, lang) {
+    if (lang !== undefined) language = lang || "";
+    const render = highlighter(language);
+    lines = text.split(/\r\n|\r|\n/);
+    findFolds();
+    document.documentElement.style.setProperty("--gw", String(lines.length).length + "ch");
+    // Lines are grouped in blocks the browser can skip while they're off screen.
+    const parts = [];
+    for (let b = 0; b < lines.length; b += BLOCK) {
+      const end = Math.min(lines.length, b + BLOCK);
+      parts.push('<div class="b" style="contain-intrinsic-size:auto 0px auto ', (end - b) * LINE_HEIGHT, 'px">');
+      for (let i = b; i < end; i++) {
+        parts.push('<div class="l"><span class="n" data-n="', i + 1, '">', foldEnds[i] >= 0 ? '<b class="fb"></b>' : "",
+          '</span><span class="t">', render(lines[i]), "</span></div>");
+      }
+      parts.push("</div>");
+    }
+    doc.innerHTML = parts.join("");
+    lineElements = Array.from(doc.getElementsByClassName("l"));
+    getSelection().removeAllRanges();
+    window.scrollTo(0, 0);
+    report();
+  }
+
+  // --- Folding ---
+
+  let lineElements = [];
+  let foldEnds = new Int32Array(1).fill(-1);  // For a line with "{": the line of its "}", else -1.
+  const folded = new Set();
+
+  function findFolds() {
+    foldEnds = new Int32Array(lines.length).fill(-1);
+    folded.clear();
+    // Scripts, and data files with { } blocks (.tune).
+    const canFold = language === "script" || language === "data";
+    document.body.classList.toggle("folds", canFold);
+    if (!canFold) return;
+    const open = [];
+    for (let i = 0; i < lines.length; i++) {
+      const s = lines[i].trim();
+      if (s === "{") open.push(i);
+      else if (s === "}" && open.length) {
+        const start = open.pop();
+        if (i > start + 1) foldEnds[start] = i;
+      }
+    }
+  }
+
+  function fold(i) {
+    if (foldEnds[i] < 0 || folded.has(i)) return;
+    folded.add(i);
+    lineElements[i].classList.add("folded");
+    for (let k = i + 1; k <= foldEnds[i]; k++) lineElements[k].classList.add("h");
+    // A caret inside the block moves to the folded line.
+    const s = getSelection();
+    if (s.rangeCount && s.focusNode && doc.contains(s.focusNode)) {
+      const at = point(s.focusNode, s.focusOffset).i;
+      if (at > i && at <= foldEnds[i]) s.collapse(lineElements[i].lastChild, lineElements[i].lastChild.childNodes.length);
+    }
+  }
+
+  function unfold(i) {
+    if (!folded.delete(i)) return;
+    lineElements[i].classList.remove("folded");
+    // Blocks folded inside this one stay folded.
+    let k = i + 1;
+    while (k <= foldEnds[i]) {
+      lineElements[k].classList.remove("h");
+      k = folded.has(k) ? foldEnds[k] + 1 : k + 1;
+    }
+  }
+
+  function toggleFold(i) { folded.has(i) ? unfold(i) : fold(i); }
+
+  /** Folds or unfolds every block. */
+  function foldAll(on) {
+    if (on) {
+      for (let i = lines.length - 1; i >= 0; i--) if (foldEnds[i] >= 0) fold(i);
+    } else {
+      for (const i of Array.from(folded).sort((a, b) => a - b)) unfold(i);
+    }
+  }
+
+  // The fold box reacts to the mouse without moving the caret.
+  doc.addEventListener("mousedown", e => {
+    if (e.target.classList && e.target.classList.contains("fb")) {
+      e.preventDefault();
+      toggleFold(indexOf(e.target.closest(".l")));
+    }
+  });
+
+  /** Shows a line (unfolding what hides it), scrolls it to the top and puts the caret at its start. */
+  function goToLine(n) {
+    const i = Math.max(0, Math.min(lines.length - 1, n - 1));
+    for (const start of Array.from(folded).sort((a, b) => a - b)) {
+      if (start < i && i <= foldEnds[start]) unfold(start);
+    }
+    const el = lineElements[i];
+    doc.focus({ preventScroll: true });
+    getSelection().collapse(el.lastChild, 0);
+    el.scrollIntoView({ block: "start" });
+    window.scrollBy(0, -LINE_HEIGHT);
+    window.scrollTo(0, window.scrollY);
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 700);
+  }
+
+  function setWrap(on) { document.body.classList.toggle("wrap", on); }
+
+  function setTheme(dark, selection) {
+    document.body.classList.toggle("light", !dark);
+    if (selection) {
+      document.documentElement.style.setProperty("--sel", selection);
+    }
+  }
+
+  // --- Mapping a DOM selection point to (line, column) of the text ---
+
+  const isLine = el => el && el.nodeType === 1 && el.classList.contains("l");
+  const indexOf = l => +l.firstChild.dataset.n - 1;
+
+  function firstLine(el) {
+    while (el && !isLine(el)) el = el.firstElementChild;
+    return el;
+  }
+
+  function lastLine(el) {
+    while (el && !isLine(el)) el = el.lastElementChild;
+    return el;
+  }
+
+  function point(node, offset) {
+    let l = node;
+    while (l && !isLine(l)) l = l.parentNode;
+    if (l) {
+      const i = indexOf(l);
+      const t = l.lastChild;
+      if (node === l) return { i: i, c: offset <= 1 ? 0 : lines[i].length };
+      if (!t.contains(node)) return { i: i, c: 0 };
+      // The line's text may be split into highlighting spans: count the characters before the point.
+      const before = document.createRange();
+      before.setStart(t, 0);
+      before.setEnd(node, offset);
+      return { i: i, c: before.toString().length };
+    }
+    // A point between lines or blocks.
+    const next = firstLine(node.childNodes[offset]);
+    if (next) return { i: indexOf(next), c: 0 };
+    const prev = lastLine(offset > 0 ? node.childNodes[offset - 1] : null) || lastLine(doc);
+    if (prev) { const i = indexOf(prev); return { i: i, c: lines[i].length }; }
+    return { i: 0, c: 0 };
+  }
+
+  function selectedRange() {
+    const s = getSelection();
+    if (!s.rangeCount || s.isCollapsed) return null;
+    const r = s.getRangeAt(0);
+    return { a: point(r.startContainer, r.startOffset), b: point(r.endContainer, r.endOffset) };
+  }
+
+  // Copies from the original lines, so the result is exactly the text, with Windows line breaks.
+  document.addEventListener("copy", e => {
+    const r = selectedRange();
+    let text = "";
+    if (r) {
+      if (r.a.i === r.b.i) {
+        text = lines[r.a.i].substring(r.a.c, r.b.c);
+      } else {
+        const out = [lines[r.a.i].substring(r.a.c)];
+        for (let i = r.a.i + 1; i < r.b.i; i++) out.push(lines[i]);
+        out.push(lines[r.b.i].substring(0, r.b.c));
+        text = out.join("\r\n");
+      }
+    }
+    e.clipboardData.setData("text/plain", text);
+    e.preventDefault();
+  });
+
+  document.addEventListener("dragstart", e => e.preventDefault());
+
+  // The text is read-only: typing, pasting, cutting, dropping and undo are all refused.
+  doc.addEventListener("beforeinput", e => e.preventDefault());
+  for (const name of ["paste", "cut", "drop"]) {
+    document.addEventListener(name, e => e.preventDefault());
+  }
+  // Input that can't be cancelled (e.g. from an IME) is undone by showing the text again.
+  doc.addEventListener("input", () => {
+    const x = window.scrollX, y = window.scrollY;
+    show(lines.join("\n"));
+    window.scrollTo(x, y);
+  });
+
+  // --- Caret position for the status line of the viewer ---
+
+  let reportPending = false;
+  function report() {
+    if (reportPending) return;
+    reportPending = true;
+    requestAnimationFrame(() => {
+      reportPending = false;
+      const s = getSelection();
+      let at = { i: 0, c: 0 };
+      if (s.rangeCount && s.focusNode && doc.contains(s.focusNode)) at = point(s.focusNode, s.focusOffset);
+      let selected = 0;
+      const r = selectedRange();
+      if (r) {
+        if (r.a.i === r.b.i) {
+          selected = r.b.c - r.a.c;
+        } else {
+          selected = lines[r.a.i].length - r.a.c + r.b.c + (r.b.i - r.a.i);
+          for (let i = r.a.i + 1; i < r.b.i; i++) selected += lines[i].length;
+        }
+      }
+      post({ type: "caret", line: at.i + 1, column: at.c + 1, selected: Math.max(0, selected) });
+    });
+  }
+  document.addEventListener("selectionchange", report);
+
+  // --- Messages from and to SparkIV ---
+
+  function post(message) {
+    if (window.chrome && chrome.webview) chrome.webview.postMessage(message);
+  }
+
+  if (window.chrome && chrome.webview) {
+    chrome.webview.addEventListener("message", e => {
+      const m = e.data;
+      if (m.type === "text") show(m.text, m.language);
+      else if (m.type === "wrap") setWrap(m.on);
+      else if (m.type === "theme") setTheme(m.dark, m.selection);
+      else if (m.type === "goto") goToLine(m.line);
+      else if (m.type === "foldAll") foldAll(m.on);
+    });
+  }
+  post({ type: "ready" });
+</script>
+</body>
+</html>

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --fg: rgba(255, 255, 255, 0.89);
+    --dim: rgba(255, 255, 255, 0.40);
+    --faint: rgba(255, 255, 255, 0.22);
+    --bg: #252525;
+    --edge: rgba(255, 255, 255, 0.08);
+    --thumb: rgba(255, 255, 255, 0.30);
+    --sel: rgba(0, 120, 212, 0.45);
+    --hover: rgba(255, 255, 255, 0.06);
+  }
+  body.light {
+    --fg: rgba(0, 0, 0, 0.89);
+    --dim: rgba(0, 0, 0, 0.45);
+    --faint: rgba(0, 0, 0, 0.25);
+    --bg: #fbfbfb;
+    --edge: rgba(0, 0, 0, 0.08);
+    --thumb: rgba(0, 0, 0, 0.30);
+    --hover: rgba(0, 0, 0, 0.05);
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    overflow: auto;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/19px "Cascadia Mono", Consolas, "Courier New", monospace;
+    user-select: none;
+    cursor: default;
+  }
+  /* The rows on screen stay in place; the empty space below gives the scroll bar its length. */
+  #view { position: sticky; top: 0; height: 100vh; overflow: hidden; width: max-content; min-width: 100%; }
+  #space { width: 1px; }
+  .r { display: flex; white-space: pre; padding-left: 12px; }
+  #head { color: var(--dim); border-bottom: 1px solid var(--edge); margin-bottom: 4px; padding-top: 4px; padding-bottom: 2px; }
+  .o { width: 9ch; padding-right: 10px; margin-right: 10px; color: var(--dim); border-right: 1px solid var(--edge); text-align: right; }
+  #head .o { border-right-color: transparent; }
+  .hx { margin-right: 10px; padding-right: 10px; border-right: 1px solid var(--edge); }
+  #head .hx { border-right-color: transparent; }
+  .b { display: inline-block; width: 2ch; padding: 0 0.5ch; text-align: center; }
+  .b.g { margin-left: 1ch; }
+  .a { display: inline-block; width: 1ch; }
+  .z { color: var(--faint); }
+  .np { color: var(--dim); }
+  .b:hover, .a:hover { background: var(--hover); }
+  .s { background: var(--sel); }
+  /* The caret: a frame around the byte, in the column the keyboard is in, an underline in the other. */
+  .c { box-shadow: inset 0 0 0 1px var(--fg); }
+  .c2 { box-shadow: inset 0 -2px 0 var(--fg); }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: var(--thumb); background-clip: content-box; border: 4px solid transparent; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { border-width: 3px; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+</style>
+</head>
+<body>
+<div id="view"><div id="head" class="r"></div><div id="rows"></div></div>
+<div id="space"></div>
+<script>
+  "use strict";
+  const ROW = 19;              // Line height in px
+  const MAX_SPACE = 8000000;   // Browsers can't make an element arbitrarily tall; beyond this the scroll bar is scaled.
+  const view = document.getElementById("view");
+  const head = document.getElementById("head");
+  const rowsEl = document.getElementById("rows");
+  const space = document.getElementById("space");
+
+  let data = new Uint8Array(0);
+  let rowCount = 1;
+  let firstRow = 0;          // First row on screen
+  let visible = 1;      // Rows that fit on screen
+  let caret = 0;
+  let anchor = 0;
+  let column = "hex";   // Where the keyboard is: "hex" or "ascii"
+  let dragging = false;
+
+  const hex2 = v => (v < 16 ? "0" : "") + v.toString(16).toUpperCase();
+  const hex8 = v => v.toString(16).toUpperCase().padStart(8, "0");
+
+  function buildHead() {
+    let h = '<span class="o">Offset</span><span class="hx">';
+    for (let c = 0; c < 16; c++) h += '<span class="b' + (c === 8 ? " g" : "") + '">' + hex2(c) + "</span>";
+    h += '</span><span class="as">';
+    for (let c = 0; c < 16; c++) h += '<span class="a">' + c.toString(16).toUpperCase() + "</span>";
+    head.innerHTML = h + "</span>";
+  }
+
+  function setData(base64) {
+    const raw = atob(base64);
+    data = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) data[i] = raw.charCodeAt(i);
+    rowCount = Math.max(1, Math.ceil(data.length / 16));
+    caret = anchor = 0;
+    layout();
+    scrollToRow(0);
+    report();
+  }
+
+  // --- Scrolling: the scroll bar position maps to the first row on screen ---
+
+  const maxTop = () => Math.max(0, rowCount - visible);
+  const spaceHeight = () => Math.min(maxTop() * ROW, MAX_SPACE);
+
+  function layout() {
+    visible = Math.max(1, Math.floor((window.innerHeight - head.offsetHeight - 6) / ROW));
+    space.style.height = spaceHeight() + "px";
+    firstRow = Math.min(firstRow, maxTop());
+    render();
+  }
+
+  function rowFromScroll() {
+    const h = spaceHeight();
+    if (h <= 0) return 0;
+    return maxTop() * ROW <= MAX_SPACE ? Math.round(window.scrollY / ROW) : Math.round(window.scrollY / h * maxTop());
+  }
+
+  function scrollToRow(row) {
+    firstRow = Math.max(0, Math.min(maxTop(), row));
+    const y = maxTop() * ROW <= MAX_SPACE ? firstRow * ROW : (maxTop() ? firstRow / maxTop() * spaceHeight() : 0);
+    ignoreScroll = true;
+    window.scrollTo(window.scrollX, y);
+    render();
+  }
+
+  let ignoreScroll = false;
+  window.addEventListener("scroll", () => {
+    if (ignoreScroll) { ignoreScroll = false; return; }
+    const row = rowFromScroll();
+    if (row !== firstRow) { firstRow = row; render(); }
+  });
+
+  // The wheel moves a few rows, also when the scroll bar is scaled.
+  window.addEventListener("wheel", e => {
+    if (e.ctrlKey || e.shiftKey) return;
+    e.preventDefault();
+    scrollToRow(firstRow + Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / ROW)));
+  }, { passive: false });
+
+  window.addEventListener("resize", layout);
+
+  // --- Drawing the rows on screen ---
+
+  function render() {
+    const lo = Math.min(caret, anchor), hi = Math.max(caret, anchor);
+    const parts = [];
+    const end = Math.min(rowCount, firstRow + visible + 1);
+    for (let r = firstRow; r < end; r++) {
+      const base = r * 16;
+      parts.push('<div class="r"><span class="o">', hex8(base), '</span><span class="hx">');
+      let ascii = "";
+      for (let c = 0; c < 16; c++) {
+        const i = base + c;
+        let cls = c === 8 ? " g" : "";
+        if (i >= data.length) {
+          parts.push('<span class="b', cls, '"> </span>');
+          ascii += '<span class="a"> </span>';
+          continue;
+        }
+        const v = data[i];
+        const inSel = i >= lo && i <= hi && hi > lo;
+        const sel = inSel ? " s" : "";
+        const cur = i === caret ? (column === "hex" ? " c" : " c2") : "";
+        const cur2 = i === caret ? (column === "ascii" ? " c" : " c2") : "";
+        parts.push('<span class="b', cls, v === 0 ? " z" : "", sel, cur, '" data-o="', i, '">', hex2(v), "</span>");
+        const printable = v >= 0x20 && v < 0x7f;
+        const ch = printable ? (v === 0x26 ? "&amp;" : v === 0x3c ? "&lt;" : v === 0x3e ? "&gt;" : String.fromCharCode(v)) : ".";
+        ascii += '<span class="a' + (printable ? "" : " np") + sel + cur2 + '" data-o="' + i + '" data-a="1">' + ch + "</span>";
+      }
+      parts.push('</span><span class="as">', ascii, "</span></div>");
+    }
+    rowsEl.innerHTML = parts.join("");
+  }
+
+  // --- Caret and selection ---
+
+  function moveCaret(to, extend) {
+    caret = Math.max(0, Math.min(data.length - 1, to));
+    if (!extend) anchor = caret;
+    const row = Math.floor(caret / 16);
+    if (row < firstRow) scrollToRow(row);
+    else if (row >= firstRow + visible) scrollToRow(row - visible + 1);
+    else render();
+    report();
+  }
+
+  function report() {
+    const lo = Math.min(caret, anchor), hi = Math.max(caret, anchor);
+    post({ type: "caret", offset: caret, start: lo, length: data.length ? hi - lo + 1 : 0 });
+  }
+
+  function byteAt(target) {
+    const el = target.closest && target.closest("[data-o]");
+    return el ? { offset: +el.dataset.o, ascii: el.dataset.a === "1" } : null;
+  }
+
+  rowsEl.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    const hit = byteAt(e.target);
+    if (!hit) return;
+    column = hit.ascii ? "ascii" : "hex";
+    dragging = true;
+    moveCaret(hit.offset, e.shiftKey);
+  });
+
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const hit = byteAt(e.target);
+    if (hit) { moveCaret(hit.offset, true); return; }
+    // Dragging past the top or bottom scrolls on.
+    const rect = rowsEl.getBoundingClientRect();
+    if (e.clientY > window.innerHeight - 4) moveCaret(caret + 16, true);
+    else if (e.clientY < rect.top) moveCaret(caret - 16, true);
+  });
+
+  window.addEventListener("mouseup", () => { dragging = false; });
+
+  document.addEventListener("keydown", e => {
+    const ext = e.shiftKey;
+    let to = null;
+    switch (e.key) {
+      case "ArrowLeft": to = caret - 1; break;
+      case "ArrowRight": to = caret + 1; break;
+      case "ArrowUp": to = caret - 16; break;
+      case "ArrowDown": to = caret + 16; break;
+      case "PageUp": to = caret - 16 * visible; break;
+      case "PageDown": to = caret + 16 * visible; break;
+      case "Home": to = e.ctrlKey ? 0 : caret - caret % 16; break;
+      case "End": to = e.ctrlKey ? data.length - 1 : caret - caret % 16 + 15; break;
+      case "Tab": column = column === "hex" ? "ascii" : "hex"; render(); e.preventDefault(); return;
+    }
+    if (to !== null) {
+      e.preventDefault();
+      if (to < 0 && (e.key === "ArrowUp" || e.key === "PageUp")) to = caret % 16;
+      moveCaret(to, ext);
+      return;
+    }
+    if (e.ctrlKey && (e.key === "a" || e.key === "A")) {
+      e.preventDefault();
+      anchor = 0;
+      caret = Math.max(0, data.length - 1);
+      render();
+      report();
+    } else if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+      e.preventDefault();
+      const lo = Math.min(caret, anchor), hi = Math.max(caret, anchor);
+      post({ type: "copy", start: lo, length: hi - lo + 1, ascii: column === "ascii" });
+    }
+  });
+
+  function goTo(offset) {
+    if (!data.length) return;
+    offset = Math.max(0, Math.min(data.length - 1, offset));
+    const row = Math.floor(offset / 16);
+    caret = anchor = offset;
+    scrollToRow(Math.max(0, row - Math.floor(visible / 3)));
+    report();
+  }
+
+  function setTheme(dark, selection) {
+    document.body.classList.toggle("light", !dark);
+    if (selection) document.documentElement.style.setProperty("--sel", selection);
+  }
+
+  // --- Messages from and to SparkIV ---
+
+  function post(message) {
+    if (window.chrome && chrome.webview) chrome.webview.postMessage(message);
+  }
+
+  if (window.chrome && chrome.webview) {
+    chrome.webview.addEventListener("message", e => {
+      const m = e.data;
+      if (m.type === "data") setData(m.base64);
+      else if (m.type === "goto") goTo(m.offset);
+      else if (m.type === "theme") setTheme(m.dark, m.selection);
+    });
+  }
+
+  buildHead();
+  layout();
+  post({ type: "ready" });
+</script>
+</body>
+</html>

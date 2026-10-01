@@ -205,6 +205,9 @@
                                 <MenuFlyoutItem Text="Open" Click="ContextOpen_Click">
                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8E5;" /></MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
+                                <MenuFlyoutItem x:Name="OpenBinaryItem" Text="Open as binary" Click="ContextOpenBinary_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE943;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Export…" Click="Export_Click">
                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>

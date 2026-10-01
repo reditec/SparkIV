@@ -28,6 +28,8 @@
 
   <ItemGroup>
     <Content Include="..\GTAIV.ico" Link="GTAIV.ico" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Viewers\TextDocumentView.html" LogicalName="SparkIV.TextDocumentView.html" />
+    <EmbeddedResource Include="Viewers\HexView.html" LogicalName="SparkIV.HexView.html" />
   </ItemGroup>
 
   <ItemGroup>
