@@ -191,6 +191,16 @@
     return [f(0), f(8), f(4)];
   }
 
+  // The same meshes with new textures (one was replaced): the old textures go, the new ones are loaded.
+  function setMaterials(list) {
+    for (const material of materials.values()) {
+      if (material.texture) gl.deleteTexture(material.texture);
+    }
+    materials.clear();
+    for (const m of list) addMaterial(m);
+    draw();
+  }
+
   function setScene(scene) {
     for (const m of scene.materials) addMaterial(m);
     for (const m of scene.meshes) addMesh(m);
@@ -363,6 +373,7 @@
       const m = e.data;
       if (!gl) return;
       if (m.type === "scene") { setScene(m); }
+      else if (m.type === "materials") { setMaterials(m.materials); }
       else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); if (first || m.fit) fit(); else draw(); }
       else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; draw(); }
       else if (m.type === "background") { document.body.className = m.name; }

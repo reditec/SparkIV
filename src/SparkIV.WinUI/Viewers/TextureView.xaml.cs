@@ -737,12 +737,17 @@ namespace SparkIV.WinUI.Viewers
   /// <summary>A texture dictionary as loaded on the background thread, with its thumbnails already decoded.</summary>
   public sealed class TextureDictionary : IDisposable
   {
-    private readonly TextureFile _file;
+    // One dictionary; or for the textures stored in a model dictionary (.wdd), one per entry that has any.
+    private readonly List<TextureFile> _files;
 
-    internal TextureDictionary(TextureFile file)
+    internal TextureDictionary(TextureFile file) : this(new[] { file })
     {
-      _file = file;
-      Textures = file.Textures.ToList();
+    }
+
+    internal TextureDictionary(IEnumerable<TextureFile> files)
+    {
+      _files = files.ToList();
+      Textures = _files.SelectMany(f => f.Textures).ToList();
       Thumbnails = Textures.Select(SafeThumbnail).ToList();
     }
 
@@ -776,18 +781,22 @@ namespace SparkIV.WinUI.Viewers
         using var result = new MemoryStream();
         if (!Embedded)
         {
-          _file.Save(result);
+          _files[0].Save(result);
           return result.ToArray();
         }
 
         // The textures are part of the model's resource: written into its two parts, which are then
-        // compressed again (as the old SparkIV's embedded texture editor did).
+        // compressed again (as the old SparkIV's embedded texture editor did). Each dictionary writes
+        // at its own place in them.
         var resource = new RageLib.Common.Resources.ResourceFile();
         resource.Read(new MemoryStream(original));
         using (var system = new MemoryStream(resource.SystemMemData))
         using (var graphics = new MemoryStream(resource.GraphicsMemData))
         {
-          _file.Save(system, graphics);
+          foreach (var file in _files)
+          {
+            file.Save(system, graphics);
+          }
         }
         resource.Write(result);
         return result.ToArray();
@@ -807,7 +816,13 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    public void Dispose() => _file.Dispose();
+    public void Dispose()
+    {
+      foreach (var file in _files)
+      {
+        file.Dispose();
+      }
+    }
   }
 
   /// <summary>Texture dictionaries (.wtd).</summary>

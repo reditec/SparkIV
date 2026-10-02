@@ -240,7 +240,8 @@ namespace SparkIV.WinUI.Viewers
       {
         return;
       }
-      var window = new ViewerWindow(_current.File, new WebPageTextureViewer(), _current.Path);
+      // Its images can be replaced where the page itself can be changed (written into the page).
+      var window = new ViewerWindow(_current.File, new WebPageTextureViewer(), _current.Path, _context.ReplaceOf);
       window.Activate();
       window.BringToFront();
     }

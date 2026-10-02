@@ -74,15 +74,27 @@ namespace SparkIV.WinUI.Services
 
       // There is no archive to save into: a change goes straight into the file, after its original is
       // kept in the backup folder.
-      // In a protected folder Windows asks for administrator rights to write it.
-      async Task<string> Replace(byte[] data)
+      // In a protected folder Windows asks for administrator rights to write it. The same for the files
+      // next to it a viewer opens (the pages a web page links to).
+      string parentOfRoot = new DirectoryInfo(root).Parent?.FullName ?? root;
+      Func<byte[], Task<string>>? ReplaceOf(File changed)
       {
-        string? backup = await Task.Run(() => Saving.WriteFile(path, data));
-        file.SetData(data);
-        return "Written into " + path + (backup != null ? " (the original is kept in " + backup + ")." : ".");
+        if (!ReferenceEquals(MainWindow.RootOf(changed), fs.RootDirectory))
+        {
+          return null;
+        }
+        // FullName starts with the name of the folder opened, so it is relative to the one above it.
+        string target = Path.Combine(parentOfRoot, changed.FullName);
+        return async data =>
+        {
+          string? backup = await Task.Run(() => Saving.WriteFile(target, data));
+          changed.SetData(data);
+          FileChanges.Raise(changed);
+          return "Written into " + target + (backup != null ? " (the original is kept in " + backup + ")." : ".");
+        };
       }
 
-      var window = new ViewerWindow(file, viewer, folder, Replace);
+      var window = new ViewerWindow(file, viewer, folder, ReplaceOf);
       window.Activate();
       window.BringToFront();
     }

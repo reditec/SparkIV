@@ -27,14 +27,15 @@ namespace SparkIV.WinUI.Viewers
   public sealed class ViewerContext
   {
     public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage, Action<string, string> setTitle,
-                         Func<byte[], Task<string>>? replaceFile = null, Func<Task<bool>>? ensureEditMode = null)
+                         Func<File, Func<byte[], Task<string>>?>? replaceOf = null, Func<Task<bool>>? ensureEditMode = null)
     {
       Window = window;
       File = file;
       Data = data;
       ShowMessage = showMessage;
       SetTitle = setTitle;
-      ReplaceFile = replaceFile;
+      ReplaceOf = replaceOf;
+      ReplaceFile = replaceOf?.Invoke(file);
       EnsureEditModeAsync = ensureEditMode ?? (() => Task.FromResult(Services.EditMode.IsOn));
     }
 
@@ -49,6 +50,12 @@ namespace SparkIV.WinUI.Viewers
     /// can't be changed from here.
     /// </summary>
     public Func<byte[], Task<string>>? ReplaceFile { get; }
+
+    /// <summary>
+    /// How to replace other files next to this one (the page a web page links to, for its images); null for
+    /// a file that can't be changed from here. Handed on to the viewer windows a view opens.
+    /// </summary>
+    public Func<File, Func<byte[], Task<string>>?>? ReplaceOf { get; }
 
     public Window Window { get; }
     public File File { get; }

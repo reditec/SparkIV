@@ -341,6 +341,17 @@ namespace SparkIV.WinUI
       }
     }
 
+    /// <summary>The top folder of the file system a file is in.</summary>
+    internal static Directory RootOf(File file)
+    {
+      Directory dir = file.ParentDirectory;
+      while (dir.ParentDirectory != null)
+      {
+        dir = dir.ParentDirectory;
+      }
+      return dir;
+    }
+
     private void OpenViewer(File file, Viewers.IViewer viewer)
     {
       if (_current == null)
@@ -350,21 +361,30 @@ namespace SparkIV.WinUI
       string where = string.Join(" \u203A ", _current.Path().Select(l => l.Name));
       Volume volume = _current.Volume;
 
-      // A viewer that changes the file (a texture replaced) puts it back here, like Import: in the archive,
-      // written with Save.
-      Task<string> Replace(byte[] data)
+      // A viewer that changes a file (a texture replaced) puts it back here, like Import: in the archive,
+      // written with Save. Also the files next to it a viewer opens (the pages a web page links to), as
+      // long as they are in the same volume.
+      Func<byte[], Task<string>>? ReplaceOf(File changed)
       {
-        file.SetData(data);
-        _modified.Add(volume);
-        RefreshList();
-        UpdateCommands();
-        ShowMessage(InfoBarSeverity.Success, file.Name + " changed", "Use Save to write it into " + volume.Name + ".");
-        return Task.FromResult("Use Save in the main window to write it into " + volume.Name + ".");
+        if (!ReferenceEquals(RootOf(changed), volume.FileSystem.RootDirectory))
+        {
+          return null;
+        }
+        return data =>
+        {
+          changed.SetData(data);
+          FileChanges.Raise(changed);
+          _modified.Add(volume);
+          RefreshList();
+          UpdateCommands();
+          ShowMessage(InfoBarSeverity.Success, changed.Name + " changed", "Use Save to write it into " + volume.Name + ".");
+          return Task.FromResult("Use Save in the main window to write it into " + volume.Name + ".");
+        };
       }
 
       OpenViewerWhenInputDone(() =>
       {
-        var window = new Viewers.ViewerWindow(file, viewer, where, Replace);
+        var window = new Viewers.ViewerWindow(file, viewer, where, ReplaceOf);
         window.Activate();
         window.BringToFront();
       });

@@ -25,6 +25,9 @@ namespace SparkIV.WinUI.Viewers
     public List<SceneMesh> Meshes { get; } = new List<SceneMesh>();
     public List<SceneMaterial> Materials { get; } = new List<SceneMaterial>();
 
+    /// <summary>Whether the model has textures of its own (stored in it, not in a .wtd).</summary>
+    public bool HasEmbeddedTextures { get; private set; }
+
     /// <summary>The textures, by the name the view asks for ("12.png").</summary>
     public Dictionary<string, byte[]> Textures { get; } = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
 
@@ -33,7 +36,66 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Material textures no texture dictionary had.</summary>
     public SortedSet<string> MissingTextures { get; } = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>What "Source" says for the textures stored in the model itself.</summary>
+    public const string EmbeddedSource = "In the model";
+
+    /// <summary>What "Source" says for textures no dictionary had.</summary>
+    public const string MissingSource = "Not found";
+
+    /// <summary>
+    /// The model's textures with where each comes from: all those stored in the model (also unused), and
+    /// those of other dictionaries the materials use, and the ones not found.
+    /// </summary>
+    public List<SceneTexture> TextureList { get; } = new List<SceneTexture>();
+
+    private SceneTexture Listed(string name, string source, Texture? texture)
+    {
+      var listed = TextureList.FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.Source == source);
+      if (listed == null)
+      {
+        listed = new SceneTexture(name, source, texture);
+        TextureList.Add(listed);
+      }
+      return listed;
+    }
+
+    /// <summary>
+    /// The files the textures come from: the model itself and the dictionaries opened from files next to
+    /// it. When one of them changes, the textures are made again (<see cref="TakeTexturesFrom"/>).
+    /// </summary>
+    public HashSet<File> SourceFiles { get; } = new HashSet<File>();
+
+    /// <summary>
+    /// Takes the materials and textures of the same model loaded again (after a texture was replaced); the
+    /// meshes and parts stay. Returns false if the model itself changed so much that they don't fit.
+    /// </summary>
+    public bool TakeTexturesFrom(ModelScene again)
+    {
+      if (again.Materials.Count != Materials.Count || again.Meshes.Count != Meshes.Count)
+      {
+        return false;
+      }
+      Materials.Clear();
+      Materials.AddRange(again.Materials);
+      Textures.Clear();
+      foreach (var pair in again.Textures)
+      {
+        Textures[pair.Key] = pair.Value;
+      }
+      MissingTextures.Clear();
+      MissingTextures.UnionWith(again.MissingTextures);
+      TextureList.Clear();
+      TextureList.AddRange(again.TextureList);
+      SourceFiles.Clear();
+      SourceFiles.UnionWith(again.SourceFiles);
+      HasEmbeddedTextures = again.HasEmbeddedTextures;
+      return true;
+    }
+
     private readonly List<TextureFile> _dictionaries;
+
+    // The file name of each of _dictionaries ("vehshare.wtd"), for where a texture comes from.
+    private readonly List<string> _dictionaryNames = new List<string>();
     private Directory? _folder;
     private bool _folderSearched;
 
@@ -51,9 +113,16 @@ namespace SparkIV.WinUI.Viewers
     /// and the shared ones, one named like the texture (peds: feet_diff_000_a_uni.wtd holds
     /// feet_diff_000_a_uni), and finally any other dictionary in the folder.
     /// </summary>
-    private Texture? FindTexture(string name, TextureFile? embedded)
+    private Texture? FindTexture(string name, TextureFile? embedded, out string source)
     {
-      var texture = embedded?.FindTextureByName(name) ?? _dictionaries.Select(d => d.FindTextureByName(name)).FirstOrDefault(t => t != null);
+      source = EmbeddedSource;
+      var texture = embedded?.FindTextureByName(name);
+      if (texture != null)
+      {
+        return texture;
+      }
+
+      texture = FindInDictionaries(name, out source);
       if (texture != null || _folder == null)
       {
         return texture;
@@ -64,6 +133,7 @@ namespace SparkIV.WinUI.Viewers
         texture = own.FindTextureByName(name);
         if (texture != null)
         {
+          source = named.Name;
           return texture;
         }
       }
@@ -75,8 +145,23 @@ namespace SparkIV.WinUI.Viewers
         {
           OpenDictionary(file);
         }
-        return _dictionaries.Select(d => d.FindTextureByName(name)).FirstOrDefault(t => t != null);
+        return FindInDictionaries(name, out source);
       }
+      return null;
+    }
+
+    private Texture? FindInDictionaries(string name, out string source)
+    {
+      for (int i = 0; i < _dictionaries.Count; i++)
+      {
+        var texture = _dictionaries[i].FindTextureByName(name);
+        if (texture != null)
+        {
+          source = _dictionaryNames[i];
+          return texture;
+        }
+      }
+      source = MissingSource;
       return null;
     }
 
@@ -98,7 +183,12 @@ namespace SparkIV.WinUI.Viewers
         _opened.Add(file.Name);
         return null;
       }
-      return OpenDictionary(file.Name, data);
+      var opened = OpenDictionary(file.Name, data);
+      if (opened != null)
+      {
+        SourceFiles.Add(file);
+      }
+      return opened;
     }
 
     private TextureFile? OpenDictionary(string name, byte[] data)
@@ -112,6 +202,7 @@ namespace SparkIV.WinUI.Viewers
         var textures = new TextureFile();
         textures.Open(new MemoryStream(data));
         _dictionaries.Add(textures);
+        _dictionaryNames.Add(name);
         return textures;
       }
       catch (Exception)
@@ -125,6 +216,7 @@ namespace SparkIV.WinUI.Viewers
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
       var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory };
+      scene.SourceFiles.Add(file);
       try
       {
         // Textures the model doesn't have itself: a dictionary of the same name next to it (admiral.wtd for
@@ -313,6 +405,15 @@ namespace SparkIV.WinUI.Viewers
     {
       // The materials of this drawable, numbered for the whole scene.
       int firstMaterial = Materials.Count;
+      if (drawable.AttachedTexture != null && drawable.AttachedTexture.Count > 0)
+      {
+        HasEmbeddedTextures = true;
+        // All of them are listed, also those no material uses.
+        foreach (var texture in drawable.AttachedTexture.Textures)
+        {
+          Listed(texture.Name, EmbeddedSource, texture);
+        }
+      }
       string? assigned = KnownModelNames.TextureFor(name);
       foreach (var material in drawable.Materials)
       {
@@ -403,7 +504,8 @@ namespace SparkIV.WinUI.Viewers
       if (!string.IsNullOrEmpty(textureName))
       {
         // The model's own textures first, then the dictionaries next to it.
-        var texture = FindTexture(textureName, embedded);
+        var texture = FindTexture(textureName, embedded, out string source);
+        Listed(texture?.Name ?? textureName, source, texture).IsUsed = true;
         if (texture != null)
         {
           key = Materials.Count + ".png";
@@ -464,6 +566,42 @@ namespace SparkIV.WinUI.Viewers
     };
 
     private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
+  }
+
+  /// <summary>A texture of the model and where it comes from, with a thumbnail made while loading.</summary>
+  public sealed class SceneTexture
+  {
+    internal SceneTexture(string name, string source, Texture? texture)
+    {
+      Name = name;
+      Source = source;
+      if (texture != null)
+      {
+        Detail = texture.Width + " × " + texture.Height + " · " + texture.TextureType;
+        try
+        {
+          Thumbnail = TexturePixels.Thumbnail(texture, 40);
+        }
+        catch (Exception)
+        {
+          Thumbnail = TexturePixels.Blank;
+        }
+      }
+    }
+
+    public string Name { get; }
+
+    /// <summary><see cref="ModelScene.EmbeddedSource"/>, the dictionary's file name, or <see cref="ModelScene.MissingSource"/>.</summary>
+    public string Source { get; }
+
+    public bool IsEmbedded => Source == ModelScene.EmbeddedSource;
+
+    /// <summary>Whether a material uses it (a model may carry textures it doesn't use).</summary>
+    public bool IsUsed { get; set; }
+
+    public string Detail { get; } = "";
+
+    internal TexturePixels? Thumbnail { get; }
   }
 
   public sealed class SceneMaterial

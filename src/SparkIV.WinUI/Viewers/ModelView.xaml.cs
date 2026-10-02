@@ -55,12 +55,102 @@ namespace SparkIV.WinUI.Viewers
       LodContainer.Visibility = levels > 1 ? Visibility.Visible : Visibility.Collapsed;
       _lodReady = true;
 
+      ShowEmbeddedTextures();
+      // A texture replaced in the model or in a dictionary it takes textures from: shown at once.
+      Services.FileChanges.Changed += FileChanges_Changed;
+
       BackgroundBox.SelectedIndex = s_background;
       TexturesButton.IsChecked = s_textures;
       WireframeButton.IsChecked = s_wireframe;
       UpdateStatus();
       UpdateStepText();
       Loaded += ModelView_Loaded;
+    }
+
+    #region Textures
+
+    /// <summary>
+    /// The Textures tab, only for a model with textures of its own (vehicles and peds have theirs in .wtd
+    /// files; map objects and others often in the model): those textures, also the unused ones.
+    /// </summary>
+    private void ShowEmbeddedTextures()
+    {
+      var embedded = _scene.TextureList.Where(t => t.IsEmbedded).OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase).ToList();
+      PaneTabs.Visibility = embedded.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+      if (embedded.Count == 0)
+      {
+        PaneTabs.SelectedItem = PartsTab;
+      }
+      EmbeddedList.ItemsSource = embedded.Select(t => new Model.ModelTextureRow(t.Name, t.Detail, t.IsUsed, t.Thumbnail?.ToBitmap())).ToList();
+      int used = embedded.Count(t => t.IsUsed);
+      EmbeddedCountText.Text = embedded.Count + (embedded.Count == 1 ? " texture" : " textures") + " stored in the model" +
+                               (used < embedded.Count ? ", " + used + " used" : "");
+    }
+
+    private void PaneTabs_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
+    {
+      bool textures = sender.SelectedItem == TexturesTab;
+      TexturesPanel.Visibility = textures ? Visibility.Visible : Visibility.Collapsed;
+      PartsPanel.Visibility = textures ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // Raised up when the textures are made again, so the page doesn't take the old pictures from its cache.
+    private int _textureVersion;
+
+    private string? TextureUrl(SceneMaterial m) => m.TextureKey == null ? null : Host + m.TextureKey + "?v=" + _textureVersion;
+
+    private bool _reloading;
+    private bool _reloadAgain;
+
+    private async void FileChanges_Changed(File file)
+    {
+      if (!_scene.SourceFiles.Contains(file))
+      {
+        return;
+      }
+      // One reload at a time; a change during it reloads once more after.
+      if (_reloading)
+      {
+        _reloadAgain = true;
+        return;
+      }
+      _reloading = true;
+      try
+      {
+        do
+        {
+          _reloadAgain = false;
+          var again = await System.Threading.Tasks.Task.Run(() => ModelScene.Load(_context.File, _context.File.GetData()));
+          if (!_scene.TakeTexturesFrom(again))
+          {
+            _context.ShowMessage("Textures not updated", "The model changed too much; open it again to see it.", true);
+            return;
+          }
+          _textureVersion++;
+          Post(new { type = "materials", materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, texture = TextureUrl(m) }) });
+          ShowEmbeddedTextures();
+          UpdateStatus();
+        }
+        while (_reloadAgain);
+      }
+      catch (Exception ex)
+      {
+        _context.ShowMessage("Textures not updated", ex.Message, true);
+      }
+      finally
+      {
+        _reloading = false;
+      }
+    }
+
+    #endregion
+
+    /// <summary>The textures in the model, in the texture viewer; replaced ones go into the model (where it can be changed).</summary>
+    private void EmbeddedTextures_Click(object sender, RoutedEventArgs e)
+    {
+      var window = new ViewerWindow(_context.File, new ModelTextureViewer(), _context.File.Name, _context.ReplaceOf);
+      window.Activate();
+      window.BringToFront();
     }
 
     private async void ModelView_Loaded(object sender, RoutedEventArgs e)
@@ -133,7 +223,7 @@ namespace SparkIV.WinUI.Viewers
       Post(new
       {
         type = "scene",
-        materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, texture = m.TextureKey == null ? null : Host + m.TextureKey }),
+        materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, texture = TextureUrl(m) }),
         meshes = _scene.Meshes.Select(m => m.ToMessage()),
       });
       SendOptions();
@@ -164,6 +254,18 @@ namespace SparkIV.WinUI.Viewers
       int vertices = shown.Sum(m => m.Positions.Length / 3);
       string text = shown.Count + (shown.Count == 1 ? " mesh" : " meshes") + " shown   \u00B7   " + triangles.ToString("N0") + " triangles   \u00B7   " +
                     vertices.ToString("N0") + " vertices   \u00B7   " + _scene.Textures.Count + (_scene.Textures.Count == 1 ? " texture" : " textures");
+      // Where the textures the materials use come from: the model itself, dictionaries outside it.
+      var used = _scene.TextureList.Where(t => t.IsUsed && t.Source != ModelScene.MissingSource).ToList();
+      var external = used.Where(t => !t.IsEmbedded).Select(t => t.Source).Distinct(StringComparer.OrdinalIgnoreCase)
+                         .OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+      if (used.Any(t => t.IsEmbedded))
+      {
+        external.Insert(0, "the model");
+      }
+      if (external.Count > 0)
+      {
+        text += " from " + string.Join(", ", external);
+      }
       if (_scene.MissingTextures.Count > 0)
       {
         text += "   \u00B7   not found: " + string.Join(", ", _scene.MissingTextures);
@@ -275,6 +377,7 @@ namespace SparkIV.WinUI.Viewers
 
     public void Dispose()
     {
+      Services.FileChanges.Changed -= FileChanges_Changed;
       if (Web.CoreWebView2 != null)
       {
         Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;
@@ -289,5 +392,44 @@ namespace SparkIV.WinUI.Viewers
     public object Load(File file, byte[] data) => ModelScene.Load(file, data);
 
     public FrameworkElement CreateView(ViewerContext context, object loaded) => new ModelView(context, (ModelScene)loaded);
+  }
+
+  /// <summary>
+  /// The textures stored in a model (.wdr), model dictionary (.wdd, each entry may have some) or fragment
+  /// (.wft), in the texture viewer. Replaced textures are written into the model's resource, as for web pages.
+  /// </summary>
+  internal sealed class ModelTextureViewer : IViewer
+  {
+    public object Load(File file, byte[] data)
+    {
+      var textures = new List<RageLib.Textures.TextureFile>();
+      string extension = Path.GetExtension(file.Name).ToLowerInvariant();
+      if (extension == ".wft")
+      {
+        var fragment = new RageLib.Models.ModelFragTypeFile();
+        fragment.Open(new MemoryStream(data));
+        textures.Add(fragment.EmbeddedTextureFile);
+      }
+      else if (extension == ".wdd")
+      {
+        var dictionary = new RageLib.Models.ModelDictionaryFile();
+        dictionary.Open(new MemoryStream(data));
+        textures.AddRange(dictionary.EmbeddedTextureFiles);
+      }
+      else
+      {
+        var model = new RageLib.Models.ModelFile();
+        model.Open(new MemoryStream(data));
+        textures.Add(model.EmbeddedTextureFile);
+      }
+      textures.RemoveAll(t => t == null || t.Count == 0);
+      if (textures.Count == 0)
+      {
+        throw new InvalidDataException("This model has no textures of its own.");
+      }
+      return new TextureDictionary(textures) { Embedded = true };
+    }
+
+    public FrameworkElement CreateView(ViewerContext context, object loaded) => new TextureView(context, (TextureDictionary)loaded);
   }
 }
