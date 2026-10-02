@@ -25,6 +25,9 @@ namespace SparkIV.WinUI.Viewers
     public List<SceneMesh> Meshes { get; } = new List<SceneMesh>();
     public List<SceneMaterial> Materials { get; } = new List<SceneMaterial>();
 
+    /// <summary>The bones of the model's skeleton by index (empty without one), for the export.</summary>
+    public List<SceneBone> Bones { get; } = new List<SceneBone>();
+
     /// <summary>Whether the model has textures of its own (stored in it, not in a .wtd).</summary>
     public bool HasEmbeddedTextures { get; private set; }
 
@@ -405,6 +408,27 @@ namespace SparkIV.WinUI.Viewers
     {
       // The materials of this drawable, numbered for the whole scene.
       int firstMaterial = Materials.Count;
+      // The skeleton for the export: of the first drawable that has one (the body of a fragment, a ped).
+      if (Bones.Count == 0 && drawable.Skeleton != null)
+      {
+        var stack = new Stack<Bone>();
+        stack.Push(drawable.Skeleton.RootBone);
+        var all = new List<Bone>();
+        while (stack.Count > 0)
+        {
+          var bone = stack.Pop();
+          all.Add(bone);
+          foreach (var child in bone.Children)
+          {
+            stack.Push(child);
+          }
+        }
+        foreach (var bone in all.OrderBy(b => b.Index))
+        {
+          Bones.Add(new SceneBone(bone.Index, bone.Name, bone.Parent?.Index ?? -1,
+                                  bone.Position.X, bone.Position.Y, bone.Position.Z, bone.Rotation.X, bone.Rotation.Y, bone.Rotation.Z));
+        }
+      }
       if (drawable.AttachedTexture != null && drawable.AttachedTexture.Count > 0)
       {
         HasEmbeddedTextures = true;
@@ -488,7 +512,19 @@ namespace SparkIV.WinUI.Viewers
       var triangles = new ushort[count];
       Array.Copy(indices, triangles, count);
 
-      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles);
+      // The bone of each vertex: its first blend bone (peds), or the bone it is placed at (wheels).
+      var bones = new int[vertices.Length];
+      int placedAt = placement == null ? 0 : Math.Max(0, Bones.FindIndex(b => b.Name.Equals(placement.Bone, StringComparison.OrdinalIgnoreCase)));
+      for (int i = 0; i < vertices.Length; i++)
+      {
+        bones[i] = mesh.VertexHasBlendInfo && vertices[i].BlendIndices != null ? (int)vertices[i].BlendIndices[0] : placedAt;
+        if (bones[i] >= Bones.Count)
+        {
+          bones[i] = 0;
+        }
+      }
+
+      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones);
       Meshes.Add(scene);
       return scene.Id;
     }
@@ -535,7 +571,7 @@ namespace SparkIV.WinUI.Viewers
 
   public sealed class SceneMesh
   {
-    public SceneMesh(int id, int material, float[] positions, float[]? normals, float[]? uvs, ushort[] indices)
+    public SceneMesh(int id, int material, float[] positions, float[]? normals, float[]? uvs, ushort[] indices, int[] bones)
     {
       Id = id;
       Material = material;
@@ -543,7 +579,11 @@ namespace SparkIV.WinUI.Viewers
       Normals = normals;
       Uvs = uvs;
       Indices = indices;
+      Bones = bones;
     }
+
+    /// <summary>The bone each vertex moves with (index into <see cref="ModelScene.Bones"/>; 0 without a skeleton), for the export.</summary>
+    public int[] Bones { get; }
 
     public int Id { get; }
     public int Material { get; }
@@ -567,6 +607,9 @@ namespace SparkIV.WinUI.Viewers
 
     private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
   }
+
+  /// <summary>A bone: its place and turn relative to its parent (Euler angles in radians, as RageLib reads them).</summary>
+  public sealed record SceneBone(int Index, string Name, int Parent, float X, float Y, float Z, float RotationX, float RotationY, float RotationZ);
 
   /// <summary>A texture of the model and where it comes from, with a thumbnail made while loading.</summary>
   public sealed class SceneTexture

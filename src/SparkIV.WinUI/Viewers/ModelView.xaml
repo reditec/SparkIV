@@ -38,6 +38,10 @@
                 <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
             </AppBarButton>
             <AppBarSeparator />
+            <AppBarButton Label="Export model…" Click="ExportModel_Click"
+                          ToolTipService.ToolTip="Save what is shown (this level of detail, the parts ticked) as OBJ or SMD, with its textures as PNG next to it">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE7B8;" /></AppBarButton.Icon>
+            </AppBarButton>
             <AppBarButton Label="Export original" Click="ExportOriginal_Click" ToolTipService.ToolTip="Save the file exactly as it is in the archive">
                 <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
             </AppBarButton>

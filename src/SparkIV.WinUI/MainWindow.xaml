@@ -158,7 +158,8 @@
 
                     <ListView x:Name="FileList" Grid.Row="1" SelectionMode="Extended" IsItemClickEnabled="False"
                               DoubleTapped="FileList_DoubleTapped" KeyDown="FileList_KeyDown"
-                              SelectionChanged="FileList_SelectionChanged">
+                              SelectionChanged="FileList_SelectionChanged"
+                              AllowDrop="True" DragOver="FileList_DragOver" Drop="FileList_Drop">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
                                 <Setter Property="MinHeight" Value="32" />
@@ -188,6 +189,12 @@
                                     <StackPanel Orientation="Horizontal" Spacing="10" Padding="8,0">
                                         <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" />
                                         <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <!-- Changed, not saved yet -->
+                                        <Border Visibility="{x:Bind UnsavedVisibility}" VerticalAlignment="Center" Padding="6,0,6,1" CornerRadius="8"
+                                                Background="{ThemeResource AccentFillColorDefaultBrush}"
+                                                ToolTipService.ToolTip="Changed and not saved yet: Save writes it into the game files">
+                                            <TextBlock Text="changed" FontSize="11" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                        </Border>
                                     </StackPanel>
                                     <TextBlock Grid.Column="1" Text="{x:Bind TypeName}" Padding="8,0" VerticalAlignment="Center"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
@@ -205,6 +212,9 @@
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem x:Name="OpenBinaryItem" Text="Open as binary" Click="ContextOpenBinary_Click">
                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE943;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Edit externally…" Click="ContextEditExternally_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8A7;" /></MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Export…" Click="Export_Click">
                                     <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>

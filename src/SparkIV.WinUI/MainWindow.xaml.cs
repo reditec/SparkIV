@@ -52,6 +52,7 @@ namespace SparkIV.WinUI
       Closed += (sender, args) =>
       {
         _volumes.Dispose();
+        _externalEdits?.Dispose();
         EditMode.Changed -= UpdateEditModeButton;
       };
 
@@ -229,6 +230,8 @@ namespace SparkIV.WinUI
     {
       // Set again for what is opened next.
       Games.SetCurrent(null);
+      // Copies open in other programs belong to what is closed now.
+      _externalEdits?.Forget(edit => true);
       _volumes.CloseAll();
       _modified.Clear();
       _back.Clear();
@@ -339,6 +342,19 @@ namespace SparkIV.WinUI
                     "SparkIV can't show " + item.Name + " (" + item.TypeName + ") yet. You can look at its bytes or export it.",
                     "Open as binary", () => OpenViewer(file, Viewers.ViewerRegistry.Binary));
       }
+    }
+
+    /// <summary>
+    /// Changed and not saved yet: a file with new content (imported, a texture replaced), or an archive
+    /// with such files inside that isn't saved yet.
+    /// </summary>
+    private bool IsUnsaved(FSObject entry)
+    {
+      if (entry is not File file)
+      {
+        return false;
+      }
+      return file.IsCustomData || _modified.Any(v => ReferenceEquals(v.HostFile, file));
     }
 
     /// <summary>The top folder of the file system a file is in.</summary>
@@ -572,7 +588,7 @@ namespace SparkIV.WinUI
         string filter = FilterBox.Text ?? "";
         var groups = _current.Directory
           .Where(o => filter.Length == 0 || o.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
-          .Select(o => new EntryItem(o))
+          .Select(o => new EntryItem(o, IsUnsaved(o)))
           .GroupBy(i => i.Type.Group)
           .Select(g => new EntryGroup(g.Key, g.First().Type.GroupOrder, Sort(g)));
 
@@ -718,6 +734,92 @@ namespace SparkIV.WinUI
       }
     }
 
+    #region Edit externally
+
+    private ExternalEdits? _externalEdits;
+
+    private ExternalEdits ExternalEdits
+    {
+      get
+      {
+        if (_externalEdits == null)
+        {
+          _externalEdits = new ExternalEdits(DispatcherQueue);
+          _externalEdits.Changed += ExternalEdit_Changed;
+        }
+        return _externalEdits;
+      }
+    }
+
+    /// <summary>Opens the file in the program Windows has for it; when it is saved there, SparkIV offers to take it.</summary>
+    private void ContextEditExternally_Click(object sender, RoutedEventArgs e)
+    {
+      if (_current == null || FileList.SelectedItem is not EntryItem item || item.File == null)
+      {
+        return;
+      }
+      try
+      {
+        ExternalEdits.Open(item.File, _current.Volume);
+        ShowMessage(InfoBarSeverity.Informational, item.Name + " opened in another program",
+                    "Save it there; SparkIV then offers to take the change (edit mode needed). The game files are only written with Save.");
+      }
+      catch (Exception ex)
+      {
+        ShowMessage(InfoBarSeverity.Error, "Could not open " + item.Name, ex.Message);
+      }
+    }
+
+    private void ExternalEdit_Changed(ExternalEdits.Edit edit)
+    {
+      var pending = ExternalEdits.Pending;
+      string names = string.Join(", ", pending.Select(p => p.File.Name));
+      ShowMessage(InfoBarSeverity.Informational,
+                  (pending.Count == 1 ? names + " was" : pending.Count + " files were") + " changed in another program",
+                  (pending.Count == 1 ? "" : names + ". ") + "Take the change into SparkIV? It is written into the game files with Save.",
+                  "Apply", async () => await ApplyExternalEditsAsync());
+    }
+
+    private async Task ApplyExternalEditsAsync()
+    {
+      if (!await EditMode.TurnOnAsync(Root.XamlRoot))
+      {
+        // Still pending: offered again when the file is saved again, or apply after turning edit mode on.
+        ShowMessage(InfoBarSeverity.Warning, "Not taken", "Changes are only taken in edit mode.", "Apply", async () => await ApplyExternalEditsAsync());
+        return;
+      }
+      UpdateEditModeButton();
+
+      var applied = new List<string>();
+      var locked = new List<string>();
+      foreach (var edit in ExternalEdits.Pending)
+      {
+        if (ExternalEdits.Apply(edit))
+        {
+          _modified.Add(edit.Volume);
+          FileChanges.Raise(edit.File);
+          applied.Add(edit.File.Name);
+        }
+        else
+        {
+          locked.Add(edit.File.Name);
+        }
+      }
+      RefreshList();
+      UpdateCommands();
+      if (locked.Count > 0)
+      {
+        ShowMessage(InfoBarSeverity.Warning, "Still in use: " + string.Join(", ", locked),
+                    "The other program still has it open for writing. Try again in a moment.", "Apply", async () => await ApplyExternalEditsAsync());
+      }
+      else
+      {
+        ShowMessage(InfoBarSeverity.Success, string.Join(", ", applied) + " changed", "Use Save to write the change into the game files.");
+      }
+    }
+
+    #endregion
+
     private void FileList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
       UpdateStatus();
@@ -824,33 +926,80 @@ namespace SparkIV.WinUI
       {
         return;
       }
+      await ImportAsync(files.Select(f => f.Path).ToList());
+    }
 
+    #region Drag and drop
+
+    // Files dragged from Explorer onto the list are imported into the folder shown, like Import.
+    private void FileList_DragOver(object sender, DragEventArgs e)
+    {
+      if (_current != null && e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+      {
+        e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+        e.DragUIOverride.Caption = EditMode.IsOn ? "Import into " + _current.Name : "Import (turns on edit mode)";
+      }
+    }
+
+    private async void FileList_Drop(object sender, DragEventArgs e)
+    {
+      if (_current == null || !e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems))
+      {
+        return;
+      }
+      var items = await e.DataView.GetStorageItemsAsync();
+      var paths = items.OfType<Windows.Storage.StorageFile>().Select(f => f.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
+      if (paths.Count == 0)
+      {
+        ShowMessage(InfoBarSeverity.Warning, "Nothing imported", "Only files can be imported, not folders.");
+        return;
+      }
+      if (!await EditMode.TurnOnAsync(Root.XamlRoot))
+      {
+        return;
+      }
+      UpdateEditModeButton();
+      await ImportAsync(paths);
+    }
+
+    #endregion
+
+    /// <summary>Replaces files of the folder shown with files of the same name (written with Save).</summary>
+    private async Task ImportAsync(IReadOnlyList<string> paths)
+    {
+      if (_current == null)
+      {
+        return;
+      }
       Location location = _current;
       var missing = new List<string>();
       await RunBusyAsync(async () =>
       {
-        foreach (var picked in files)
+        foreach (var path in paths)
         {
+          string name = Path.GetFileName(path);
           // Only replacing is supported: the file must already be there with the same name.
-          if (location.Directory.FindByName(picked.Name) is File target)
+          if (location.Directory.FindByName(name) is File target)
           {
-            target.SetData(await System.IO.File.ReadAllBytesAsync(picked.Path));
+            target.SetData(await System.IO.File.ReadAllBytesAsync(path));
+            FileChanges.Raise(target);
             _modified.Add(location.Volume);
           }
           else
           {
-            missing.Add(picked.Name);
+            missing.Add(name);
           }
         }
       });
+      int count = paths.Count;
 
       RefreshList();
       UpdateCommands();
 
-      int replaced = files.Count - missing.Count;
+      int replaced = count - missing.Count;
       if (missing.Count > 0)
       {
-        ShowMessage(InfoBarSeverity.Warning, replaced + " of " + files.Count + " files replaced",
+        ShowMessage(InfoBarSeverity.Warning, replaced + " of " + count + " files replaced",
                     "Not in this folder (only files with the same name can be replaced): " + string.Join(", ", missing));
       }
       else
@@ -870,13 +1019,20 @@ namespace SparkIV.WinUI
       var chain = Saving.Chain(volume);
       // An archive in an archive is saved into the one around it, and so on up to the file on disk.
       string around = chain.Count > 1 ? " It goes into " + string.Join(", then ", chain.Skip(1).Select(v => v.Name)) + ", which is saved too." : "";
+      // As the old SparkIV asked: a write-protected file can only be saved without its protection.
+      var readOnly = FileInstaller.ReadOnly(Saving.Targets(volume));
+      string protection = readOnly.Count > 0
+        ? "\n\n" + string.Join(", ", readOnly.Select(Path.GetFileName)) + (readOnly.Count == 1 ? " is" : " are") +
+          " write-protected. Saving takes the write protection off."
+        : "";
       var dialog = new ContentDialog
       {
         XamlRoot = Root.XamlRoot,
         Title = "Save " + volume.Name + "?",
         Content = "This writes the changes into the game files." + around + " Before a file is replaced the first time, " +
                   "its original is kept in " + Backups.Folder + "." +
-                  (_shield ? "\n\nThe game is in a protected folder: Windows asks for administrator rights to write it." : ""),
+                  (_shield ? "\n\nThe game is in a protected folder: Windows asks for administrator rights to write it." : "") +
+                  protection,
         PrimaryButtonText = "Save",
         CloseButtonText = "Cancel",
         DefaultButton = ContentDialogButton.Close,

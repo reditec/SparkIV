@@ -229,7 +229,7 @@ namespace SparkIV.WinUI.Viewers
       FunctionsButton.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
       FunctionsButton.IsChecked = s_showFunctions;
       FunctionPane.Visibility = any && s_showFunctions ? Visibility.Visible : Visibility.Collapsed;
-      bool canFold = _language == "script" || (_language == "data" && _text.Contains('{'));
+      bool canFold = _language == "script" || _language == "xml" || (_language == "data" && _text.Contains('{'));
       FoldButton.Visibility = canFold ? Visibility.Visible : Visibility.Collapsed;
       // New text starts unfolded.
       _allFolded = false;

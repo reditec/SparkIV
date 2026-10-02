@@ -9,9 +9,10 @@ namespace SparkIV.WinUI.Model
   /// </summary>
   public sealed class EntryItem
   {
-    public EntryItem(FSObject entry)
+    public EntryItem(FSObject entry, bool unsaved = false)
     {
       Entry = entry;
+      IsUnsaved = unsaved;
       Type = entry.IsDirectory ? FileTypes.Folder : FileTypes.ForFile(entry.Name);
 
       if (entry is File file)
@@ -29,6 +30,11 @@ namespace SparkIV.WinUI.Model
     public string TypeName => Type.Name;
     public string SizeText { get; } = "";
     public string Resource { get; } = "";
+
+    /// <summary>Changed and not saved yet (the old SparkIV showed these in blue).</summary>
+    public bool IsUnsaved { get; }
+
+    public Microsoft.UI.Xaml.Visibility UnsavedVisibility => IsUnsaved ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 
     public File? File => Entry as File;
     public Directory? Directory => Entry as Directory;

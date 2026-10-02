@@ -112,9 +112,24 @@ namespace SparkIV.WinUI.Services
       }
     }
 
-    /// <summary>Copies next to the target first, then moves it over: the target is never half written.</summary>
+    /// <summary>The targets that are write-protected (asked before saving; the protection is taken off then).</summary>
+    public static List<string> ReadOnly(IEnumerable<string> targets) =>
+      targets.Where(t => System.IO.File.Exists(t) && (System.IO.File.GetAttributes(t) & FileAttributes.ReadOnly) != 0).ToList();
+
+    /// <summary>
+    /// Copies next to the target first, then moves it over: the target is never half written. A write
+    /// protection on the target is taken off (Windows doesn't replace it otherwise); the user was asked.
+    /// </summary>
     private static void Place(string source, string target)
     {
+      if (System.IO.File.Exists(target))
+      {
+        var attributes = System.IO.File.GetAttributes(target);
+        if ((attributes & FileAttributes.ReadOnly) != 0)
+        {
+          System.IO.File.SetAttributes(target, attributes & ~FileAttributes.ReadOnly);
+        }
+      }
       string next = target + ".sparkiv-new";
       System.IO.File.Copy(source, next, overwrite: true);
       System.IO.File.Move(next, target, overwrite: true);

@@ -364,6 +364,42 @@ namespace SparkIV.WinUI.Viewers
 
     private void Fit_Click(object sender, RoutedEventArgs e) => Post(new { type = "fit" });
 
+    private async void ExportModel_Click(object sender, RoutedEventArgs e)
+    {
+      var shown = _scene.Root.CheckedMeshes().ToList();
+      if (shown.Count == 0)
+      {
+        _context.ShowMessage("Nothing to export", "Tick the parts to export; what is shown is exported.", true);
+        return;
+      }
+
+      var picker = new Windows.Storage.Pickers.FileSavePicker { SuggestedFileName = Path.GetFileNameWithoutExtension(_context.File.Name) };
+      picker.FileTypeChoices.Add("Wavefront OBJ (Blender, 3ds Max ...)", new List<string> { ".obj" });
+      picker.FileTypeChoices.Add("Valve Studiomdl SMD (with skeleton)", new List<string> { ".smd" });
+      WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_context.Window));
+      var file = await picker.PickSaveFileAsync();
+      if (file == null)
+      {
+        return;
+      }
+
+      Working.IsActive = true;
+      try
+      {
+        string path = file.Path;
+        int textures = await System.Threading.Tasks.Task.Run(() => ModelExport.Write(_scene, shown, path));
+        _context.ShowMessage("Exported", path + (textures > 0 ? " and " + textures + (textures == 1 ? " texture" : " textures") + " as PNG next to it" : "") + ".", false);
+      }
+      catch (Exception ex)
+      {
+        _context.ShowMessage("Could not export the model", ex.Message, true);
+      }
+      finally
+      {
+        Working.IsActive = false;
+      }
+    }
+
     private async void ExportOriginal_Click(object sender, RoutedEventArgs e)
     {
       string name = _context.File.Name;

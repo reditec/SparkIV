@@ -240,11 +240,33 @@
   function findFolds() {
     foldEnds = new Int32Array(lines.length).fill(-1);
     folded.clear();
-    // Scripts, and data files with { } blocks (.tune).
-    const canFold = language === "script" || language === "data";
+    // Scripts, data files with { } blocks (.tune), and XML elements (like the old viewer's tree).
+    const canFold = language === "script" || language === "data" || language === "xml";
     document.body.classList.toggle("folds", canFold);
     if (!canFold) return;
     const open = [];
+    if (language === "xml") {
+      // The XML is indented one element per line: an element that opens on a line and closes on a later one.
+      for (let i = 0; i < lines.length; i++) {
+        const s = lines[i].trim();
+        const start = /^<([A-Za-z_][\w:.\-]*)(\s[^>]*)?>/.exec(s);
+        if (start && !s.endsWith("/>") && !s.includes("</" + start[1])) {
+          open.push({ name: start[1], line: i });
+          continue;
+        }
+        const end = /^<\/([\w:.\-]+)\s*>/.exec(s);
+        if (end) {
+          for (let k = open.length - 1; k >= 0; k--) {
+            if (open[k].name === end[1]) {
+              if (i > open[k].line + 1) foldEnds[open[k].line] = i;
+              open.length = k;
+              break;
+            }
+          }
+        }
+      }
+      return;
+    }
     for (let i = 0; i < lines.length; i++) {
       const s = lines[i].trim();
       if (s === "{") open.push(i);
