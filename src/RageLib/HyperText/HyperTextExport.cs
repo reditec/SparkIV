@@ -28,12 +28,12 @@ namespace RageLib.HyperText
 {
   static class HyperTextExport
   {
-    public static void Export(HtmlNode rootNode, TextWriter writer)
+    public static void Export(HtmlNode rootNode, TextWriter writer, Func<string, string> findText)
     {
-      ExportNode(rootNode, writer, "");
+      ExportNode(rootNode, writer, "", findText);
     }
 
-    private static void ExportNode(HtmlNode node, TextWriter writer, string indent)
+    private static void ExportNode(HtmlNode node, TextWriter writer, string indent, Func<string, string> findText)
     {
       bool emptyNode = node.ChildNodes.Count == 0;
       bool dataNode = node.Data != null;
@@ -51,10 +51,27 @@ namespace RageLib.HyperText
         string tagName = GetTagName(node.Tag);
         string attributes = GetAttributes(node);
 
-        if (emptyNode && node.Tag != HtmlTag.Style)
+        if (node.Tag == HtmlTag.Text)
         {
-          //writer.WriteLine("{0}<{1} {2}/>", indent, tagName, attributes);
-          writer.Write("<{0} {1}/>", tagName, attributes);
+          // A text of the game's text table (.gxt), by its key ("EYE_HOME_3" is "RING TONES"). Without the
+          // table, or for an unknown key, the key itself is shown.
+          string key = node.LinkAddress;
+          string text = (findText != null ? findText(key) : null) ?? key;
+          writer.Write("<span{0} title=\"{1}\">{2}</span>", attributes, Escape(key), Escape(text));
+        }
+        else if (node.Tag == HtmlTag.ScriptObj)
+        {
+          // Filled in by the game's scripts: adverts, the number of mails ...; here only named.
+          writer.Write("<span{0} title=\"Filled in by the game: {1}\"></span>", attributes, Escape(node.LinkAddress));
+        }
+        else if (emptyNode && IsVoidElement(node.Tag))
+        {
+          writer.Write("<{0}{1}/>", tagName, attributes);
+        }
+        else if (emptyNode && node.Tag != HtmlTag.Style)
+        {
+          // Browsers don't read <td/> or <a/> as closed; everything after it would end up inside.
+          writer.Write("<{0}{1}></{0}>", tagName, attributes);
         }
         else if (node.Tag == HtmlTag.Style)
         {
@@ -70,13 +87,35 @@ namespace RageLib.HyperText
           writer.Write("<{0}{1}>", tagName, attributes);
           foreach (var childNode in node.ChildNodes)
           {
-            ExportNode(childNode, writer, indent + "   ");
+            ExportNode(childNode, writer, indent + "   ", findText);
           }
           //writer.WriteLine("{0}</{1}>", indent, tagName);
           writer.Write("</{0}>", tagName);
         }
       }
 
+    }
+
+    private static string Escape(string text)
+    {
+      return text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+    }
+
+    /// <summary>Elements that never have content and are written as &lt;img/&gt;.</summary>
+    private static bool IsVoidElement(HtmlTag tag)
+    {
+      switch (tag)
+      {
+        case HtmlTag.Br:
+        case HtmlTag.Img:
+        case HtmlTag.Link:
+        case HtmlTag.Meta:
+        case HtmlTag.Param:
+        case HtmlTag.Embed:
+          return true;
+        default:
+          return false;
+      }
     }
 
     private static string GetAttributes(HtmlNode node)
@@ -145,7 +184,12 @@ namespace RageLib.HyperText
 
       styleAttributes.Add("text-decoration", GetAttributeValue(state.TextDecoration));
       styleAttributes.Add("font-size", GetAttributeValue(state.FontSize));
-      styleAttributes.Add("display", GetAttributeValue(state.Display));
+      // The game gives tables "block" and rows "table"; in a browser that would make every row a table of
+      // its own and break the layout, so tables keep the browser's own display.
+      if (node.Tag != HtmlTag.Table && node.Tag != HtmlTag.Tr && node.Tag != HtmlTag.Td && node.Tag != HtmlTag.Th)
+      {
+        styleAttributes.Add("display", GetAttributeValue(state.Display));
+      }
       styleAttributes.Add("color", GetColor(state.Color));
 
       if (node.NodeType == HtmlNodeType.HtmlTableNode)
@@ -333,7 +377,10 @@ namespace RageLib.HyperText
           valueName = "seperate";
           break;
         default:
-          throw new ArgumentOutOfRangeException("value");
+          // A value this exporter doesn't know (some game pages have them): left empty, the browser then
+          // ignores just that one style instead of the whole page failing.
+          valueName = "";
+          break;
       }
 
       return valueName;
@@ -459,13 +506,11 @@ namespace RageLib.HyperText
           tagName = "ul";
           break;
         case HtmlTag.Text:
-          tagName = "unk_text";
-          break;
         case HtmlTag.ScriptObj:
-          tagName = "unk_scriptobj";
+          tagName = "span";
           break;
         case HtmlTag.Unknown1:
-          tagName = "unk_1";
+          tagName = "span";
           break;
         default:
           throw new ArgumentOutOfRangeException("tag");

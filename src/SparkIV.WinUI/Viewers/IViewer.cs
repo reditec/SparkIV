@@ -26,12 +26,13 @@ namespace SparkIV.WinUI.Viewers
   /// </summary>
   public sealed class ViewerContext
   {
-    public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage)
+    public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage, Action<string, string> setTitle)
     {
       Window = window;
       File = file;
       Data = data;
       ShowMessage = showMessage;
+      SetTitle = setTitle;
     }
 
     public Window Window { get; }
@@ -42,6 +43,9 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>title, message, isError</summary>
     public Action<string, string, bool> ShowMessage { get; }
+
+    /// <summary>Replaces the window's title (file name) and the detail next to it (where the file is).</summary>
+    public Action<string, string> SetTitle { get; }
   }
 
   public static class ViewerRegistry
@@ -61,6 +65,7 @@ namespace SparkIV.WinUI.Viewers
       ByExtension[".sco"] = new ScriptViewer();
       ByExtension[".ivaud"] = new AudioViewer();
       ByExtension[".wtd"] = new TextureViewer();
+      ByExtension[".whm"] = new WebPageViewer();
     }
 
     /// <summary>The hex view, for any file.</summary>

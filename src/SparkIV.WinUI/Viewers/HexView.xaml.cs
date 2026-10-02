@@ -26,6 +26,7 @@ namespace SparkIV.WinUI.Viewers
 
     private readonly ViewerContext _context;
     private readonly byte[] _data;
+    private readonly string? _partName;
     private readonly TextBlock[] _values = new TextBlock[InspectorNames.Length];
 
     private bool _started;
@@ -34,11 +35,19 @@ namespace SparkIV.WinUI.Viewers
     private int _selectionStart;
     private int _selectionLength;
 
-    public HexView(ViewerContext context, byte[] data)
+    /// <param name="partName">For a part of a file (the system memory of a resource, say): what it is
+    /// called, also in the name the export suggests ("system" → name.system.bin). Null for the whole file.</param>
+    public HexView(ViewerContext context, byte[] data, string? partName = null)
     {
       InitializeComponent();
       _context = context;
       _data = data;
+      _partName = partName;
+      if (partName != null)
+      {
+        ExportButton.Label = "Export this part";
+        ToolTipService.SetToolTip(ExportButton, "Save the bytes shown here (the " + partName + " part, decompressed) as a file");
+      }
       Loaded += HexView_Loaded;
       ActualThemeChanged += (sender, args) => Post(ViewerPages.Theme(this));
 
@@ -236,7 +245,10 @@ namespace SparkIV.WinUI.Viewers
 
     private async void ExportOriginal_Click(object sender, RoutedEventArgs e)
     {
-      string? path = await ViewerPages.PickSaveFileAsync(_context.Window, _context.File.Name, System.IO.Path.GetExtension(_context.File.Name));
+      string name = _partName == null
+        ? _context.File.Name
+        : System.IO.Path.GetFileNameWithoutExtension(_context.File.Name) + "." + _partName + ".bin";
+      string? path = await ViewerPages.PickSaveFileAsync(_context.Window, name, System.IO.Path.GetExtension(name));
       if (path != null)
       {
         await System.IO.File.WriteAllBytesAsync(path, _data);

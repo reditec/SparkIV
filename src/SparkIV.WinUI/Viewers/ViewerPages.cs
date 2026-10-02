@@ -27,10 +27,11 @@ namespace SparkIV.WinUI.Viewers
     }
 
     /// <summary>
-    /// Starts the browser in <paramref name="web"/> and shows the embedded page <paramref name="resource"/>.
-    /// Returns false (after telling the user) if the WebView2 runtime is missing.
+    /// Starts the browser in <paramref name="web"/> and shows the embedded page <paramref name="resource"/>
+    /// (if given; otherwise the caller navigates). Returns false (after telling the user) if the WebView2
+    /// runtime is missing.
     /// </summary>
-    public static async Task<bool> StartAsync(WebView2 web, string resource, ViewerContext context,
+    public static async Task<bool> StartAsync(WebView2 web, string? resource, ViewerContext context,
                                               Action<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs> onMessage,
                                               bool allowCopyMenu)
     {
@@ -56,9 +57,12 @@ namespace SparkIV.WinUI.Viewers
       core.NewWindowRequested += (sender, args) => args.Handled = true;
       core.WebMessageReceived += (sender, args) => onMessage(sender, args);
 
-      using var page = typeof(ViewerPages).Assembly.GetManifestResourceStream(resource)!;
-      using var reader = new StreamReader(page);
-      web.NavigateToString(reader.ReadToEnd());
+      if (resource != null)
+      {
+        using var page = typeof(ViewerPages).Assembly.GetManifestResourceStream(resource)!;
+        using var reader = new StreamReader(page);
+        web.NavigateToString(reader.ReadToEnd());
+      }
       return true;
     }
 

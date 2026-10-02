@@ -22,8 +22,12 @@
     --thumb: rgba(0, 0, 0, 0.30);
     --hover: rgba(0, 0, 0, 0.05);
   }
-  html, body { margin: 0; height: 100%; }
+  html { height: 100%; }
+  /* Not height: 100% - the rows on screen stick to the top only inside the body, so it has to be as tall
+     as everything that scrolls, or they would scroll away once the window's height is passed. */
   body {
+    margin: 0;
+    min-height: 100%;
     overflow: auto;
     background: var(--bg);
     color: var(--fg);
@@ -104,8 +108,10 @@
   const maxTop = () => Math.max(0, rowCount - visible);
   const spaceHeight = () => Math.min(maxTop() * ROW, MAX_SPACE);
 
+  const rowsThatFit = () => Math.max(1, Math.floor((window.innerHeight - head.offsetHeight - 6) / ROW));
+
   function layout() {
-    visible = Math.max(1, Math.floor((window.innerHeight - head.offsetHeight - 6) / ROW));
+    visible = rowsThatFit();
     space.style.height = spaceHeight() + "px";
     firstRow = Math.min(firstRow, maxTop());
     render();
@@ -119,9 +125,12 @@
 
   function scrollToRow(row) {
     firstRow = Math.max(0, Math.min(maxTop(), row));
-    const y = maxTop() * ROW <= MAX_SPACE ? firstRow * ROW : (maxTop() ? firstRow / maxTop() * spaceHeight() : 0);
-    ignoreScroll = true;
-    window.scrollTo(window.scrollX, y);
+    const y = Math.round(maxTop() * ROW <= MAX_SPACE ? firstRow * ROW : (maxTop() ? firstRow / maxTop() * spaceHeight() : 0));
+    // Only a scroll that really happens raises an event; otherwise the next real one would be skipped.
+    if (Math.round(window.scrollY) !== y) {
+      ignoreScroll = true;
+      window.scrollTo(window.scrollX, y);
+    }
     render();
   }
 
@@ -139,11 +148,18 @@
     scrollToRow(firstRow + Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / ROW)));
   }, { passive: false });
 
+  // The page may be laid out before its view has its final size (a tab that is shown later), and in a
+  // WebView2 "resize" doesn't always come; the size is watched, and checked again on every drawing.
   window.addEventListener("resize", layout);
+  new ResizeObserver(() => layout()).observe(document.documentElement);
 
   // --- Drawing the rows on screen ---
 
   function render() {
+    if (rowsThatFit() !== visible) {
+      visible = rowsThatFit();
+      space.style.height = spaceHeight() + "px";
+    }
     const lo = Math.min(caret, anchor), hi = Math.max(caret, anchor);
     const parts = [];
     const end = Math.min(rowCount, firstRow + visible + 1);

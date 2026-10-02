@@ -31,7 +31,7 @@ namespace SparkIV.WinUI.Viewers
       // so they get the hex view.
       if (LooksBinary(data))
       {
-        return data;
+        return BinaryContent.Read(data);
       }
 
       // Latin-1 maps every byte to one character, so nothing is lost or replaced.
@@ -55,15 +55,18 @@ namespace SparkIV.WinUI.Viewers
     }
 
     public FrameworkElement CreateView(ViewerContext context, object loaded) =>
-      loaded is byte[] binary ? new HexView(context, binary) : new TextDocumentView(context, (string)loaded, "data");
+      loaded is BinaryContent binary ? binary.CreateView(context) : new TextDocumentView(context, (string)loaded, "data");
   }
 
-  /// <summary>Any file as bytes. For files without a viewer of their own, and "Open as binary".</summary>
+  /// <summary>
+  /// Any file as bytes, for "Open as binary". A resource (.wtd, .wdr ...) is decompressed and shown in its
+  /// system and graphics parts.
+  /// </summary>
   internal sealed class HexViewer : IViewer
   {
-    public object Load(File file, byte[] data) => data;
+    public object Load(File file, byte[] data) => BinaryContent.Read(data);
 
-    public FrameworkElement CreateView(ViewerContext context, object loaded) => new HexView(context, (byte[])loaded);
+    public FrameworkElement CreateView(ViewerContext context, object loaded) => ((BinaryContent)loaded).CreateView(context);
   }
 
   /// <summary>XML, indented for reading. Falls back to the raw text if it doesn't parse.</summary>

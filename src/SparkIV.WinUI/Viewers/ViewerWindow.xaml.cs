@@ -71,7 +71,7 @@ namespace SparkIV.WinUI.Viewers
           (loaded as IDisposable)?.Dispose();
           return;
         }
-        var context = new ViewerContext(this, _file, data, ShowMessage);
+        var context = new ViewerContext(this, _file, data, ShowMessage, SetTitle);
         ViewHost.Content = _viewer.CreateView(context, loaded);
       }
       catch (Exception ex)
@@ -82,6 +82,13 @@ namespace SparkIV.WinUI.Viewers
       {
         Loading.IsActive = false;
       }
+    }
+
+    private void SetTitle(string title, string detail)
+    {
+      Title = title;
+      TitleText.Text = title;
+      TitleDetail.Text = detail;
     }
 
     private void ShowMessage(string title, string message, bool isError)
