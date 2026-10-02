@@ -65,6 +65,10 @@
             <AppBarButton x:Name="SaveButton" Label="Save" Click="Save_Click" IsEnabled="False" ToolTipService.ToolTip="Write the imported files">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
             </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton Label="Settings" Click="Settings_Click" ToolTipService.ToolTip="Game folders and other settings">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE713;" /></AppBarButton.Icon>
+            </AppBarButton>
         </CommandBar>
 
         <!-- Navigation, address and filter -->

@@ -26,14 +26,23 @@ namespace SparkIV.WinUI.Viewers
   /// </summary>
   public sealed class ViewerContext
   {
-    public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage, Action<string, string> setTitle)
+    public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage, Action<string, string> setTitle,
+                         Func<byte[], string>? replaceFile = null)
     {
       Window = window;
       File = file;
       Data = data;
       ShowMessage = showMessage;
       SetTitle = setTitle;
+      ReplaceFile = replaceFile;
     }
+
+    /// <summary>
+    /// Puts new bytes in place of the file: in its archive (written with Save in the main window), or for a
+    /// file opened on its own straight into it. Returns what happened, for the message. Null when the file
+    /// can't be changed from here.
+    /// </summary>
+    public Func<byte[], string>? ReplaceFile { get; }
 
     public Window Window { get; }
     public File File { get; }

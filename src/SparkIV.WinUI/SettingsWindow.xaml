@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="SparkIV.WinUI.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="AppTitleBar" Padding="12,0,0,0">
+            <TextBlock Text="Settings" VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}" />
+        </Grid>
+
+        <!-- One tab per area of settings; each shows the panel with its Tag as name. -->
+        <SelectorBar x:Name="Tabs" Grid.Row="1" Margin="16,0,16,4" SelectionChanged="Tabs_SelectionChanged">
+            <SelectorBarItem Text="Game folders" Tag="GameFoldersPage" IsSelected="True">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE8B7;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
+        </SelectorBar>
+
+        <InfoBar x:Name="Info" Grid.Row="2" Margin="16,0,16,8" IsOpen="False" Severity="Error" />
+
+        <Grid x:Name="Pages" Grid.Row="3">
+            <ScrollViewer x:Name="GameFoldersPage" Padding="24,8,24,24">
+                <StackPanel Spacing="4">
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Where each game is installed, per platform. Without a folder set, SparkIV uses the one Windows knows (registry) or asks for it when it is needed. In the Complete Edition both games are the same folder." />
+                    <StackPanel x:Name="GameFolderList" Spacing="4" />
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</Window>

@@ -46,8 +46,10 @@ namespace SparkIV.WinUI.Viewers
       _rows = dictionary.Textures.Select((t, i) => new TextureRow(t, dictionary.Thumbnails[i].ToBitmap()))
                                  .OrderBy(r => r.Title, StringComparer.CurrentCultureIgnoreCase)
                                  .ToList();
-      TextureList.ItemsSource = _rows;
+      TextureList.ItemsSource = _rows.ToList();
       ExportAllButton.IsEnabled = _rows.Count > 0;
+      _savedData = context.Data;
+      ReplaceButton.Visibility = context.ReplaceFile != null ? Visibility.Visible : Visibility.Collapsed;
 
       Loaded += (sender, args) =>
       {
@@ -69,15 +71,73 @@ namespace SparkIV.WinUI.Viewers
 
     private Texture? Selected => (TextureList.SelectedItem as TextureRow)?.Texture;
 
-    private void FilterBox_TextChanged(object sender, TextChangedEventArgs e)
+    private void FilterBox_TextChanged(object sender, TextChangedEventArgs e) => ShowRows(TextureList.SelectedItem);
+
+    private void ShowRows(object? selected)
     {
-      var selected = TextureList.SelectedItem;
       string filter = FilterBox.Text.Trim();
       TextureList.ItemsSource = filter.Length == 0
-        ? _rows
+        ? _rows.ToList()
         : _rows.Where(r => r.Title.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToList();
       TextureList.SelectedItem = selected;
     }
+
+    /// <summary>Puts a picture in place of the selected texture, and the changed file back into its archive.</summary>
+    private async void Replace_Click(object sender, RoutedEventArgs e)
+    {
+      if (TextureList.SelectedItem is not TextureRow row || _context.ReplaceFile == null)
+      {
+        return;
+      }
+
+      var picker = new Windows.Storage.Pickers.FileOpenPicker();
+      foreach (var type in new[] { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff" })
+      {
+        picker.FileTypeFilter.Add(type);
+      }
+      WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(_context.Window));
+      var picked = await picker.PickSingleFileAsync();
+      if (picked == null)
+      {
+        return;
+      }
+
+      var texture = row.Texture;
+      Working.IsActive = true;
+      ReplaceButton.IsEnabled = false;
+      try
+      {
+        byte[] original = _savedData;
+        var (data, thumbnail) = await Task.Run(() =>
+        {
+          _dictionary.Replace(texture, picked.Path);
+          return (_dictionary.Save(original), TexturePixels.Thumbnail(texture, 48));
+        });
+        _savedData = data;
+        string note = _context.ReplaceFile(data);
+
+        // The row with the new thumbnail, and the texture shown again.
+        int index = _rows.IndexOf(row);
+        var updated = new TextureRow(texture, thumbnail.ToBitmap());
+        _rows[index] = updated;
+        ShowRows(updated);
+        await RenderAsync(fit: false);
+        _context.ShowMessage("Texture replaced", texture.TitleName + " is now " + picked.Name + " (" + texture.Width + " \u00D7 " + texture.Height + ", " +
+                             texture.TextureType + "). " + note, false);
+      }
+      catch (Exception ex)
+      {
+        _context.ShowMessage("Could not replace " + texture.TitleName, ex.Message, true);
+      }
+      finally
+      {
+        Working.IsActive = false;
+        ReplaceButton.IsEnabled = true;
+      }
+    }
+
+    // The file as it is now: at first as it was opened, after a replacement as it was put back.
+    private byte[] _savedData = Array.Empty<byte>();
 
     private void TextureList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -683,6 +743,51 @@ namespace SparkIV.WinUI.Viewers
 
     public IReadOnlyList<Texture> Textures { get; }
     internal IReadOnlyList<TexturePixels> Thumbnails { get; }
+
+    /// <summary>
+    /// True for the textures of a model or web page: then they are written back into that file's resource
+    /// instead of making a texture dictionary.
+    /// </summary>
+    public bool Embedded { get; init; }
+
+    /// <summary>
+    /// Replaces a texture with a picture: scaled to the texture's size and encoded in its format, every
+    /// mipmap level made again from it. The texture's size and format stay.
+    /// </summary>
+    public void Replace(Texture texture, string picturePath)
+    {
+      using var picture = System.Drawing.Image.FromFile(picturePath);
+      lock (this)
+      {
+        texture.Encode(picture);
+      }
+    }
+
+    /// <summary>The file with the changed textures: <paramref name="original"/> is the file as it was.</summary>
+    public byte[] Save(byte[] original)
+    {
+      lock (this)
+      {
+        using var result = new MemoryStream();
+        if (!Embedded)
+        {
+          _file.Save(result);
+          return result.ToArray();
+        }
+
+        // The textures are part of the model's resource: written into its two parts, which are then
+        // compressed again (as the old SparkIV's embedded texture editor did).
+        var resource = new RageLib.Common.Resources.ResourceFile();
+        resource.Read(new MemoryStream(original));
+        using (var system = new MemoryStream(resource.SystemMemData))
+        using (var graphics = new MemoryStream(resource.GraphicsMemData))
+        {
+          _file.Save(system, graphics);
+        }
+        resource.Write(result);
+        return result.ToArray();
+      }
+    }
 
     // A texture that doesn't decode still gets a row, with a blank thumbnail.
     private static TexturePixels SafeThumbnail(Texture texture)

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -15,11 +15,15 @@ namespace SparkIV.WinUI.Viewers
     private readonly File _file;
     private readonly IViewer _viewer;
 
-    public ViewerWindow(File file, IViewer viewer, string location)
+    private readonly Func<byte[], string>? _replaceFile;
+
+    /// <param name="replaceFile">Puts changed bytes in place of the file (texture editing); null to only view.</param>
+    public ViewerWindow(File file, IViewer viewer, string location, Func<byte[], string>? replaceFile = null)
     {
       InitializeComponent();
       _file = file;
       _viewer = viewer;
+      _replaceFile = replaceFile;
 
       Title = file.Name + " - SparkIV";
       TitleText.Text = file.Name;
@@ -71,7 +75,7 @@ namespace SparkIV.WinUI.Viewers
           (loaded as IDisposable)?.Dispose();
           return;
         }
-        var context = new ViewerContext(this, _file, data, ShowMessage, SetTitle);
+        var context = new ViewerContext(this, _file, data, ShowMessage, SetTitle, _replaceFile);
         ViewHost.Content = _viewer.CreateView(context, loaded);
       }
       catch (Exception ex)

@@ -24,7 +24,7 @@ namespace SparkIV.WinUI.Services
     public static string? FindGameDirectory(bool episodes, out KeyUtil keyUtil)
     {
       keyUtil = episodes ? new KeyUtilEFLC() : new KeyUtilGTAIV();
-      string? path = keyUtil.FindGameDirectory();
+      string? path = keyUtil.TryFindGameDirectory();
       if (path != null && System.IO.File.Exists(Path.Combine(path, keyUtil.ExecutableName)))
       {
         return path;
@@ -33,7 +33,7 @@ namespace SparkIV.WinUI.Services
       if (episodes)
       {
         var iv = new KeyUtilGTAIV();
-        string? ivPath = iv.FindGameDirectory();
+        string? ivPath = iv.TryFindGameDirectory();
         if (ivPath != null && IsCompleteEdition(ivPath))
         {
           keyUtil = iv;

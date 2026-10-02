@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
+using RageLib.FileSystem;
 using RageLib.HyperText;
 using Directory = RageLib.FileSystem.Common.Directory;
 using File = RageLib.FileSystem.Common.File;
@@ -326,10 +327,53 @@ namespace SparkIV.WinUI.Viewers
           }
         }
       }
+
+      // A page copied out of its game: the game it was said to be from gives the other sites and the texts.
+      if (FindTextFolderAbove(root) == null && Services.Games.Current is Services.GameInstall game)
+      {
+        AddGame(game);
+      }
     }
 
     // The html folders pages are looked up in, nearest first.
     private readonly List<Directory> _roots = new List<Directory>();
+
+    // The html folders of the game added for a page outside it, with the folder (episode) each is in.
+    private readonly List<(Directory Html, Directory Content)> _gameFolders = new List<(Directory, Directory)>();
+
+    private void AddGame(Services.GameInstall game)
+    {
+      try
+      {
+        var fs = new RealFileSystem();
+        fs.Open(game.Folder);
+        foreach (var name in game.Game.ContentFolders)
+        {
+          Directory? content = name.Length == 0 ? fs.RootDirectory : fs.RootDirectory.FindByName(name) as Directory;
+          if (content?.FindByName("pc") is Directory pc && pc.FindByName("html") is Directory html)
+          {
+            _roots.Add(html);
+            _gameFolders.Add((html, content));
+          }
+        }
+      }
+      catch (Exception)
+      {
+        // Then the page shows the keys and only links to the sites next to it.
+      }
+    }
+
+    private static Directory? FindTextFolderAbove(Directory start)
+    {
+      for (var dir = start; dir != null; dir = dir.ParentDirectory)
+      {
+        if (dir.FindByName("common") is Directory common && common.FindByName("text") is Directory text)
+        {
+          return text;
+        }
+      }
+      return null;
+    }
 
     public Directory Root { get; }
     public string StartPath { get; }
@@ -417,12 +461,14 @@ namespace SparkIV.WinUI.Viewers
         if (!_textFolderSearched)
         {
           _textFolderSearched = true;
-          for (var dir = Root; dir != null && _textFolder == null; dir = dir.ParentDirectory)
+          _textFolder = FindTextFolderAbove(Root);
+          if (_textFolder == null && _gameFolders.Count > 0)
           {
-            if (dir.FindByName("common") is Directory common && common.FindByName("text") is Directory text)
-            {
-              _textFolder = text;
-            }
+            // Of the game added for a page outside it: the texts of the episode that has the page's site.
+            string site = StartPath.Split('/')[0];
+            var (_, content) = _gameFolders.FirstOrDefault(g => g.Html.FindByName(site) is Directory);
+            content ??= _gameFolders[0].Content;
+            _textFolder = (content.FindByName("common") as Directory)?.FindByName("text") as Directory;
           }
         }
         return _textFolder;
@@ -729,7 +775,7 @@ namespace SparkIV.WinUI.Viewers
       {
         throw new InvalidDataException("This page has no images.");
       }
-      return new TextureDictionary(hyperText.EmbeddedTextureFile);
+      return new TextureDictionary(hyperText.EmbeddedTextureFile) { Embedded = true };
     }
 
     public FrameworkElement CreateView(ViewerContext context, object loaded) => new TextureView(context, (TextureDictionary)loaded);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -66,46 +66,66 @@ namespace SparkIV.WinUI
 
     private async Task OpenGameAsync(bool episodes)
     {
+      Game game = episodes ? Games.Episodes : Games.GtaIV;
       string gameName = episodes ? "Episodes from Liberty City" : "GTA IV";
 
-      string? path = GameLocator.FindGameDirectory(episodes, out KeyUtil keyUtil);
+      // The folder set in the settings, else the one found; asked for once and then remembered.
+      string? path = Games.InstallFolder(game, "Windows");
       if (path == null)
       {
-        string? folder = await PickFolderAsync();
+        var (folder, error) = await GameFolders.PickAsync(this, game, "Windows");
+        if (error != null)
+        {
+          ShowMessage(InfoBarSeverity.Error, "Not a game folder", error);
+        }
         if (folder == null)
         {
           return;
         }
-
-        KeyUtil? checkedUtil = GameLocator.Check(folder, episodes);
-        if (checkedUtil == null)
-        {
-          ShowMessage(InfoBarSeverity.Error, "Not a game folder",
-                      folder + " does not contain " + (episodes ? "EFLC.exe or the GTAIV.exe of the Complete Edition." : "GTAIV.exe."));
-          return;
-        }
-        keyUtil = checkedUtil;
         path = folder;
       }
 
-      string gamePath = path;
+      var install = new GameInstall(game, path, "Windows");
       await RunBusyAsync(async () =>
       {
-        byte[]? key = await Task.Run(() => keyUtil.FindKey(gamePath));
-        if (key == null)
+        if (!await LoadKeyAsync(install))
         {
-          ShowMessage(InfoBarSeverity.Error, "Unsupported " + keyUtil.ExecutableName,
-                      "Your " + keyUtil.ExecutableName + " seems to be modified or is a newer version than SparkIV supports.");
           return;
         }
-        KeyStore.SetKeyLoader(() => key);
 
         ResetVolumes();
-        Volume volume = await Task.Run(() => _volumes.OpenFolder(gamePath));
+        Volume volume = await Task.Run(() => _volumes.OpenFolder(install.Folder));
         // Models find their textures through the game's .ide files and shared dictionaries.
-        GameTextures.SetGameFolder(gamePath);
-        ShowVolume(volume, gameName + "  \u00B7  " + gamePath);
+        Games.SetCurrent(install);
+        ShowVolume(volume, gameName + "  \u00B7  " + install.Folder);
       });
+    }
+
+    /// <summary>Reads the key for the archives from the game's exe; false (with a message) if it isn't there.</summary>
+    private async Task<bool> LoadKeyAsync(GameInstall install)
+    {
+      KeyUtil keyUtil = install.KeyUtil;
+      byte[]? key = await Task.Run(() => keyUtil.FindKey(install.Folder));
+      if (key == null)
+      {
+        ShowMessage(InfoBarSeverity.Error, "Unsupported " + keyUtil.ExecutableName,
+                    "Your " + keyUtil.ExecutableName + " seems to be modified or is a newer version than SparkIV supports.");
+        return false;
+      }
+      KeyStore.SetKeyLoader(() => key);
+      return true;
+    }
+
+    private SettingsWindow? _settings;
+
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+      if (_settings == null)
+      {
+        _settings = new SettingsWindow();
+        _settings.Closed += (s, args) => _settings = null;
+      }
+      _settings.Activate();
     }
 
     private async void OpenArchive_Click(object sender, RoutedEventArgs e)
@@ -120,19 +140,39 @@ namespace SparkIV.WinUI
         return;
       }
 
-      string path = file.Path;
+      await OpenArchiveAsync(file.Path);
+    }
+
+    /// <summary>
+    /// Opens an .rpf or .img file (also when SparkIV is started with one). Its key comes from its game:
+    /// the one it lies in, else the one asked for (<paramref name="install"/> when that was asked already).
+    /// </summary>
+    internal async Task OpenArchiveAsync(string path, GameInstall? install = null)
+    {
+      install ??= Games.ForFile(path) ?? await GameChooserWindow.AskAsync(path, optional: false);
+      if (install == null)
+      {
+        return;
+      }
+
       await RunBusyAsync(async () =>
       {
+        if (!await LoadKeyAsync(install))
+        {
+          return;
+        }
+
         ResetVolumes();
         Volume volume = await Task.Run(() => _volumes.OpenArchive(path));
-        ShowVolume(volume, path);
+        Games.SetCurrent(install);
+        ShowVolume(volume, install.Game.Name + "  ·  " + path);
       });
     }
 
     private void ResetVolumes()
     {
-      // A single archive has no game around it; the game folder is set again when a game is opened.
-      GameTextures.SetGameFolder(null);
+      // Set again for what is opened next.
+      Games.SetCurrent(null);
       _volumes.CloseAll();
       _modified.Clear();
       _back.Clear();
@@ -252,9 +292,23 @@ namespace SparkIV.WinUI
         return;
       }
       string where = string.Join(" \u203A ", _current.Path().Select(l => l.Name));
+      Volume volume = _current.Volume;
+
+      // A viewer that changes the file (a texture replaced) puts it back here, like Import: in the archive,
+      // written with Save.
+      string Replace(byte[] data)
+      {
+        file.SetData(data);
+        _modified.Add(volume);
+        RefreshList();
+        UpdateCommands();
+        ShowMessage(InfoBarSeverity.Success, file.Name + " changed", "Use Save to write it into " + volume.Name + ".");
+        return "Use Save in the main window to write it into " + volume.Name + ".";
+      }
+
       OpenViewerWhenInputDone(() =>
       {
-        var window = new Viewers.ViewerWindow(file, viewer, where);
+        var window = new Viewers.ViewerWindow(file, viewer, where, Replace);
         window.Activate();
         window.BringToFront();
       });
@@ -496,7 +550,7 @@ namespace SparkIV.WinUI
       foreach (var button in new[] { SortName, SortType, SortSize, SortResource })
       {
         string key = (string)button.Tag;
-        button.Content = key == _sortKey ? key + (_sortDescending ? "  ↓" : "  ↑") : key;
+        button.Content = key == _sortKey ? key + (_sortDescending ? "  \u2193" : "  \u2191") : key;
       }
     }
 

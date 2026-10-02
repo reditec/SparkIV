@@ -43,6 +43,10 @@
                 <AppBarButton.Icon><FontIcon Glyph="&#xE71E;" /></AppBarButton.Icon>
             </AppBarButton>
             <AppBarSeparator />
+            <AppBarButton x:Name="ReplaceButton" Label="Replace…" Click="Replace_Click" Visibility="Collapsed"
+                          ToolTipService.ToolTip="Put a picture in place of the selected texture (it is scaled to the texture's size and keeps its format)">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8B5;" /></AppBarButton.Icon>
+            </AppBarButton>
             <AppBarButton Label="Export as PNG" Click="ExportPng_Click" ToolTipService.ToolTip="Save the selected texture as a PNG image">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
             </AppBarButton>

@@ -52,6 +52,41 @@ namespace RageLib.Common
     protected abstract string[] PathRegistryKeys { get; }
     protected abstract uint[] SearchOffsets { get; }
 
+    /// <summary>
+    /// The game folder from the working directory, path.iv / path.eflc or the registry, or null. Unlike
+    /// <see cref="FindGameDirectory"/> it never asks: no dialog, no exit.
+    /// </summary>
+    public string TryFindGameDirectory()
+    {
+      if (File.Exists(Path.Combine(Directory.GetCurrentDirectory(), ExecutableName)))
+      {
+        return Directory.GetCurrentDirectory();
+      }
+
+      string pathFile = ExecutableName == "GTAIV.exe" ? "path.iv" : ExecutableName == "EFLC.exe" ? "path.eflc" : null;
+      if (pathFile != null && File.Exists(pathFile))
+      {
+        string stored = File.ReadAllText(pathFile).Trim();
+        if (stored.Length > 0 && File.Exists(Path.Combine(stored, ExecutableName)))
+        {
+          return stored;
+        }
+      }
+
+      foreach (var s in PathRegistryKeys)
+      {
+        using (var key = Registry.LocalMachine.OpenSubKey(s))
+        {
+          string folder = key?.GetValue("InstallFolder")?.ToString();
+          if (!string.IsNullOrWhiteSpace(folder) && File.Exists(Path.Combine(folder, ExecutableName)))
+          {
+            return folder;
+          }
+        }
+      }
+      return null;
+    }
+
     public string FindGameDirectory()
     {
 
