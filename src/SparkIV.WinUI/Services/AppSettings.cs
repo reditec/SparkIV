@@ -6,14 +6,27 @@ using System.Text.Json;
 namespace SparkIV.WinUI.Services
 {
   /// <summary>
-  /// What SparkIV remembers between runs, in %LocalAppData%\SparkIV\settings.json: for now the folders of
-  /// the games.
+  /// What SparkIV remembers between runs, in %LocalAppData%\SparkIV\settings.json: the folders of the
+  /// games and of the backups.
   /// </summary>
   internal static class AppSettings
   {
     private sealed class Data
     {
       public Dictionary<string, string> GamePaths { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+      public string? BackupFolder { get; set; }
+    }
+
+    /// <summary>Where the originals of changed files are kept; null for the default (Documents\SparkIV\Backups).</summary>
+    public static string? BackupFolder
+    {
+      get => Load().BackupFolder;
+      set
+      {
+        Load().BackupFolder = value;
+        Save();
+      }
     }
 
     private static readonly string FilePath =

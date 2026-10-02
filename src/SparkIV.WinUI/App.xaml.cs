@@ -20,6 +20,14 @@ namespace SparkIV.WinUI
     /// </summary>
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+      // Started with administrator rights only to put saved files into a protected folder: no window.
+      string[] arguments = Environment.GetCommandLineArgs();
+      if (arguments.Length == 3 && arguments[1] == FileInstaller.HelperArgument)
+      {
+        Environment.Exit(FileInstaller.RunHelper(arguments[2]));
+        return;
+      }
+
       string? path = FileLaunch.FileFromCommandLine();
       if (path == null)
       {

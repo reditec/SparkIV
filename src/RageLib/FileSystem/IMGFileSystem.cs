@@ -40,14 +40,41 @@ namespace RageLib.FileSystem
       BuildFS();
     }
 
+    /// <summary>Writes the archive anew (packed) and puts it in place of the old file.</summary>
     public override void Save()
     {
-      _imgFile.Save();
+      SaveByReplacing(_imgFile.Filename);
     }
 
+    /// <summary>The same as <see cref="Save"/>: saving always writes the archive packed.</summary>
     public override void Rebuild()
     {
-      _imgFile.Rebuild();
+      Save();
+    }
+
+    public override bool SupportsWriteTo
+    {
+      get { return true; }
+    }
+
+    public override void WriteTo(string path)
+    {
+      _imgFile.WriteTo(path);
+    }
+
+    public override void Release()
+    {
+      _imgFile.Close();
+    }
+
+    public override void Commit(string path)
+    {
+      _imgFile.Commit(path);
+    }
+
+    public override void Revert()
+    {
+      _imgFile.Revert();
     }
 
     public override void Close()

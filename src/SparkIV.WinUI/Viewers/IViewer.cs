@@ -27,7 +27,7 @@ namespace SparkIV.WinUI.Viewers
   public sealed class ViewerContext
   {
     public ViewerContext(Window window, File file, byte[] data, Action<string, string, bool> showMessage, Action<string, string> setTitle,
-                         Func<byte[], string>? replaceFile = null)
+                         Func<byte[], Task<string>>? replaceFile = null, Func<Task<bool>>? ensureEditMode = null)
     {
       Window = window;
       File = file;
@@ -35,14 +35,20 @@ namespace SparkIV.WinUI.Viewers
       ShowMessage = showMessage;
       SetTitle = setTitle;
       ReplaceFile = replaceFile;
+      EnsureEditModeAsync = ensureEditMode ?? (() => Task.FromResult(Services.EditMode.IsOn));
     }
+
+    /// <summary>
+    /// Before changing the file: true if edit mode is on, else it is asked to be turned on (with its warning).
+    /// </summary>
+    public Func<Task<bool>> EnsureEditModeAsync { get; }
 
     /// <summary>
     /// Puts new bytes in place of the file: in its archive (written with Save in the main window), or for a
     /// file opened on its own straight into it. Returns what happened, for the message. Null when the file
     /// can't be changed from here.
     /// </summary>
-    public Func<byte[], string>? ReplaceFile { get; }
+    public Func<byte[], Task<string>>? ReplaceFile { get; }
 
     public Window Window { get; }
     public File File { get; }

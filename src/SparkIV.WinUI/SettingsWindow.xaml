@@ -25,6 +25,9 @@
             <SelectorBarItem Text="Game folders" Tag="GameFoldersPage" IsSelected="True">
                 <SelectorBarItem.Icon><FontIcon Glyph="&#xE8B7;" /></SelectorBarItem.Icon>
             </SelectorBarItem>
+            <SelectorBarItem Text="Backups" Tag="BackupsPage">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE81C;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
         </SelectorBar>
 
         <InfoBar x:Name="Info" Grid.Row="2" Margin="16,0,16,8" IsOpen="False" Severity="Error" />
@@ -35,6 +38,35 @@
                     <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                Text="Where each game is installed, per platform. Without a folder set, SparkIV uses the one Windows knows (registry) or asks for it when it is needed. In the Complete Edition both games are the same folder." />
                     <StackPanel x:Name="GameFolderList" Spacing="4" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="BackupsPage" Padding="24,8,24,24" Visibility="Collapsed">
+                <StackPanel Spacing="4">
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Before SparkIV writes a game file the first time, it keeps the original here: files of a game by game and path in the game, others by drive and path. A file's backup is never replaced, so it stays the file as it was before the first change. To undo, copy it back." />
+                    <Border Padding="16,12,16,12" CornerRadius="4" BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Backup folder" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock x:Name="BackupFolderText" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
+                                <TextBlock x:Name="BackupStateText" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button Content="Open" Click="OpenBackupFolder_Click" />
+                                <Button Content="Browse…" Click="BrowseBackupFolder_Click" />
+                                <Button x:Name="ResetBackupButton" Content="Reset" Click="ResetBackupFolder_Click"
+                                        ToolTipService.ToolTip="Use the default folder in Documents again" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
             </ScrollViewer>
         </Grid>

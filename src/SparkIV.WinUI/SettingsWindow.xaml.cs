@@ -35,7 +35,45 @@ namespace SparkIV.WinUI
           GameFolderList.Children.Add(CreateFolderRow(game, platform));
         }
       }
+      ShowBackupFolder();
     }
+
+    #region Backups
+
+    private void ShowBackupFolder()
+    {
+      bool custom = AppSettings.BackupFolder != null;
+      BackupFolderText.Text = Backups.Folder;
+      BackupStateText.Text = custom ? "Set" : "Default";
+      ResetBackupButton.IsEnabled = custom;
+    }
+
+    private void OpenBackupFolder_Click(object sender, RoutedEventArgs e)
+    {
+      System.IO.Directory.CreateDirectory(Backups.Folder);
+      System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Backups.Folder) { UseShellExecute = true });
+    }
+
+    private async void BrowseBackupFolder_Click(object sender, RoutedEventArgs e)
+    {
+      var picker = new Windows.Storage.Pickers.FolderPicker();
+      picker.FileTypeFilter.Add("*");
+      WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+      var picked = await picker.PickSingleFolderAsync();
+      if (picked != null)
+      {
+        AppSettings.BackupFolder = picked.Path;
+        ShowBackupFolder();
+      }
+    }
+
+    private void ResetBackupFolder_Click(object sender, RoutedEventArgs e)
+    {
+      AppSettings.BackupFolder = null;
+      ShowBackupFolder();
+    }
+
+    #endregion
 
     private void Tabs_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {

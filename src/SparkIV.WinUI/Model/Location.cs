@@ -8,15 +8,22 @@ namespace SparkIV.WinUI.Model
   /// </summary>
   public sealed class Volume
   {
-    public Volume(FileSystem fileSystem, string name, Location? host, File? hostFile)
+    public Volume(FileSystem fileSystem, string name, Location? host, File? hostFile, string? archivePath = null)
     {
       FileSystem = fileSystem;
       Name = name;
       Host = host;
       HostFile = hostFile;
+      ArchivePath = archivePath;
     }
 
     public FileSystem FileSystem { get; }
+
+    /// <summary>
+    /// The archive file on disk that Save writes, for the backup before. Null for a folder (its files are
+    /// written one by one) and for an archive inside an archive (opened from a temporary copy).
+    /// </summary>
+    public string? ArchivePath { get; }
     public string Name { get; }
 
     /// <summary>The folder the archive file lies in, or null for the outermost volume.</summary>

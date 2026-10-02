@@ -19,6 +19,7 @@
 \**********************************************************************/
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using RageLib.Common;
 
@@ -40,7 +41,9 @@ namespace RageLib.FileSystem.IMG
 
       bool encrypted = false;
 
-      _stream = new FileStream(filename, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+      // Only read: archives in protected folders (Program Files) open without administrator rights too.
+      // Saving writes a new file (WriteTo).
+      _stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
       var br = new BinaryReader(_stream);
 
@@ -92,133 +95,108 @@ namespace RageLib.FileSystem.IMG
       }
     }
 
-    public void Save()
+    public string Filename
     {
-      if (Header.EntryCount > 0)
-      {
-        _stream.Position = 0;
-
-        var bw = new BinaryWriter(_stream);
-
-        Header.Write(bw);
-
-        // Recalculate the offset/sizes of the TOC entries
-        var tocOffset = _stream.Position;
-
-        // Find the max value here
-        var dataOffset = int.MinValue;
-        foreach (var entry in TOC)
-        {
-          var offset = entry.OffsetBlock + entry.UsedBlocks;
-          if (offset > dataOffset)
-          {
-            dataOffset = offset;
-          }
-        }
-
-        foreach (var entry in TOC)
-        {
-          if (entry.CustomData != null)
-          {
-            var blockCount = (int)Math.Ceiling((float)entry.CustomData.Length / TOCEntry.BlockSize);
-            if (blockCount <= entry.UsedBlocks)
-            {
-              // Clear up the old data
-              _stream.Seek(entry.OffsetBlock * TOCEntry.BlockSize, SeekOrigin.Begin);
-              bw.Write(new byte[entry.UsedBlocks * TOCEntry.BlockSize]);
-
-              // We can fit it in the existing block... so lets do that.
-              _stream.Seek(entry.OffsetBlock * TOCEntry.BlockSize, SeekOrigin.Begin);
-            }
-            else
-            {
-              // Clear up the old data
-              _stream.Seek(entry.OffsetBlock * TOCEntry.BlockSize, SeekOrigin.Begin);
-              bw.Write(new byte[entry.UsedBlocks * TOCEntry.BlockSize]);
-
-              // Fit it at the end of the stream
-              entry.OffsetBlock = dataOffset;
-              _stream.Seek(dataOffset * TOCEntry.BlockSize, SeekOrigin.Begin);
-              dataOffset += blockCount;
-            }
-
-            entry.UsedBlocks = (short)blockCount;
-
-            bw.Write(entry.CustomData);
-
-            if ((entry.CustomData.Length % TOCEntry.BlockSize) != 0)
-            {
-              var padding = new byte[blockCount * TOCEntry.BlockSize - entry.CustomData.Length];
-              bw.Write(padding);
-            }
-
-            entry.SetCustomData(null);
-          }
-        }
-
-        _stream.Seek(tocOffset, SeekOrigin.Begin);
-
-        TOC.Write(bw);
-      }
+      get { return _filename; }
     }
 
-    public void Rebuild()
+    // Where each entry is in the file written by WriteTo, until Commit.
+    private (TOCEntry Entry, int OffsetBlock, short UsedBlocks)[] _written;
+
+    /// <summary>
+    /// Writes the archive with all changes into a new file, packed: the header, the table of contents,
+    /// then the entries one after the other. Unencrypted (the game reads that too). This file and its
+    /// entries stay as they are until <see cref="Commit"/>.
+    /// </summary>
+    public void WriteTo(string path)
     {
-      if (Header.EntryCount > 0)
+      var written = new List<(TOCEntry, int, short)>();
+      using (var output = new FileStream(path, FileMode.Create, FileAccess.Write))
       {
-        string tempFilename = _filename + ".temp";
-        var tempFS = new FileStream(tempFilename, FileMode.Create, FileAccess.Write);
-        try
+        var bw = new BinaryWriter(output);
+
+        // The data starts at the first block after header and table (the old Rebuild left out the header).
+        const int headerSize = 0x14;
+        int dataBlock = (headerSize + Header.TocSize + TOCEntry.BlockSize - 1) / TOCEntry.BlockSize;
+        output.Position = (long)dataBlock * TOCEntry.BlockSize;
+
+        foreach (var entry in TOC)
         {
-          var bw = new BinaryWriter(tempFS);
-
-          Header.Write(bw);
-
-          // Recalculate the offset/sizes of the TOC entries
-          var tocOffset = tempFS.Position;
-
-          var dataOffset = TOC.GetTOCBlockSize();
-
-          tempFS.Seek(dataOffset * TOCEntry.BlockSize, SeekOrigin.Begin);
-          foreach (var entry in TOC)
+          byte[] data;
+          short blocks;
+          if (entry.CustomData != null)
           {
-            if (entry.CustomData == null)
-            {
-              bw.Write(ReadData(entry.OffsetBlock * TOCEntry.BlockSize, entry.UsedBlocks * TOCEntry.BlockSize));
-            }
-            else
-            {
-              var blockCount = (int)Math.Ceiling((float)entry.CustomData.Length / TOCEntry.BlockSize);
-              entry.UsedBlocks = (short)blockCount;
-
-              bw.Write(entry.CustomData);
-
-              if ((entry.CustomData.Length % TOCEntry.BlockSize) != 0)
-              {
-                var padding = new byte[blockCount * TOCEntry.BlockSize - entry.CustomData.Length];
-                bw.Write(padding);
-              }
-            }
-            entry.OffsetBlock = dataOffset;
-            dataOffset += entry.UsedBlocks;
+            // Already padded to whole blocks.
+            data = entry.CustomData;
+            blocks = (short)((data.Length + TOCEntry.BlockSize - 1) / TOCEntry.BlockSize);
           }
-
-          tempFS.Seek(tocOffset, SeekOrigin.Begin);
-
-          TOC.Write(bw);
-
+          else
+          {
+            blocks = entry.UsedBlocks;
+            data = ReadData(entry.OffsetBlock * TOCEntry.BlockSize, blocks * TOCEntry.BlockSize);
+          }
+          bw.Write(data);
+          int padding = blocks * TOCEntry.BlockSize - data.Length;
+          if (padding > 0)
+          {
+            bw.Write(new byte[padding]);
+          }
+          written.Add((entry, dataBlock, blocks));
+          dataBlock += blocks;
         }
-        finally
+
+        // The table with the new places, then the entries as they were again until Commit.
+        var old = new List<(int, short)>();
+        foreach (var (entry, offsetBlock, usedBlocks) in written)
         {
-          tempFS.Close();
+          old.Add((entry.OffsetBlock, entry.UsedBlocks));
+          entry.OffsetBlock = offsetBlock;
+          entry.UsedBlocks = usedBlocks;
         }
+        output.Position = 0;
+        Header.Write(bw);
+        bw.Write(TableBytes());
+        for (int i = 0; i < written.Count; i++)
+        {
+          written[i].Item1.OffsetBlock = old[i].Item1;
+          written[i].Item1.UsedBlocks = old[i].Item2;
+        }
+      }
+      _written = written.ToArray();
+    }
 
-        Close();
+    /// <summary>The table of contents, exactly as long as the header says.</summary>
+    private byte[] TableBytes()
+    {
+      var ms = new MemoryStream();
+      TOC.Write(new BinaryWriter(ms));
+      var table = new byte[Header.TocSize];
+      Array.Copy(ms.ToArray(), table, Math.Min(table.Length, (int)ms.Length));
+      return table;
+    }
 
-        System.IO.File.Delete(_filename);
-        System.IO.File.Move(tempFilename, _filename);
+    /// <summary>The file written by <see cref="WriteTo"/> took the place of this one at <paramref name="path"/>.</summary>
+    public void Commit(string path)
+    {
+      Close();
+      foreach (var (entry, offsetBlock, usedBlocks) in _written)
+      {
+        entry.OffsetBlock = offsetBlock;
+        entry.UsedBlocks = usedBlocks;
+        entry.SetCustomData(null);
+      }
+      _written = null;
+      _filename = path;
+      _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
 
-        Open(_filename);
+    /// <summary>The written file couldn't take its place: on with this one, changes kept.</summary>
+    public void Revert()
+    {
+      _written = null;
+      if (_stream == null || !_stream.CanRead)
+      {
+        _stream = new FileStream(_filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
       }
     }
 

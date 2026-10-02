@@ -89,6 +89,11 @@ namespace SparkIV.WinUI.Viewers
       {
         return;
       }
+      // Changing a file needs edit mode; asked for here when it is off.
+      if (!await _context.EnsureEditModeAsync())
+      {
+        return;
+      }
 
       var picker = new Windows.Storage.Pickers.FileOpenPicker();
       foreach (var type in new[] { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff" })
@@ -114,7 +119,7 @@ namespace SparkIV.WinUI.Viewers
           return (_dictionary.Save(original), TexturePixels.Thumbnail(texture, 48));
         });
         _savedData = data;
-        string note = _context.ReplaceFile(data);
+        string note = await _context.ReplaceFile(data);
 
         // The row with the new thumbnail, and the texture shown again.
         int index = _rows.IndexOf(row);

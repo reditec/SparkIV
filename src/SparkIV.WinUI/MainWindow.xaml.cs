@@ -49,13 +49,20 @@ namespace SparkIV.WinUI
       }
       AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 800));
 
-      Closed += (sender, args) => _volumes.Dispose();
+      Closed += (sender, args) =>
+      {
+        _volumes.Dispose();
+        EditMode.Changed -= UpdateEditModeButton;
+      };
+
+      // Edit mode is also turned on from a viewer (Replace).
+      EditMode.Changed += UpdateEditModeButton;
 
       // Also when the list item has already handled the release itself.
       FileList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(FileList_PointerReleased), true);
 
       UpdateSortHeaders();
-      UpdateCommands();
+      UpdateEditModeButton();
     }
 
     #region Opening
@@ -100,6 +107,55 @@ namespace SparkIV.WinUI
         ShowVolume(volume, gameName + "  \u00B7  " + install.Folder);
       });
     }
+
+    #region Edit mode
+
+    private async void EditMode_Click(object sender, RoutedEventArgs e)
+    {
+      if (EditMode.IsOn)
+      {
+        EditMode.TurnOff();
+      }
+      else
+      {
+        await EditMode.TurnOnAsync(Root.XamlRoot);
+      }
+      UpdateEditModeButton();
+    }
+
+    private void UpdateEditModeButton()
+    {
+      EditModeButton.IsChecked = EditMode.IsOn;
+      ToolTipService.SetToolTip(EditModeButton, EditMode.IsOn
+        ? "Edit mode is on: game files can be changed. Click to turn it off."
+        : "Turn on changing game files (import, replace, save)");
+      UpdateCommands();
+    }
+
+    // Whether the shield is on Save: checked when the folder changes, not on every selection.
+    private Volume? _shieldVolume;
+    private bool _shield;
+
+    /// <summary>Like Windows: the shield on Save when saving there needs administrator rights.</summary>
+    private void UpdateSaveShield()
+    {
+      Volume? volume = _current?.Volume;
+      if (!ReferenceEquals(volume, _shieldVolume))
+      {
+        _shieldVolume = volume;
+        // The folder the file on disk is in: of the game, or of the outermost archive.
+        Volume? outer = volume == null ? null : Saving.Chain(volume).Last();
+        string? folder = outer?.FileSystem is RageLib.FileSystem.RealFileSystem real ? real.RealDirectory
+          : outer?.ArchivePath != null ? System.IO.Path.GetDirectoryName(outer.ArchivePath) : null;
+        _shield = EditMode.NeedsAdministrator(folder);
+      }
+      SaveGlyph.Glyph = _shield ? "\uEA18" : "\uE74E";
+      ToolTipService.SetToolTip(SaveButton, _shield
+        ? "Write the changes (Windows asks for administrator rights: the game is in a protected folder)"
+        : "Write the changes");
+    }
+
+    #endregion
 
     /// <summary>Reads the key for the archives from the game's exe; false (with a message) if it isn't there.</summary>
     private async Task<bool> LoadKeyAsync(GameInstall install)
@@ -296,14 +352,14 @@ namespace SparkIV.WinUI
 
       // A viewer that changes the file (a texture replaced) puts it back here, like Import: in the archive,
       // written with Save.
-      string Replace(byte[] data)
+      Task<string> Replace(byte[] data)
       {
         file.SetData(data);
         _modified.Add(volume);
         RefreshList();
         UpdateCommands();
         ShowMessage(InfoBarSeverity.Success, file.Name + " changed", "Use Save to write it into " + volume.Name + ".");
-        return "Use Save in the main window to write it into " + volume.Name + ".";
+        return Task.FromResult("Use Save in the main window to write it into " + volume.Name + ".");
       }
 
       OpenViewerWhenInputDone(() =>
@@ -785,17 +841,22 @@ namespace SparkIV.WinUI
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
-      if (_current == null || !_modified.Contains(_current.Volume))
+      if (_current == null || !_modified.Contains(_current.Volume) || !EditMode.IsOn)
       {
         return;
       }
 
       Volume volume = _current.Volume;
+      var chain = Saving.Chain(volume);
+      // An archive in an archive is saved into the one around it, and so on up to the file on disk.
+      string around = chain.Count > 1 ? " It goes into " + string.Join(", then ", chain.Skip(1).Select(v => v.Name)) + ", which is saved too." : "";
       var dialog = new ContentDialog
       {
         XamlRoot = Root.XamlRoot,
         Title = "Save " + volume.Name + "?",
-        Content = "This writes the imported files into the game files. Keep a backup if you want to undo it.",
+        Content = "This writes the changes into the game files." + around + " Before a file is replaced the first time, " +
+                  "its original is kept in " + Backups.Folder + "." +
+                  (_shield ? "\n\nThe game is in a protected folder: Windows asks for administrator rights to write it." : ""),
         PrimaryButtonText = "Save",
         CloseButtonText = "Cancel",
         DefaultButton = ContentDialogButton.Close,
@@ -805,11 +866,30 @@ namespace SparkIV.WinUI
         return;
       }
 
+      var saved = new List<Volume>();
       await RunBusyAsync(async () =>
       {
-        await Task.Run(() => volume.FileSystem.Save());
-        _modified.Remove(volume);
-        ShowMessage(InfoBarSeverity.Success, "Saved", volume.Name + " has been saved.");
+        try
+        {
+          await Task.Run(() => Saving.Save(volume, _volumes, saved));
+          ShowMessage(InfoBarSeverity.Success, "Saved", volume.Name + " has been saved. The originals are in " + Backups.Folder + ".");
+        }
+        catch (OperationCanceledException ex)
+        {
+          ShowMessage(InfoBarSeverity.Warning, "Not saved", ex.Message);
+        }
+        finally
+        {
+          foreach (var v in saved)
+          {
+            _modified.Remove(v);
+          }
+          // Saved into the archive around it, which couldn't be saved itself: its changes are still to save.
+          if (saved.Count > 0 && saved.Count < chain.Count)
+          {
+            _modified.Add(chain[saved.Count]);
+          }
+        }
       });
       RefreshList();
       UpdateCommands();
@@ -830,8 +910,10 @@ namespace SparkIV.WinUI
       FilterBox.IsEnabled = open;
       ExportButton.IsEnabled = open && FileList.SelectedItems.Count > 0;
       ExportAllButton.IsEnabled = open;
-      ImportButton.IsEnabled = open;
-      SaveButton.IsEnabled = _current != null && _modified.Contains(_current.Volume);
+      // Changing files only in edit mode.
+      ImportButton.IsEnabled = open && EditMode.IsOn;
+      SaveButton.IsEnabled = _current != null && _modified.Contains(_current.Volume) && EditMode.IsOn;
+      UpdateSaveShield();
     }
 
     private async Task RunBusyAsync(Func<Task> work)

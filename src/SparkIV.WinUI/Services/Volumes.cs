@@ -26,7 +26,7 @@ namespace SparkIV.WinUI.Services
     {
       var fs = CreateArchive(path);
       fs.Open(path);
-      return Add(new Volume(fs, System.IO.Path.GetFileName(path), null, null));
+      return Add(new Volume(fs, System.IO.Path.GetFileName(path), null, null, path));
     }
 
     /// <summary>Opens an .rpf or .img file that lies in an open volume.</summary>
@@ -41,23 +41,35 @@ namespace SparkIV.WinUI.Services
       }
 
       string path;
+      string? archivePath = null;
       if (host.Volume.FileSystem is RealFileSystem real)
       {
         // FullName starts with the name of the root folder, so it is relative to the folder above it.
         string parent = new DirectoryInfo(real.RealDirectory).Parent?.FullName ?? real.RealDirectory;
         path = System.IO.Path.Combine(parent, file.FullName);
+        archivePath = path;
       }
       else
       {
         // An archive inside an archive: the readers need a file.
-        path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SparkIV-" + Guid.NewGuid().ToString("N") + System.IO.Path.GetExtension(file.Name));
+        path = NewTempFile(System.IO.Path.GetExtension(file.Name));
         System.IO.File.WriteAllBytes(path, file.GetData());
-        _tempFiles.Add(path);
       }
 
       var fs = CreateArchive(file.Name);
       fs.Open(path);
-      return Add(new Volume(fs, file.Name, host, file));
+      return Add(new Volume(fs, file.Name, host, file, archivePath));
+    }
+
+    /// <summary>A path for a temporary file, removed when the volumes are closed.</summary>
+    public string NewTempFile(string extension)
+    {
+      string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SparkIV-" + Guid.NewGuid().ToString("N") + extension);
+      lock (_tempFiles)
+      {
+        _tempFiles.Add(path);
+      }
+      return path;
     }
 
     public static bool IsArchiveName(string name)

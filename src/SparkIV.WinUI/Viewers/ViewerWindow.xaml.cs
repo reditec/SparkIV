@@ -15,10 +15,10 @@ namespace SparkIV.WinUI.Viewers
     private readonly File _file;
     private readonly IViewer _viewer;
 
-    private readonly Func<byte[], string>? _replaceFile;
+    private readonly Func<byte[], Task<string>>? _replaceFile;
 
     /// <param name="replaceFile">Puts changed bytes in place of the file (texture editing); null to only view.</param>
-    public ViewerWindow(File file, IViewer viewer, string location, Func<byte[], string>? replaceFile = null)
+    internal ViewerWindow(File file, IViewer viewer, string location, Func<byte[], Task<string>>? replaceFile = null)
     {
       InitializeComponent();
       _file = file;
@@ -75,7 +75,8 @@ namespace SparkIV.WinUI.Viewers
           (loaded as IDisposable)?.Dispose();
           return;
         }
-        var context = new ViewerContext(this, _file, data, ShowMessage, SetTitle, _replaceFile);
+        var context = new ViewerContext(this, _file, data, ShowMessage, SetTitle, _replaceFile,
+                                        () => Services.EditMode.TurnOnAsync(Root.XamlRoot));
         ViewHost.Content = _viewer.CreateView(context, loaded);
       }
       catch (Exception ex)

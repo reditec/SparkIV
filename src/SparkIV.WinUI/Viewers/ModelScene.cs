@@ -137,6 +137,13 @@ namespace SparkIV.WinUI.Viewers
             scene.OpenDictionary(wtd);
           }
         }
+        // Models loose in the game folder have theirs in the textures folder beside: pc\models\plantsmgr.wdd,
+        // pc\textures\plantsmgr.wtd.
+        if (file.ParentDirectory?.ParentDirectory?.FindByName("textures") is Directory textures &&
+            textures.FindByName(baseName + ".wtd") is File beside)
+        {
+          scene.OpenDictionary(beside);
+        }
 
         // The dictionaries the game's .ide files give the model (map objects: bronx_e.ide gives
         // l_bxe_cm_treelod tree_lods) and their parents, next to the model or shared in gtxd.img.
@@ -171,8 +178,12 @@ namespace SparkIV.WinUI.Viewers
             // variations. One variation of each part is shown, the lowest number; entries whose name isn't
             // known are all shown.
             var names = Enumerable.Range(0, dictionary.ModelsInDictionary).Select(i => PedComponentNames.Find(dictionary.GetNameHash(i))).ToList();
-            // Map objects are named in the game's .ide files; they are all shown.
-            var mapNames = Enumerable.Range(0, dictionary.ModelsInDictionary).Select(i => names[i] == null ? Services.GameTextures.ModelName(dictionary.GetNameHash(i)) : null).ToList();
+            // Map objects are named in the game's .ide files, a few others are known (the plants); they are all shown.
+            var mapNames = Enumerable.Range(0, dictionary.ModelsInDictionary)
+                                     .Select(i => names[i] == null
+                                                    ? Services.GameTextures.ModelName(dictionary.GetNameHash(i)) ?? KnownModelNames.Find(dictionary.GetNameHash(i))
+                                                    : null)
+                                     .ToList();
             var firstOfPart = names.Where(n => n != null)
                                    .GroupBy(n => n!.Substring(0, n.IndexOf('_')), StringComparer.OrdinalIgnoreCase)
                                    .Select(g => g.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).First())
@@ -302,9 +313,10 @@ namespace SparkIV.WinUI.Viewers
     {
       // The materials of this drawable, numbered for the whole scene.
       int firstMaterial = Materials.Count;
+      string? assigned = KnownModelNames.TextureFor(name);
       foreach (var material in drawable.Materials)
       {
-        Materials.Add(CreateMaterial(material, drawable.AttachedTexture));
+        Materials.Add(CreateMaterial(material, drawable.AttachedTexture, assigned));
       }
       var node = parent.Add(new ModelPart(name, drawable.Models.Count + (drawable.Models.Count == 1 ? " level of detail" : " levels of detail"), "\uF158"));
 
@@ -380,11 +392,12 @@ namespace SparkIV.WinUI.Viewers
       return scene.Id;
     }
 
-    private SceneMaterial CreateMaterial(Material material, TextureFile? embedded)
+    /// <param name="assigned">The texture the game gives the model itself (the plants), in place of the one it names.</param>
+    private SceneMaterial CreateMaterial(Material material, TextureFile? embedded, string? assigned = null)
     {
-      string? textureName = material.Parameters.TryGetValue((uint)ParamNameHash.Texture, out var param)
+      string? textureName = assigned ?? (material.Parameters.TryGetValue((uint)ParamNameHash.Texture, out var param)
         ? (param as MaterialParamTexture)?.TextureName
-        : null;
+        : null);
 
       string? key = null;
       if (!string.IsNullOrEmpty(textureName))

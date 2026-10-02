@@ -59,11 +59,15 @@
             <AppBarButton x:Name="ExportAllButton" Label="Export all" Click="ExportAll_Click" IsEnabled="False" ToolTipService.ToolTip="Export everything in this folder">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE8B7;" /></AppBarButton.Icon>
             </AppBarButton>
+            <AppBarSeparator />
+            <AppBarToggleButton x:Name="EditModeButton" Label="Edit mode" Click="EditMode_Click" ToolTipService.ToolTip="Turn on changing game files (import, replace, save)">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE70F;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
             <AppBarButton x:Name="ImportButton" Label="Import" Click="Import_Click" IsEnabled="False" ToolTipService.ToolTip="Replace files in this folder with files of the same name">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE898;" /></AppBarButton.Icon>
             </AppBarButton>
             <AppBarButton x:Name="SaveButton" Label="Save" Click="Save_Click" IsEnabled="False" ToolTipService.ToolTip="Write the imported files">
-                <AppBarButton.Icon><FontIcon Glyph="&#xE74E;" /></AppBarButton.Icon>
+                <AppBarButton.Icon><FontIcon x:Name="SaveGlyph" Glyph="&#xE74E;" /></AppBarButton.Icon>
             </AppBarButton>
             <AppBarSeparator />
             <AppBarButton Label="Settings" Click="Settings_Click" ToolTipService.ToolTip="Game folders and other settings">
