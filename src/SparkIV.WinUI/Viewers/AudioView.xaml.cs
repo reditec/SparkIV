@@ -55,7 +55,17 @@ namespace SparkIV.WinUI.Viewers
 
       ExportAllButton.IsEnabled = file.SupportsMultichannelExport;
 
-      // The slider seeks when the mouse lets go of it, not on every step of a drag.
+      // The slider seeks when the mouse lets go of it, not when it is pressed or on every step of a drag.
+      // The slider moves its value on the press itself, before a handler on the slider hears of it, so the
+      // press is caught on the root of its template, which sees it first.
+      PositionSlider.Loaded += (s, e) =>
+      {
+        if (Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(PositionSlider) > 0 &&
+            Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(PositionSlider, 0) is UIElement templateRoot)
+        {
+          templateRoot.AddHandler(PointerPressedEvent, new PointerEventHandler((sender, args) => _seeking = true), true);
+        }
+      };
       PositionSlider.AddHandler(PointerPressedEvent, new PointerEventHandler((s, e) => _seeking = true), true);
       PositionSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler((s, e) => EndSeek()), true);
       PositionSlider.AddHandler(PointerCaptureLostEvent, new PointerEventHandler((s, e) => EndSeek()), true);
@@ -271,12 +281,21 @@ namespace SparkIV.WinUI.Viewers
         return;
       }
       PositionText.Text = FormatTime(TimeSpan.FromMilliseconds(e.NewValue));
-      // Keyboard changes seek right away, mouse drags when the button is released.
+      // Keyboard changes seek right away, mouse clicks and drags when the button is released.
+      if (IsLeftMouseButtonDown())
+      {
+        _seeking = true;
+      }
       if (!_seeking)
       {
         Seek();
       }
     }
+
+    private static bool IsLeftMouseButtonDown() => (GetKeyState(0x01) & 0x8000) != 0;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetKeyState(int virtualKey);
 
     private void EndSeek()
     {
