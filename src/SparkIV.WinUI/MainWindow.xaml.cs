@@ -102,6 +102,8 @@ namespace SparkIV.WinUI
 
         ResetVolumes();
         Volume volume = await Task.Run(() => _volumes.OpenFolder(gamePath));
+        // Models find their textures through the game's .ide files and shared dictionaries.
+        GameTextures.SetGameFolder(gamePath);
         ShowVolume(volume, gameName + "  \u00B7  " + gamePath);
       });
     }
@@ -129,6 +131,8 @@ namespace SparkIV.WinUI
 
     private void ResetVolumes()
     {
+      // A single archive has no game around it; the game folder is set again when a game is opened.
+      GameTextures.SetGameFolder(null);
       _volumes.CloseAll();
       _modified.Clear();
       _back.Clear();
@@ -436,13 +440,26 @@ namespace SparkIV.WinUI
       else
       {
         string filter = FilterBox.Text ?? "";
-        _groups = _current.Directory
+        var groups = _current.Directory
           .Where(o => filter.Length == 0 || o.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
           .Select(o => new EntryItem(o))
           .GroupBy(i => i.Type.Group)
-          .Select(g => new EntryGroup(g.Key, g.First().Type.GroupOrder, Sort(g)))
-          .OrderBy(g => g.Order)
-          .ToList();
+          .Select(g => new EntryGroup(g.Key, g.First().Type.GroupOrder, Sort(g)));
+
+        // Most groups of an archive hold a single type, so sorting by type also orders the groups: by the
+        // name of their first type, folders always first. Otherwise the groups keep their usual order.
+        if (_sortKey == "Type")
+        {
+          var byType = groups.OrderBy(g => g.Order == 0 ? 0 : 1);
+          groups = _sortDescending
+            ? byType.ThenByDescending(g => g[0].TypeName, StringComparer.OrdinalIgnoreCase)
+            : byType.ThenBy(g => g[0].TypeName, StringComparer.OrdinalIgnoreCase);
+        }
+        else
+        {
+          groups = groups.OrderBy(g => g.Order);
+        }
+        _groups = groups.ToList();
       }
 
       GroupedEntries.Source = _groups;

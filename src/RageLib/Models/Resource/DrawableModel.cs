@@ -43,6 +43,9 @@ namespace RageLib.Models.Resource
 
     public PtrCollection<Model>[] ModelCollection { get; private set; }
 
+    /// <summary>For each entry of ModelCollection its level of detail: 0 high, 1 medium, 2 low, 3 very low.</summary>
+    public int[] LevelsOfDetail { get; private set; }
+
     public Vector4 AbsoluteMax { get; private set; }
 
     private uint Unk1 { get; set; }     // either 1 or 9
@@ -135,11 +138,20 @@ namespace RageLib.Models.Resource
         Skeleton = new Skeleton(br);
       }
 
+      // The four slots are high, medium, low and very low; any of them may be empty, also one in the middle.
       ModelCollection = new PtrCollection<Model>[levelOfDetailCount];
-      for (int i = 0; i < levelOfDetailCount; i++)
+      LevelsOfDetail = new int[levelOfDetailCount];
+      int found = 0;
+      for (int slot = 0; slot < 4; slot++)
       {
-        br.BaseStream.Seek(modelOffsets[i], SeekOrigin.Begin);
-        ModelCollection[i] = new PtrCollection<Model>(br);
+        if (modelOffsets[slot] == 0)
+        {
+          continue;
+        }
+        br.BaseStream.Seek(modelOffsets[slot], SeekOrigin.Begin);
+        ModelCollection[found] = new PtrCollection<Model>(br);
+        LevelsOfDetail[found] = slot;
+        found++;
       }
     }
 

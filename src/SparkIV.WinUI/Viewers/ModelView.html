@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: linear-gradient(#68788a, #22252a); }
+  body.black { background: #000; }
+  body.grey { background: #808080; }
+  body.white { background: #fff; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.moving { cursor: grabbing; }
+  #message { position: absolute; left: 0; right: 0; top: 45%; text-align: center; color: rgba(255, 255, 255, 0.8);
+             font: 14px "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="message"></div>
+<script>
+  "use strict";
+  // A small WebGL 2 renderer for the meshes of a model: textured, lit from the camera, Z up as in the game.
+  const canvas = document.getElementById("view");
+  const message = document.getElementById("message");
+  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, alpha: true });
+
+  const meshes = new Map();      // id → { vao, count, lines, lineCount, material, min, max }
+  const materials = new Map();   // id → { texture, glass, color }
+  let visible = new Set();
+  let showTextures = true;
+  let wireframe = false;
+
+  // --- Camera: orbits around a target ---
+  const camera = { yaw: -0.6, pitch: 0.35, distance: 5, target: [0, 0, 0], fov: 45 * Math.PI / 180 };
+  let sceneRadius = 1;
+
+  if (!gl) {
+    message.textContent = "This view needs WebGL 2, which this computer's graphics don't offer.";
+  }
+
+  const VERTEX = `#version 300 es
+    in vec3 position; in vec3 normal; in vec2 uv;
+    uniform mat4 viewProjection;
+    out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
+    void main() { vNormal = normal; vUv = uv; vPosition = position; gl_Position = viewProjection * vec4(position, 1.0); }`;
+
+  const FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
+    uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
+    uniform vec3 light; uniform float alpha; uniform bool lines;
+    out vec4 outColor;
+    void main() {
+      if (lines) { outColor = vec4(color, 1.0); return; }
+      vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
+      if (alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, decals)
+      // Without normals in the mesh, the face's own normal.
+      vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
+      float diffuse = abs(dot(n, light));
+      float shade = 0.35 + 0.65 * diffuse;
+      float a = alpha < 1.0 ? alpha : 1.0;
+      outColor = vec4(base.rgb * shade * a, a);
+    }`;
+
+  let program, loc;
+  if (gl) {
+    program = createProgram(VERTEX, FRAGMENT);
+    loc = {
+      position: gl.getAttribLocation(program, "position"),
+      normal: gl.getAttribLocation(program, "normal"),
+      uv: gl.getAttribLocation(program, "uv"),
+      viewProjection: gl.getUniformLocation(program, "viewProjection"),
+      tex: gl.getUniformLocation(program, "tex"),
+      useTexture: gl.getUniformLocation(program, "useTexture"),
+      hasNormal: gl.getUniformLocation(program, "hasNormal"),
+      color: gl.getUniformLocation(program, "color"),
+      light: gl.getUniformLocation(program, "light"),
+      alpha: gl.getUniformLocation(program, "alpha"),
+      lines: gl.getUniformLocation(program, "lines"),
+    };
+  }
+
+  function createProgram(vs, fs) {
+    const p = gl.createProgram();
+    for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      gl.attachShader(p, s);
+    }
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  // --- Scene from SparkIV ---
+
+  function bytes(base64) {
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function buffer(target, data) {
+    const b = gl.createBuffer();
+    gl.bindBuffer(target, b);
+    gl.bufferData(target, data, gl.STATIC_DRAW);
+    return b;
+  }
+
+  function addMesh(m) {
+    const positions = new Float32Array(bytes(m.positions).buffer);
+    const indices = new Uint16Array(bytes(m.indices).buffer);
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    if (m.normals) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.normals).buffer)));
+      gl.enableVertexAttribArray(loc.normal);
+      gl.vertexAttribPointer(loc.normal, 3, gl.FLOAT, false, 0, 0);
+    } else {
+      gl.disableVertexAttribArray(loc.normal);
+      gl.vertexAttrib3f(loc.normal, 0, 0, 1);
+    }
+    if (m.uvs) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.uvs).buffer)));
+      gl.enableVertexAttribArray(loc.uv);
+      gl.vertexAttribPointer(loc.uv, 2, gl.FLOAT, false, 0, 0);
+    } else {
+      gl.disableVertexAttribArray(loc.uv);
+      gl.vertexAttrib2f(loc.uv, 0, 0);
+    }
+    buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
+    gl.bindVertexArray(null);
+
+    // The edges for the wire frame, each once.
+    const seen = new Set(), edges = [];
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      for (const [a, b] of [[indices[i], indices[i + 1]], [indices[i + 1], indices[i + 2]], [indices[i + 2], indices[i]]]) {
+        const key = a < b ? a * 65536 + b : b * 65536 + a;
+        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
+      }
+    }
+    const lines = gl.createVertexArray();
+    gl.bindVertexArray(lines);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    buffer(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(edges));
+    gl.bindVertexArray(null);
+
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], positions[i + k]);
+        max[k] = Math.max(max[k], positions[i + k]);
+      }
+    }
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, min, max });
+  }
+
+  function addMaterial(m) {
+    // Without a texture: a quiet colour of its own, so the parts can be told apart.
+    const hue = (m.id * 0.618) % 1;
+    const material = { texture: null, glass: m.glass, color: hsl(hue, 0.25, 0.62) };
+    materials.set(m.id, material);
+    if (m.texture) {
+      const image = new Image();
+      image.onload = () => {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        material.texture = t;
+        draw();
+      };
+      image.src = m.texture;
+    }
+  }
+
+  function hsl(h, s, l) {
+    const f = n => { const k = (n + h * 12) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return [f(0), f(8), f(4)];
+  }
+
+  function setScene(scene) {
+    for (const m of scene.materials) addMaterial(m);
+    for (const m of scene.meshes) addMesh(m);
+    message.textContent = scene.meshes.length ? "" : "This model has no meshes.";
+  }
+
+  // --- Camera ---
+
+  /** Looks at what is shown, from the side and a little above. */
+  function fit() {
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m) continue;
+      for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    }
+    if (min[0] === Infinity) return;
+    camera.target = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+    sceneRadius = Math.max(0.01, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+    camera.distance = sceneRadius / Math.sin(camera.fov / 2) * 1.1;
+    camera.yaw = -0.6;
+    // Flat things (the far-away LODs of trees and blocks, made to be seen from above) are looked at from
+    // high up; anything else from the side and a little above.
+    const height = max[2] - min[2], width = Math.max(max[0] - min[0], max[1] - min[1]);
+    camera.pitch = height < width * 0.15 ? 1.1 : 0.35;
+    draw();
+  }
+
+  function eye() {
+    const c = Math.cos(camera.pitch);
+    return [
+      camera.target[0] + camera.distance * c * Math.cos(camera.yaw),
+      camera.target[1] + camera.distance * c * Math.sin(camera.yaw),
+      camera.target[2] + camera.distance * Math.sin(camera.pitch),
+    ];
+  }
+
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+  function viewProjection() {
+    const e = eye();
+    const f = norm(sub(camera.target, e));
+    const s = norm(cross(f, [0, 0, 1]));
+    const u = cross(s, f);
+    const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, e), -dot(u, e), dot(f, e), 1];
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = camera.distance + sceneRadius * 4;
+    const nearClip = Math.max(camera.distance / 1000, near * 0.1);
+    const t = 1 / Math.tan(camera.fov / 2);
+    const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + nearClip) / (nearClip - far), -1, 0, 0, 2 * far * nearClip / (nearClip - far), 0];
+    const out = new Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let v = 0;
+      for (let k = 0; k < 4; k++) v += proj[k * 4 + r] * view[c * 4 + k];
+      out[c * 4 + r] = v;
+    }
+    return { matrix: out, light: f.map(x => -x) };
+  }
+
+  // --- Drawing ---
+
+  let pending = false;
+  function draw() {
+    if (!gl || pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      gl.viewport(0, 0, w, h);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      gl.useProgram(program);
+      const vp = viewProjection();
+      gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
+      gl.uniform3fv(loc.light, vp.light);
+      gl.uniform1i(loc.tex, 0);
+      gl.activeTexture(gl.TEXTURE0);
+
+      // Solid first, then glass see-through on top.
+      for (const pass of ["solid", "glass"]) {
+        const glassPass = pass === "glass";
+        if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
+        else { gl.disable(gl.BLEND); gl.depthMask(true); }
+        for (const id of visible) {
+          const m = meshes.get(id);
+          if (!m) continue;
+          const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
+          if (mat.glass !== glassPass) continue;
+          const textured = showTextures && !!mat.texture;
+          gl.uniform1i(loc.useTexture, textured);
+          gl.uniform1i(loc.hasNormal, m.hasNormal);
+          gl.uniform3fv(loc.color, mat.color);
+          gl.uniform1f(loc.alpha, glassPass ? 0.45 : 1.0);
+          gl.uniform1i(loc.lines, false);
+          if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+          gl.bindVertexArray(m.vao);
+          gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+        }
+      }
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+
+      if (wireframe) {
+        gl.uniform1i(loc.lines, true);
+        gl.uniform3fv(loc.color, [0.95, 0.75, 0.25]);
+        for (const id of visible) {
+          const m = meshes.get(id);
+          if (!m) continue;
+          gl.bindVertexArray(m.lines);
+          gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
+        }
+      }
+      gl.bindVertexArray(null);
+    });
+  }
+
+  new ResizeObserver(draw).observe(canvas);
+
+  // --- Mouse: left drag turns, middle (or right) drag moves, wheel zooms, double-click fits ---
+
+  let drag = null;
+  canvas.addEventListener("pointerdown", e => {
+    drag = { x: e.clientX, y: e.clientY, button: e.button };
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add("moving");
+    if (e.button === 1) e.preventDefault();
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.button === 0 && !e.shiftKey) {
+      camera.yaw -= dx * 0.008;
+      camera.pitch = Math.max(-1.55, Math.min(1.55, camera.pitch + dy * 0.008));
+    } else {
+      // Move the target in the plane of the screen, as far as the mouse moved there.
+      const e3 = eye();
+      const f = norm(sub(camera.target, e3));
+      const s = norm(cross(f, [0, 0, 1]));
+      const u = cross(s, f);
+      const perPixel = 2 * camera.distance * Math.tan(camera.fov / 2) / Math.max(1, canvas.clientHeight);
+      for (let k = 0; k < 3; k++) camera.target[k] += (-s[k] * dx + u[k] * dy) * perPixel;
+    }
+    draw();
+  });
+  const endDrag = () => { drag = null; canvas.classList.remove("moving"); };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("auxclick", e => e.preventDefault());
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    camera.distance = Math.max(sceneRadius * 0.02, Math.min(sceneRadius * 50, camera.distance * Math.pow(1.15, Math.sign(e.deltaY))));
+    draw();
+  }, { passive: false });
+  canvas.addEventListener("dblclick", fit);
+
+  // --- Messages from and to SparkIV ---
+
+  function post(m) { if (window.chrome && chrome.webview) chrome.webview.postMessage(m); }
+
+  if (window.chrome && chrome.webview) {
+    chrome.webview.addEventListener("message", e => {
+      const m = e.data;
+      if (!gl) return;
+      if (m.type === "scene") { setScene(m); }
+      else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); if (first || m.fit) fit(); else draw(); }
+      else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; draw(); }
+      else if (m.type === "background") { document.body.className = m.name; }
+      else if (m.type === "fit") { fit(); }
+    });
+  }
+  post({ type: "ready", webgl: !!gl });
+</script>
+</body>
+</html>

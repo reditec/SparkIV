@@ -56,6 +56,15 @@ namespace RageLib.Models
       return new Drawable(File.Data.Entries[modelIndex]);
     }
 
+    /// <summary>
+    /// The hash of the name of an entry (Jenkins one-at-a-time of the lower-case name, e.g. of "head_000_r");
+    /// the names themselves are not in the file.
+    /// </summary>
+    public uint GetNameHash(int modelIndex)
+    {
+      return File.Data.NameHashes[modelIndex];
+    }
+
     #region Implementation of IDisposable
 
     public void Dispose()

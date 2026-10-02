@@ -26,6 +26,9 @@ namespace RageLib.Models.Data
   public class Drawable
   {
     public List<Model> Models { get; private set; }
+
+    /// <summary>The level of detail of each entry of Models: 0 high, 1 medium, 2 low, 3 very low (slots may be empty).</summary>
+    public List<int> LevelsOfDetail { get; private set; }
     public List<Material> Materials { get; private set; }
     public Skeleton Skeleton { get; private set; }
     public Textures.TextureFile AttachedTexture { get; private set; }
@@ -55,6 +58,7 @@ namespace RageLib.Models.Data
       {
         Models.Add(new Model(info));
       }
+      LevelsOfDetail = new List<int>(drawableModel.LevelsOfDetail);
 
       AttachedTexture = drawableModel.ShaderGroup.TextureDictionary;
     }

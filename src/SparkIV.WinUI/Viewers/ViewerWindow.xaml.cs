@@ -76,13 +76,22 @@ namespace SparkIV.WinUI.Viewers
       }
       catch (Exception ex)
       {
-        ShowMessage("Could not open " + _file.Name, ex.Message, true);
+        if (!_closed)
+        {
+          ShowMessage("Could not open " + _file.Name, ex.Message, true);
+        }
       }
       finally
       {
-        Loading.IsActive = false;
+        if (!_closed)
+        {
+          Loading.IsActive = false;
+        }
       }
     }
+
+    /// <summary>For views that start something slow (a browser): whether the window was closed meanwhile.</summary>
+    public bool IsClosed => _closed;
 
     private void SetTitle(string title, string detail)
     {

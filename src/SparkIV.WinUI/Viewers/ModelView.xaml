@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="SparkIV.WinUI.Viewers.ModelView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:model="using:SparkIV.WinUI.Model">
+
+    <Grid RowSpacing="6">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <CommandBar HorizontalAlignment="Left" DefaultLabelPosition="Right" Background="Transparent">
+            <AppBarElementContainer x:Name="LodContainer" VerticalContentAlignment="Center" Visibility="Collapsed">
+                <ComboBox x:Name="LodBox" MinWidth="130" Margin="0,0,8,0" SelectionChanged="LodBox_SelectionChanged"
+                          ToolTipService.ToolTip="Level of detail of all shown drawables; one without it shows its lowest, as in the game" />
+            </AppBarElementContainer>
+            <AppBarToggleButton x:Name="TexturesButton" Label="Textures" IsChecked="True" Click="Options_Click"
+                                ToolTipService.ToolTip="Show the textures, or a plain colour per material">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xEB9F;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarToggleButton x:Name="WireframeButton" Label="Wire frame" Click="Options_Click"
+                                ToolTipService.ToolTip="Draw the edges of the triangles">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE80A;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarElementContainer VerticalContentAlignment="Center">
+                <ComboBox x:Name="BackgroundBox" MinWidth="120" Margin="8,0,8,0" SelectionChanged="BackgroundBox_SelectionChanged"
+                          ToolTipService.ToolTip="Background of the view">
+                    <x:String>Gradient</x:String>
+                    <x:String>Grey</x:String>
+                    <x:String>Black</x:String>
+                    <x:String>White</x:String>
+                </ComboBox>
+            </AppBarElementContainer>
+            <AppBarButton Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at all that is shown (or double-click the view)">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton Label="Export original" Click="ExportOriginal_Click" ToolTipService.ToolTip="Save the file exactly as it is in the archive">
+                <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
+            </AppBarButton>
+        </CommandBar>
+
+        <Grid Grid.Row="1" ColumnSpacing="6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- The parts of the model; the check boxes say what is shown -->
+            <Border CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+              <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Show all or nothing, or one model after the other -->
+                <Grid Padding="6,6,6,2" ColumnSpacing="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Button Click="ShowAll_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="Show all models (in the chosen level of detail)">
+                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE7B3;" FontSize="14" /><TextBlock Text="All" /></StackPanel>
+                    </Button>
+                    <Button Grid.Column="1" Click="ShowNone_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="Hide all models">
+                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xED1A;" FontSize="14" /><TextBlock Text="None" /></StackPanel>
+                    </Button>
+                    <Button x:Name="PreviousButton" Grid.Column="3" Click="Previous_Click" Style="{StaticResource SubtleButtonStyle}"
+                            ToolTipService.ToolTip="Show only the previous model" AutomationProperties.Name="Previous model">
+                        <FontIcon Glyph="&#xE76B;" FontSize="14" />
+                    </Button>
+                    <TextBlock x:Name="StepText" Grid.Column="4" VerticalAlignment="Center" MinWidth="48" TextAlignment="Center"
+                               Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Button x:Name="NextButton" Grid.Column="5" Click="Next_Click" Style="{StaticResource SubtleButtonStyle}"
+                            ToolTipService.ToolTip="Show only the next model" AutomationProperties.Name="Next model">
+                        <FontIcon Glyph="&#xE76C;" FontSize="14" />
+                    </Button>
+                </Grid>
+
+                <TreeView x:Name="PartTree" Grid.Row="1" SelectionMode="None" CanDragItems="False" AllowDrop="False">
+                    <TreeView.ItemTemplate>
+                        <DataTemplate x:DataType="model:ModelPart">
+                            <TreeViewItem ItemsSource="{x:Bind Children}" IsExpanded="True">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <CheckBox IsChecked="{x:Bind IsChecked, Mode=TwoWay}" MinWidth="0" Padding="0" VerticalAlignment="Center" />
+                                    <FontIcon Glyph="{x:Bind Glyph}" FontSize="14" VerticalAlignment="Center" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind Name}" />
+                                        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </TreeViewItem>
+                        </DataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+              </Grid>
+            </Border>
+
+            <Border Grid.Column="1" CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <Grid>
+                    <!-- Drawn with WebGL by ModelView.html: left drag turns, middle or right drag moves, wheel zooms -->
+                    <WebView2 x:Name="Web" Margin="3" DefaultBackgroundColor="Transparent" />
+                    <ProgressRing x:Name="Working" IsActive="True" Width="32" Height="32" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <TextBlock x:Name="Status" Grid.Row="2" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+    </Grid>
+</UserControl>

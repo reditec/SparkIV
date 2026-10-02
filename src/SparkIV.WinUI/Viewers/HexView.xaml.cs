@@ -98,7 +98,7 @@ namespace SparkIV.WinUI.Viewers
     {
       if (_pageReady)
       {
-        Web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        Web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
       }
     }
 

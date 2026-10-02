@@ -66,6 +66,11 @@ namespace SparkIV.WinUI.Viewers
       ByExtension[".ivaud"] = new AudioViewer();
       ByExtension[".wtd"] = new TextureViewer();
       ByExtension[".whm"] = new WebPageViewer();
+      var models = new ModelViewer();
+      foreach (var ext in new[] { ".wdr", ".wdd", ".wft" })
+      {
+        ByExtension[ext] = models;
+      }
     }
 
     /// <summary>The hex view, for any file.</summary>

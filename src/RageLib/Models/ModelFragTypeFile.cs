@@ -18,6 +18,7 @@
 
 \**********************************************************************/
 
+using System.Collections.Generic;
 using System.IO;
 using RageLib.Models.Data;
 using RageLib.Models.Resource;
@@ -54,6 +55,33 @@ namespace RageLib.Models
     public Drawable GetDataModel()
     {
       return new Drawable(File.Data.Drawable);
+    }
+
+    /// <summary>All the fragment's children (the parts that break off), with their bone, whether or not they have a model.</summary>
+    public List<FragmentChild> GetChildren()
+    {
+      var children = new List<FragmentChild>();
+      foreach (var child in File.Data.Children)
+      {
+        bool hasModel = child.Drawable != null && child.Drawable.ModelCollection.Length > 0;
+        children.Add(new FragmentChild(child.GroupIndex, child.BoneIndex, child.PristineMass, child.DamagedMass,
+                                       child.Matrix1, child.Matrix2, hasModel ? new Drawable(child.Drawable) : null));
+      }
+      return children;
+    }
+
+    /// <summary>The drawables of the fragment's children (the parts that break off), those that have a model.</summary>
+    public List<Drawable> GetChildDataModels()
+    {
+      var children = new List<Drawable>();
+      foreach (var child in File.Data.Children)
+      {
+        if (child.Drawable != null && child.Drawable.ModelCollection.Length > 0)
+        {
+          children.Add(new Drawable(child.Drawable));
+        }
+      }
+      return children;
     }
 
     #region Implementation of IDisposable

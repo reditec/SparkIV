@@ -35,17 +35,26 @@ namespace SparkIV.WinUI.Viewers
                                               Action<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs> onMessage,
                                               bool allowCopyMenu)
     {
+      bool Closed() => context.Window is ViewerWindow window && window.IsClosed;
       try
       {
         await web.EnsureCoreWebView2Async(await SharedEnvironment());
       }
       catch (Exception ex)
       {
-        context.ShowMessage("Could not show the file", "The Microsoft Edge WebView2 runtime is needed for this view. " + ex.Message, true);
+        if (!Closed())
+        {
+          context.ShowMessage("Could not show the file", "The Microsoft Edge WebView2 runtime is needed for this view. " + ex.Message, true);
+        }
         return false;
       }
 
+      // Starting the browser takes a moment; the window may have been closed meanwhile, and then there is none.
       var core = web.CoreWebView2;
+      if (core == null || Closed())
+      {
+        return false;
+      }
       var settings = core.Settings;
       settings.AreDevToolsEnabled = false;
       settings.AreBrowserAcceleratorKeysEnabled = false;
