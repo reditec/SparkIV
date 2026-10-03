@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="SparkIV.WinUI.Viewers.AnimationView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:SparkIV.WinUI.Viewers">
+
+    <Grid RowSpacing="6">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <CommandBar HorizontalAlignment="Left" DefaultLabelPosition="Right" Background="Transparent">
+            <!-- Only with more than one ped installed (GTA IV alone has Niko only) -->
+            <AppBarElementContainer x:Name="PedContainer" VerticalContentAlignment="Center">
+                <ComboBox x:Name="PedBox" MinWidth="200" Margin="0,0,8,0" SelectionChanged="PedBox_SelectionChanged"
+                          ToolTipService.ToolTip="The ped the animations play on" />
+            </AppBarElementContainer>
+            <AppBarElementContainer VerticalContentAlignment="Center">
+                <ComboBox x:Name="BackgroundBox" MinWidth="120" Margin="0,0,8,0" SelectionChanged="BackgroundBox_SelectionChanged"
+                          ToolTipService.ToolTip="Background of the view">
+                    <x:String>Gradient</x:String>
+                    <x:String>Grey</x:String>
+                    <x:String>Black</x:String>
+                    <x:String>White</x:String>
+                </ComboBox>
+            </AppBarElementContainer>
+            <AppBarToggleButton x:Name="FacialsButton" Label="Face" IsChecked="True" Click="Facials_Click"
+                                ToolTipService.ToolTip="Play the facial clips the animation starts (from the game's facials@ dictionaries)">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE76E;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarToggleButton x:Name="MoveButton" Label="Move through the world" Click="Move_Click"
+                                ToolTipService.ToolTip="Move the ped as the animation moves it through the world; the camera follows, a grid shows the ground">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE805;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarToggleButton x:Name="EventsButton" Label="Events" Click="Events_Click"
+                                ToolTipService.ToolTip="Show what the animation signals frame by frame: action flags, facial clips, UV">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE756;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarButton Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at the whole ped (or double-click the view)">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton Label="Export original" Click="ExportOriginal_Click" ToolTipService.ToolTip="Save the file exactly as it is in the archive">
+                <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
+            </AppBarButton>
+        </CommandBar>
+
+        <Grid Grid.Row="1" ColumnSpacing="6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="260" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- The clips of the dictionary -->
+            <Border CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <ListView x:Name="ClipList" SelectionMode="Single" SelectionChanged="ClipList_SelectionChanged">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:AnimationClipRow">
+                            <StackPanel Padding="0,4">
+                                <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Border>
+
+            <Border Grid.Column="1" CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <Grid>
+                    <!-- Drawn with WebGL by ModelView.html: left drag turns, middle or right drag moves, wheel zooms -->
+                    <WebView2 x:Name="Web" Margin="3" DefaultBackgroundColor="Transparent" />
+                    <ProgressRing x:Name="Working" IsActive="True" Width="32" Height="32" />
+                    <TextBlock x:Name="PedMessage" Visibility="Collapsed" TextWrapping="Wrap" MaxWidth="420" TextAlignment="Center"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Playing: the frames, step, play, loop, speed -->
+        <Grid Grid.Row="2" Padding="8,4" ColumnSpacing="12" CornerRadius="{ThemeResource OverlayCornerRadius}"
+              Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Slider x:Name="FrameSlider" Grid.ColumnSpan="3" Minimum="0" Maximum="1" StepFrequency="1" ValueChanged="FrameSlider_ValueChanged"
+                    AutomationProperties.Name="Frame" />
+
+            <TextBlock x:Name="FrameText" Grid.Row="1" VerticalAlignment="Center" Style="{StaticResource BodyStrongTextBlockStyle}" />
+
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                <Button Click="First_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="First frame" AutomationProperties.Name="First frame">
+                    <FontIcon Glyph="&#xE892;" FontSize="16" />
+                </Button>
+                <Button Click="Previous_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="Previous frame" AutomationProperties.Name="Previous frame">
+                    <FontIcon Glyph="&#xE76B;" FontSize="16" />
+                </Button>
+                <Button x:Name="PlayButton" Click="Play_Click" Style="{StaticResource AccentButtonStyle}" Width="48" Height="36"
+                        ToolTipService.ToolTip="Play / pause (space)" AutomationProperties.Name="Play">
+                    <FontIcon x:Name="PlayGlyph" Glyph="&#xE768;" FontSize="16" />
+                </Button>
+                <Button Click="Next_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="Next frame" AutomationProperties.Name="Next frame">
+                    <FontIcon Glyph="&#xE76C;" FontSize="16" />
+                </Button>
+                <Button Click="Last_Click" Style="{StaticResource SubtleButtonStyle}" ToolTipService.ToolTip="Last frame" AutomationProperties.Name="Last frame">
+                    <FontIcon Glyph="&#xE893;" FontSize="16" />
+                </Button>
+                <ToggleButton x:Name="LoopButton" IsChecked="True" Click="Loop_Click" Margin="8,0,0,0" ToolTipService.ToolTip="Play again from the start">
+                    <FontIcon Glyph="&#xE8EE;" FontSize="16" />
+                </ToggleButton>
+            </StackPanel>
+
+            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                <TextBlock Text="Speed" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <ComboBox x:Name="SpeedBox" MinWidth="90" SelectionChanged="SpeedBox_SelectionChanged" ToolTipService.ToolTip="Time scale">
+                    <x:String>× 0.1</x:String>
+                    <x:String>× 0.25</x:String>
+                    <x:String>× 0.5</x:String>
+                    <x:String>× 1</x:String>
+                    <x:String>× 1.5</x:String>
+                    <x:String>× 2</x:String>
+                    <x:String>× 2.5</x:String>
+                </ComboBox>
+            </StackPanel>
+        </Grid>
+
+        <!-- The events: what the animation signals frame by frame; the one reached last is selected -->
+        <Border x:Name="EventsPanel" Grid.Row="3" Height="150" Visibility="Collapsed" CornerRadius="{ThemeResource OverlayCornerRadius}"
+                Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <Grid>
+                <ListView x:Name="EventList" SelectionMode="Single" IsItemClickEnabled="True" ItemClick="EventList_ItemClick">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+                            <Setter Property="MinHeight" Value="24" />
+                            <Setter Property="Padding" Value="8,0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:AnimationEventRow">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="80" />
+                                    <ColumnDefinition Width="130" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{x:Bind FrameLabel}" FontFamily="Consolas" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind Kind}" FontFamily="Consolas" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Value}" FontFamily="Consolas" TextTrimming="CharacterEllipsis" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <TextBlock x:Name="NoEventsText" Text="This clip signals nothing." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="Status" Grid.Row="4" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+    </Grid>
+</UserControl>

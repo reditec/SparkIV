@@ -42,8 +42,15 @@ namespace RageLib.Models.Data
 
     public int MaterialIndex { get; set; }
 
+    /// <summary>
+    /// For a skinned mesh: the skeleton bone (index) of each blend index its vertices use; empty if it
+    /// isn't skinned.
+    /// </summary>
+    public ushort[] BoneMapping { get; private set; }
+
     internal Mesh(Resource.Models.Geometry info)
     {
+      BoneMapping = info.BoneMapping ?? new ushort[0];
       PrimitiveType = (PrimitiveType)info.PrimitiveType;
 
       FaceCount = (int)info.FaceCount;

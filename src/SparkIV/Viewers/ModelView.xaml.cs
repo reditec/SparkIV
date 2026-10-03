@@ -127,7 +127,7 @@ namespace SparkIV.WinUI.Viewers
             return;
           }
           _textureVersion++;
-          Post(new { type = "materials", materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, texture = TextureUrl(m) }) });
+          Post(new { type = "materials", materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, cutout = m.Cutout, texture = TextureUrl(m) }) });
           ShowEmbeddedTextures();
           UpdateStatus();
         }
@@ -223,7 +223,7 @@ namespace SparkIV.WinUI.Viewers
       Post(new
       {
         type = "scene",
-        materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, texture = TextureUrl(m) }),
+        materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, cutout = m.Cutout, texture = TextureUrl(m) }),
         meshes = _scene.Meshes.Select(m => m.ToMessage()),
       });
       SendOptions();

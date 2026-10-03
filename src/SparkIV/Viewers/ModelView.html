@@ -38,22 +38,39 @@
     message.textContent = "This view needs WebGL 2, which this computer's graphics don't offer.";
   }
 
+  // Skinned meshes (peds) move with up to four bones per vertex: the bones' matrices (from rest pose to
+  // the pose shown) are in a float texture, four texels (columns) per bone.
   const VERTEX = `#version 300 es
-    in vec3 position; in vec3 normal; in vec2 uv;
-    uniform mat4 viewProjection;
+    in vec3 position; in vec3 normal; in vec2 uv; in vec4 skinBones; in vec4 skinWeights;
+    uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
     out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
-    void main() { vNormal = normal; vUv = uv; vPosition = position; gl_Position = viewProjection * vec4(position, 1.0); }`;
+    mat4 bone(float i) {
+      int b = int(i);
+      return mat4(texelFetch(boneMatrices, ivec2(0, b), 0), texelFetch(boneMatrices, ivec2(1, b), 0),
+                  texelFetch(boneMatrices, ivec2(2, b), 0), texelFetch(boneMatrices, ivec2(3, b), 0));
+    }
+    void main() {
+      vec4 p = vec4(position, 1.0);
+      vec3 n = normal;
+      if (skinned) {
+        mat4 m = bone(skinBones.x) * skinWeights.x + bone(skinBones.y) * skinWeights.y +
+                 bone(skinBones.z) * skinWeights.z + bone(skinBones.w) * skinWeights.w;
+        p = m * p;
+        n = mat3(m) * n;
+      }
+      vNormal = n; vUv = uv; vPosition = p.xyz; gl_Position = viewProjection * p;
+    }`;
 
   const FRAGMENT = `#version 300 es
     precision highp float;
     in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
-    uniform vec3 light; uniform float alpha; uniform bool lines;
+    uniform vec3 light; uniform float alpha; uniform bool lines; uniform bool cutout;
     out vec4 outColor;
     void main() {
       if (lines) { outColor = vec4(color, 1.0); return; }
       vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
-      if (alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, decals)
+      if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, decals, hair)
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
       float diffuse = abs(dot(n, light));
@@ -69,6 +86,10 @@
       position: gl.getAttribLocation(program, "position"),
       normal: gl.getAttribLocation(program, "normal"),
       uv: gl.getAttribLocation(program, "uv"),
+      skinBones: gl.getAttribLocation(program, "skinBones"),
+      skinWeights: gl.getAttribLocation(program, "skinWeights"),
+      skinned: gl.getUniformLocation(program, "skinned"),
+      boneMatrices: gl.getUniformLocation(program, "boneMatrices"),
       viewProjection: gl.getUniformLocation(program, "viewProjection"),
       tex: gl.getUniformLocation(program, "tex"),
       useTexture: gl.getUniformLocation(program, "useTexture"),
@@ -77,6 +98,7 @@
       light: gl.getUniformLocation(program, "light"),
       alpha: gl.getUniformLocation(program, "alpha"),
       lines: gl.getUniformLocation(program, "lines"),
+      cutout: gl.getUniformLocation(program, "cutout"),
     };
   }
 
@@ -110,11 +132,30 @@
     return b;
   }
 
+  // Bones and weights of a skinned mesh, for the vertex array bound now (both the solid and the wire one).
+  function bindSkin(skin) {
+    for (const [attribute, data] of [[loc.skinBones, skin && skin.bones], [loc.skinWeights, skin && skin.weights]]) {
+      if (attribute < 0) continue;
+      if (data) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, data);
+        gl.enableVertexAttribArray(attribute);
+        gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 0, 0);
+      } else {
+        gl.disableVertexAttribArray(attribute);
+        gl.vertexAttrib4f(attribute, 0, 0, 0, 0);
+      }
+    }
+  }
+
   function addMesh(m) {
     const positions = new Float32Array(bytes(m.positions).buffer);
     const indices = new Uint16Array(bytes(m.indices).buffer);
+    const skin = m.skinBones && m.skinWeights
+      ? { bones: buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.skinBones).buffer)), weights: buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.skinWeights).buffer)) }
+      : null;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
+    bindSkin(skin);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
     gl.enableVertexAttribArray(loc.position);
     gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
@@ -147,6 +188,7 @@
     }
     const lines = gl.createVertexArray();
     gl.bindVertexArray(lines);
+    bindSkin(skin);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
     gl.enableVertexAttribArray(loc.position);
     gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
@@ -160,13 +202,14 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, min, max });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, min, max });
   }
 
   function addMaterial(m) {
     // Without a texture: a quiet colour of its own, so the parts can be told apart.
     const hue = (m.id * 0.618) % 1;
-    const material = { texture: null, glass: m.glass, color: hsl(hue, 0.25, 0.62) };
+    // Cut out where the texture is see-through, unless its alpha means something else (peds: gloss).
+    const material = { texture: null, glass: m.glass, cutout: m.cutout !== false, color: hsl(hue, 0.25, 0.62) };
     materials.set(m.id, material);
     if (m.texture) {
       const image = new Image();
@@ -205,6 +248,277 @@
     for (const m of scene.materials) addMaterial(m);
     for (const m of scene.meshes) addMesh(m);
     message.textContent = scene.meshes.length ? "" : "This model has no meshes.";
+  }
+
+  // --- Skeleton and animation (peds) ---
+  //
+  // A bone's place relative to its parent: translate by its offset, turn by its quaternion; down the
+  // chain world = parent * local (column vectors). A vertex moves with world * inverse(rest world).
+  // Checked against OpenIV's .skel: the rest pose built so is the bones' WorldOffset.
+
+  let skeleton = null;      // { parent[], position[] (3 per bone), rotation[] (4 per bone), inverseRest[] (mat4) }
+  let clip = null;          // { frames, fps, tracks: [{ bone, kind: "position"|"rotation", values }], mover, facials }
+  // Moving through the world (the clip's model tracks): the camera follows, a grid on the ground shows it.
+  let moveInWorld = false;
+  // Facial clips started by the clip, playing on the face's bones.
+  let showFacials = true;
+  let lastMover = null;
+  let boneTexture = null;
+  const playback = { playing: false, time: 0, speed: 1, loop: true, last: 0, reportedFrame: -1 };
+
+  function mat4FromQuat(q, t) {
+    const [x, y, z, w] = q;
+    return [
+      1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w), 0,
+      2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w), 0,
+      2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y), 0,
+      t[0], t[1], t[2], 1,
+    ];
+  }
+
+  // Column-major 4x4 product a * b.
+  function mul(a, b) {
+    const r = new Array(16);
+    for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++) {
+      let v = 0;
+      for (let k = 0; k < 4; k++) v += a[k * 4 + rr] * b[c * 4 + k];
+      r[c * 4 + rr] = v;
+    }
+    return r;
+  }
+
+  // Inverse of a rotation + translation.
+  function inverseRigid(m) {
+    const r = [m[0], m[4], m[8], 0, m[1], m[5], m[9], 0, m[2], m[6], m[10], 0, 0, 0, 0, 1];
+    r[12] = -(r[0] * m[12] + r[4] * m[13] + r[8] * m[14]);
+    r[13] = -(r[1] * m[12] + r[5] * m[13] + r[9] * m[14]);
+    r[14] = -(r[2] * m[12] + r[6] * m[13] + r[10] * m[14]);
+    return r;
+  }
+
+  function worldMatrices(position, rotation) {
+    const n = skeleton.parent.length, world = new Array(n);
+    const of = i => {
+      if (!world[i]) {
+        const local = mat4FromQuat(rotation.slice(i * 4, i * 4 + 4), position.slice(i * 3, i * 3 + 3));
+        const p = skeleton.parent[i];
+        world[i] = p >= 0 && p < n && p !== i ? mul(of(p), local) : local;
+      }
+      return world[i];
+    };
+    for (let i = 0; i < n; i++) of(i);
+    return world;
+  }
+
+  // Quaternions (x, y, z, w).
+  function qmul(a, b) {
+    return [
+      a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+      a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+      a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+      a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ];
+  }
+  const qconj = q => [-q[0], -q[1], -q[2], q[3]];
+  function qnorm(q) { const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return q.map(v => v / l); }
+
+  // Helper bones the game turns itself, not the animations (twist and roll bones): a bone without a track
+  // at the same place under the same parent as one with a track (Char_R_ForeTwist beside Char_R_Forearm,
+  // R_ArmRoll beside Char_R_UpperArm) moves as that one does; the skin of the arm hangs on them. A twist
+  // bone also takes half of the hand's turn about the arm, so the wrist doesn't wring. "The same place"
+  // within 3 cm: Johnny's R_ArmRoll is 7 mm beside his upper arm (Niko's exactly on it); the next bones
+  // of an arm are 15 to 30 cm apart.
+  function findFollowers() {
+    skeleton.followers = [];
+    if (!clip) return;
+    const tracked = new Set(clip.tracks.filter(t => t.kind === "rotation").map(t => t.bone));
+    const n = skeleton.parent.length;
+    const at = i => skeleton.position.slice(i * 3, i * 3 + 3);
+    for (let b = 0; b < n; b++) {
+      // Only helper bones (named so): a finger without a track (the little one in many clips) keeps its rest.
+      const helperName = (skeleton.names && skeleton.names[b]) || "";
+      if (tracked.has(b) || !/roll|twist/i.test(helperName)) continue;
+      // The nearest tracked sibling, if near enough (and not at the parent itself: then it just moves with it).
+      const pb = at(b);
+      let leader = -1, nearest = 0.03;
+      for (let s = 0; s < n; s++) {
+        if (s === b || !tracked.has(s) || skeleton.parent[s] !== skeleton.parent[b]) continue;
+        const ps = at(s);
+        const d = Math.hypot(pb[0] - ps[0], pb[1] - ps[1], pb[2] - ps[2]);
+        if (d <= nearest && Math.hypot(ps[0], ps[1], ps[2]) >= 0.03) { nearest = d; leader = s; }
+      }
+      if (leader < 0) continue;
+      const name = (skeleton.names && skeleton.names[b]) || "";
+      let twistFrom = -1;
+      if (/twist/i.test(name)) {
+        for (let c = 0; c < n; c++) if (skeleton.parent[c] === leader && tracked.has(c)) { twistFrom = c; break; }
+      }
+      skeleton.followers.push({ bone: b, leader, twistFrom });
+    }
+  }
+
+  function setSkeleton(s) {
+    // The rest pose is worked out once.
+    skeleton = { parent: s.parent, position: s.position, rotation: s.rotation, names: s.names, followers: [] };
+    skeleton.inverseRest = worldMatrices(s.position, s.rotation).map(inverseRigid);
+    boneTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, boneTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    findFollowers();
+    pose(clip ? currentFrame() : null);
+  }
+
+  // A track's value between frames: positions linearly, rotations by normalized linear interpolation.
+  function sample(track, frame, frames, out, at) {
+    const v = track.values;
+    const f0 = Math.max(0, Math.min(Math.floor(frame), frames - 1)), f1 = Math.min(f0 + 1, frames - 1), t = Math.max(0, Math.min(1, frame - f0));
+    if (track.kind === "position") {
+      for (let k = 0; k < 3; k++) out[at * 3 + k] = v[f0 * 3 + k] * (1 - t) + v[f1 * 3 + k] * t;
+      return;
+    }
+    let d = 0;
+    for (let k = 0; k < 4; k++) d += v[f0 * 4 + k] * v[f1 * 4 + k];
+    const sign = d < 0 ? -1 : 1;
+    let len = 0;
+    const q = [0, 0, 0, 0];
+    for (let k = 0; k < 4; k++) { q[k] = v[f0 * 4 + k] * (1 - t) + sign * v[f1 * 4 + k] * t; len += q[k] * q[k]; }
+    len = Math.sqrt(len) || 1;
+    for (let k = 0; k < 4; k++) out[at * 4 + k] = q[k] / len;
+  }
+
+  // The pose at a time of the clip.
+  function pose(frame) {
+    if (!skeleton) return;
+    const position = skeleton.position.slice(), rotation = skeleton.rotation.slice();
+    let mover = null;
+    if (clip && frame !== null) {
+      for (const track of clip.tracks) sample(track, frame, clip.frames, track.kind === "position" ? position : rotation, track.bone);
+      // Facial clips: the one started last at or before this frame plays on the face's bones, from its
+      // start, until it ends (over the body clip's face, if it has one).
+      if (showFacials && clip.facials) {
+        let facial = null;
+        for (const f of clip.facials) if (f.start <= frame) facial = f;
+        if (facial) {
+          const local = (frame - facial.start) / clip.fps * facial.fps;
+          if (local <= facial.frames - 1) {
+            for (const track of facial.tracks) sample(track, local, facial.frames, track.kind === "position" ? position : rotation, track.bone);
+          }
+        }
+      }
+      if (moveInWorld && clip.mover) {
+        const p = [0, 0, 0], q = [0, 0, 0, 1];
+        if (clip.mover.path) sample(clip.mover.path, frame, clip.frames, p, 0);
+        if (clip.mover.rotation) sample(clip.mover.rotation, frame, clip.frames, q, 0);
+        mover = mat4FromQuat(q, p);
+      }
+      // Helper bones: the leader's turn away from its rest, applied to the helper's rest.
+      const restOf = i => skeleton.rotation.slice(i * 4, i * 4 + 4);
+      const nowOf = i => rotation.slice(i * 4, i * 4 + 4);
+      for (const f of skeleton.followers) {
+        let q = qmul(qmul(nowOf(f.leader), qconj(restOf(f.leader))), restOf(f.bone));
+        if (f.twistFrom >= 0) {
+          // The hand's turn away from its rest, about the arm's long axis (x), half of it.
+          const d = qmul(nowOf(f.twistFrom), qconj(restOf(f.twistFrom)));
+          let twist = qnorm([d[0], 0, 0, d[3]]);
+          if (twist[3] < 0) twist = twist.map(v => -v);
+          // Half the angle of a turn q (w >= 0) is normalize(q + 1).
+          q = qmul(q, qnorm([twist[0], 0, 0, twist[3] + 1]));
+        }
+        q = qnorm(q);
+        for (let k = 0; k < 4; k++) rotation[f.bone * 4 + k] = q[k];
+      }
+    }
+    let world = worldMatrices(position, rotation);
+    if (mover) {
+      // The whole ped moved through the world; the camera goes along, as far as the ped moved.
+      world = world.map(m => mul(mover, m));
+      const at = [mover[12], mover[13], mover[14]];
+      if (lastMover) for (let k = 0; k < 3; k++) camera.target[k] += at[k] - lastMover[k];
+      lastMover = at;
+    } else if (lastMover) {
+      for (let k = 0; k < 3; k++) camera.target[k] -= lastMover[k];
+      lastMover = null;
+    }
+    const data = new Float32Array(world.length * 16);
+    for (let i = 0; i < world.length; i++) data.set(mul(world[i], skeleton.inverseRest[i]), i * 16);
+    gl.bindTexture(gl.TEXTURE_2D, boneTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, world.length, 0, gl.RGBA, gl.FLOAT, data);
+    draw();
+  }
+
+  // The mover's position track is not a place in the world: it adds up the steps in the ped's own frame
+  // (walk_turn_r ends at x 0, y 1.84 though it turned 43° right; walk_turn_180_r walks on to +y after
+  // turning round). Each step turns with the heading the ped has while making it, then adds to the path.
+  function moverPath(mover, frames) {
+    const path = new Float32Array(frames * 3);
+    if (!mover.position) return { kind: "position", values: path };
+    const p = mover.position.values, r = mover.rotation ? mover.rotation.values : null;
+    const step = [0, 0, 0, 0], q = [0, 0, 0, 1];
+    for (let f = 1; f < frames; f++) {
+      if (r) sample(mover.rotation, f - 0.5, frames, q, 0);
+      for (let k = 0; k < 3; k++) step[k] = p[f * 3 + k] - p[(f - 1) * 3 + k];
+      step[3] = 0;
+      const turned = qmul(qmul(q, step), qconj(q));
+      for (let k = 0; k < 3; k++) path[f * 3 + k] = path[(f - 1) * 3 + k] + turned[k];
+    }
+    return { kind: "position", values: path };
+  }
+
+  function setClip(c) {
+    const track = t => ({ bone: t.bone, kind: t.kind, values: new Float32Array(bytes(t.values).buffer) });
+    clip = {
+      frames: c.frames, fps: c.fps,
+      tracks: c.tracks.map(track),
+      mover: c.mover ? { position: c.mover.position ? track(c.mover.position) : null, rotation: c.mover.rotation ? track(c.mover.rotation) : null } : null,
+      facials: (c.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
+    };
+    if (clip.mover) clip.mover.path = moverPath(clip.mover, clip.frames);
+    playback.time = 0;
+    playback.reportedFrame = -1;
+    if (skeleton) findFollowers();
+    showFrame();
+  }
+
+  function currentFrame() { return clip ? Math.min(playback.time * clip.fps, clip.frames - 1) : 0; }
+
+  function showFrame() {
+    const frame = currentFrame();
+    pose(clip ? frame : null);
+    const whole = Math.floor(frame + 1e-6);
+    if (whole !== playback.reportedFrame) {
+      playback.reportedFrame = whole;
+      post({ type: "frame", frame: whole, playing: playback.playing });
+    }
+  }
+
+  function tick(now) {
+    if (!playback.playing || !clip) return;
+    const dt = playback.last ? (now - playback.last) / 1000 : 0;
+    playback.last = now;
+    const length = (clip.frames - 1) / clip.fps;
+    playback.time += dt * playback.speed;
+    if (playback.time > length) {
+      if (playback.loop && length > 0) playback.time %= length;
+      else { playback.time = length; playback.playing = false; playback.reportedFrame = -1; }
+    }
+    showFrame();
+    if (playback.playing) requestAnimationFrame(tick);
+  }
+
+  function play(on) {
+    if (!clip) return;
+    if (on && currentFrame() >= clip.frames - 1 && !playback.loop) playback.time = 0;
+    playback.playing = on;
+    playback.last = 0;
+    playback.reportedFrame = -1;
+    if (on) requestAnimationFrame(tick); else showFrame();
+  }
+
+  function seek(frame) {
+    if (!clip) return;
+    playback.time = Math.max(0, Math.min(frame, clip.frames - 1)) / clip.fps;
+    showFrame();
   }
 
   // --- Camera ---
@@ -265,6 +579,39 @@
 
   // --- Drawing ---
 
+  // Lines every half metre, 40 m across, at the height of the lowest point of the meshes (the feet).
+  let grid = null;
+  function createGrid() {
+    let ground = Infinity;
+    for (const m of meshes.values()) ground = Math.min(ground, m.min[2]);
+    if (ground === Infinity) ground = 0;
+    const lines = [];
+    for (let i = -40; i <= 40; i++) {
+      const v = i * 0.5;
+      lines.push(-20, v, ground, 20, v, ground, v, -20, ground, v, 20, ground);
+    }
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    bindSkin(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    return { vao, count: lines.length / 3 };
+  }
+
+  // The bone matrices on texture unit 1 for a skinned mesh, while there is a skeleton.
+  function useSkin(m) {
+    const on = !!(m.skinned && skeleton && boneTexture);
+    gl.uniform1i(loc.skinned, on);
+    if (on) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, boneTexture);
+      gl.uniform1i(loc.boneMatrices, 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+  }
+
   let pending = false;
   function draw() {
     if (!gl || pending) return;
@@ -297,10 +644,12 @@
           if (mat.glass !== glassPass) continue;
           const textured = showTextures && !!mat.texture;
           gl.uniform1i(loc.useTexture, textured);
+          gl.uniform1i(loc.cutout, mat.cutout !== false);
           gl.uniform1i(loc.hasNormal, m.hasNormal);
           gl.uniform3fv(loc.color, mat.color);
           gl.uniform1f(loc.alpha, glassPass ? 0.45 : 1.0);
           gl.uniform1i(loc.lines, false);
+          useSkin(m);
           if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
           gl.bindVertexArray(m.vao);
           gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
@@ -309,12 +658,23 @@
       gl.disable(gl.BLEND);
       gl.depthMask(true);
 
+      // A grid on the ground while the ped moves through the world, so the movement can be seen.
+      if (moveInWorld && skeleton) {
+        if (!grid) grid = createGrid();
+        gl.uniform1i(loc.lines, true);
+        gl.uniform1i(loc.skinned, false);
+        gl.uniform3fv(loc.color, [0.55, 0.6, 0.68]);
+        gl.bindVertexArray(grid.vao);
+        gl.drawArrays(gl.LINES, 0, grid.count);
+      }
+
       if (wireframe) {
         gl.uniform1i(loc.lines, true);
         gl.uniform3fv(loc.color, [0.95, 0.75, 0.25]);
         for (const id of visible) {
           const m = meshes.get(id);
           if (!m) continue;
+          useSkin(m);
           gl.bindVertexArray(m.lines);
           gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
         }
@@ -378,6 +738,14 @@
       else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; draw(); }
       else if (m.type === "background") { document.body.className = m.name; }
       else if (m.type === "fit") { fit(); }
+      else if (m.type === "skeleton") { setSkeleton(m); }
+      else if (m.type === "clip") { play(false); setClip(m); if (m.play) play(true); }
+      else if (m.type === "play") { play(m.on); }
+      else if (m.type === "seek") { play(false); seek(m.frame); }
+      else if (m.type === "speed") { playback.speed = m.value; }
+      else if (m.type === "loop") { playback.loop = m.on; }
+      else if (m.type === "move") { moveInWorld = m.on; showFrame(); }
+      else if (m.type === "facials") { showFacials = m.on; showFrame(); }
     });
   }
   post({ type: "ready", webgl: !!gl });

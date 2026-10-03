@@ -28,7 +28,7 @@ namespace RageLib.Animation
     ActionFlags = 128,
 
     // Texture coordinates moved: two rows of the texture matrix (map objects' UV animations); as whole
-    // numbers in ped animations.
+    // numbers in ped animations: 130 flags, 131 the sound played (the hash of its name, as AudioEvent).
     UV0 = 130,
     UV1 = 131,
 

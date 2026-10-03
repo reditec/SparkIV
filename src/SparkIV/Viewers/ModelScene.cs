@@ -214,12 +214,71 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
+    /// <summary>
+    /// A ped put together from its parts (head_000_r.wdr, uppr_000_u.wdr ...), all in one folder with the
+    /// dictionaries named like their textures; each part carries the ped's whole skeleton.
+    /// </summary>
+    public static ModelScene LoadPed(string name, Directory folder, IReadOnlyList<File> parts)
+    {
+      var dictionaries = new List<TextureFile>();
+      var scene = new ModelScene(name, dictionaries) { _folder = folder };
+      try
+      {
+        foreach (var part in parts)
+        {
+          scene.SourceFiles.Add(part);
+          using var model = new ModelFile();
+          model.Open(new MemoryStream(part.GetData()));
+          scene._pedTexture = PedTextureFor(part.Name, folder);
+          scene.AddDrawable(scene.Root, Path.GetFileNameWithoutExtension(part.Name), model.GetDataModel(), true);
+        }
+        scene._pedTexture = null;
+      }
+      finally
+      {
+        foreach (var textures in dictionaries)
+        {
+          textures.Dispose();
+        }
+      }
+      scene.Root.SettleParents();
+      return scene;
+    }
+
+    // For the ped part being added: its texture by the game's naming rule, if the material's isn't there.
+    private string? _pedTexture;
+
+    /// <summary>
+    /// The texture the game gives a ped part: part_diff_number_variant_kind (feet_000_u.wdr gets
+    /// feet_diff_000_a_uni, head_000_r.wdr head_diff_000_a_whi); variant a. Null if there is none.
+    /// </summary>
+    private static string? PedTextureFor(string partFile, Directory folder)
+    {
+      var match = System.Text.RegularExpressions.Regex.Match(Path.GetFileNameWithoutExtension(partFile), @"^([a-z0-9]+)_(\d{3})_[a-z]$",
+                                                              System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+      if (!match.Success)
+      {
+        return null;
+      }
+      string prefix = match.Groups[1].Value + "_diff_" + match.Groups[2].Value + "_a_";
+      var file = folder.OfType<File>()
+                       .Where(f => f.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && f.Name.EndsWith(".wtd", StringComparison.OrdinalIgnoreCase))
+                       .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                       .FirstOrDefault();
+      return file == null ? null : Path.GetFileNameWithoutExtension(file.Name);
+    }
+
     public static ModelScene Load(File file, byte[] data)
     {
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
       var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory };
       scene.SourceFiles.Add(file);
+      // A ped part on its own (feet_000_u.wdr): its texture by the game's naming rule where the material's isn't there.
+      if (file.ParentDirectory != null && extension == ".wdr")
+      {
+        scene._pedTexture = PedTextureFor(file.Name, file.ParentDirectory);
+      }
       try
       {
         // Textures the model doesn't have itself: a dictionary of the same name next to it (admiral.wtd for
@@ -426,7 +485,11 @@ namespace SparkIV.WinUI.Viewers
         foreach (var bone in all.OrderBy(b => b.Index))
         {
           Bones.Add(new SceneBone(bone.Index, bone.Name, bone.Parent?.Index ?? -1,
-                                  bone.Position.X, bone.Position.Y, bone.Position.Z, bone.Rotation.X, bone.Rotation.Y, bone.Rotation.Z));
+                                  bone.Position.X, bone.Position.Y, bone.Position.Z, bone.Rotation.X, bone.Rotation.Y, bone.Rotation.Z)
+          {
+            Id = (ushort)bone.Id,
+            Quaternion = new[] { bone.RotationQuaternion.X, bone.RotationQuaternion.Y, bone.RotationQuaternion.Z, bone.RotationQuaternion.W },
+          });
         }
       }
       if (drawable.AttachedTexture != null && drawable.AttachedTexture.Count > 0)
@@ -479,6 +542,9 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
+    private static int SkeletonBone(Mesh mesh, uint blendIndex) =>
+      mesh.BoneMapping.Length > 0 ? mesh.BoneMapping[Math.Min((int)blendIndex, mesh.BoneMapping.Length - 1)] : (int)blendIndex;
+
     private int AddMesh(Mesh mesh, int material, Placement? placement)
     {
       var vertices = mesh.DecodeVertexData();
@@ -512,19 +578,45 @@ namespace SparkIV.WinUI.Viewers
       var triangles = new ushort[count];
       Array.Copy(indices, triangles, count);
 
-      // The bone of each vertex: its first blend bone (peds), or the bone it is placed at (wheels).
+      // The bone of each vertex: its strongest blend bone (peds), or the bone it is placed at (wheels).
+      // A blend index is one of the mesh's own few bones: BoneMapping gives the skeleton bone.
       var bones = new int[vertices.Length];
+      float[]? skinBones = null, skinWeights = null;
+      bool skinned = mesh.VertexHasBlendInfo && mesh.BoneMapping.Length > 0;
+      if (skinned)
+      {
+        skinBones = new float[vertices.Length * 4];
+        skinWeights = new float[vertices.Length * 4];
+      }
       int placedAt = placement == null ? 0 : Math.Max(0, Bones.FindIndex(b => b.Name.Equals(placement.Bone, StringComparison.OrdinalIgnoreCase)));
       for (int i = 0; i < vertices.Length; i++)
       {
-        bones[i] = mesh.VertexHasBlendInfo && vertices[i].BlendIndices != null ? (int)vertices[i].BlendIndices[0] : placedAt;
+        bones[i] = placedAt;
+        if (mesh.VertexHasBlendInfo && vertices[i].BlendIndices != null)
+        {
+          int strongest = 0;
+          for (int k = 0; k < 4; k++)
+          {
+            int bone = SkeletonBone(mesh, vertices[i].BlendIndices[k]);
+            if (skinned)
+            {
+              skinBones![i * 4 + k] = bone;
+              skinWeights![i * 4 + k] = vertices[i].BlendWeights[k];
+            }
+            if (vertices[i].BlendWeights[k] > vertices[i].BlendWeights[strongest])
+            {
+              strongest = k;
+            }
+          }
+          bones[i] = SkeletonBone(mesh, vertices[i].BlendIndices[strongest]);
+        }
         if (bones[i] >= Bones.Count)
         {
           bones[i] = 0;
         }
       }
 
-      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones);
+      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones) { SkinBones = skinBones, SkinWeights = skinWeights };
       Meshes.Add(scene);
       return scene.Id;
     }
@@ -541,6 +633,18 @@ namespace SparkIV.WinUI.Viewers
       {
         // The model's own textures first, then the dictionaries next to it.
         var texture = FindTexture(textureName, embedded, out string source);
+        if (texture == null && _pedTexture != null)
+        {
+          // A ped part naming a texture that isn't there (Johnny's feet: "givemechecker"): the one the game
+          // takes by name for the part.
+          var byRule = FindTexture(_pedTexture, embedded, out string ruleSource);
+          if (byRule != null)
+          {
+            texture = byRule;
+            source = ruleSource;
+            textureName = _pedTexture;
+          }
+        }
         Listed(texture?.Name ?? textureName, source, texture).IsUsed = true;
         if (texture != null)
         {
@@ -585,6 +689,10 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>The bone each vertex moves with (index into <see cref="ModelScene.Bones"/>; 0 without a skeleton), for the export.</summary>
     public int[] Bones { get; }
 
+    /// <summary>For a skinned mesh (peds): four skeleton bones and their weights per vertex; null otherwise.</summary>
+    public float[]? SkinBones { get; init; }
+    public float[]? SkinWeights { get; init; }
+
     public int Id { get; }
     public int Material { get; }
     public float[] Positions { get; }
@@ -602,6 +710,8 @@ namespace SparkIV.WinUI.Viewers
       positions = Base64(Positions),
       normals = Normals == null ? null : Base64(Normals),
       uvs = Uvs == null ? null : Base64(Uvs),
+      skinBones = SkinBones == null ? null : Base64(SkinBones),
+      skinWeights = SkinWeights == null ? null : Base64(SkinWeights),
       indices = Convert.ToBase64String(MemoryMarshal.AsBytes(Indices.AsSpan())),
     };
 
@@ -609,7 +719,14 @@ namespace SparkIV.WinUI.Viewers
   }
 
   /// <summary>A bone: its place and turn relative to its parent (Euler angles in radians, as RageLib reads them).</summary>
-  public sealed record SceneBone(int Index, string Name, int Parent, float X, float Y, float Z, float RotationX, float RotationY, float RotationZ);
+  public sealed record SceneBone(int Index, string Name, int Parent, float X, float Y, float Z, float RotationX, float RotationY, float RotationZ)
+  {
+    /// <summary>The id animations refer to the bone by (as an unsigned 16-bit number, as in the tracks).</summary>
+    public int Id { get; init; }
+
+    /// <summary>The turn relative to the parent as a quaternion (x, y, z, w).</summary>
+    public float[] Quaternion { get; init; } = { 0, 0, 0, 1 };
+  }
 
   /// <summary>A texture of the model and where it comes from, with a thumbnail made while loading.</summary>
   public sealed class SceneTexture
@@ -663,5 +780,13 @@ namespace SparkIV.WinUI.Viewers
     public string? TextureName { get; }
     public string? TextureKey { get; }
     public bool Glass { get; }
+
+    /// <summary>
+    /// Whether see-through texels are cut out (leaves, fences, hair). Not for peds' skin and clothes: their
+    /// textures' alpha holds something else (the face would be gone).
+    /// </summary>
+    public bool Cutout =>
+      !Shader.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase) ||
+      Shader.Contains("alpha", StringComparison.OrdinalIgnoreCase) || Shader.Contains("hair", StringComparison.OrdinalIgnoreCase);
   }
 }
