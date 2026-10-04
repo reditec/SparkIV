@@ -71,6 +71,7 @@ namespace SparkIV.WinUI.Viewers
     private static bool s_camera = true;
     private static bool s_subtitles = true;
     private static bool s_lights = true;
+    private static bool s_location = true;
 
     private readonly ViewerContext _context;
     private readonly CutsceneDocument _document;
@@ -90,6 +91,11 @@ namespace SparkIV.WinUI.Viewers
     private int _frame;
     private int _frames = 1;
     private float _fps = 30;
+    // The meshes shown: the cast's, the location's (once loaded); what the status says of the location.
+    private List<int> _castVisible = new List<int>();
+    private List<int> _locationVisible = new List<int>();
+    private bool _locationLoading;
+    private string? _locationNote;
 
     public CutsceneView(ViewerContext context, CutsceneDocument document)
     {
@@ -130,10 +136,14 @@ namespace SparkIV.WinUI.Viewers
       CameraButton.IsChecked = s_camera;
       SubtitlesButton.IsChecked = s_subtitles;
       LightsButton.IsChecked = s_lights;
+      LocationButton.IsChecked = s_location;
+      LocationButton.IsEnabled = document.GameFolder != null && document.Cut.Offset != null;
       Message.Text = document.Error ?? "";
       Message.Visibility = document.Error != null ? Visibility.Visible : Visibility.Collapsed;
       _ready = true;
 
+      // The keys aren't shown as a tooltip over the whole view ("Space" wherever the mouse is).
+      KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Space, () => Play_Click(this, new RoutedEventArgs())));
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Left, () => Step(-1)));
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Right, () => Step(+1)));
@@ -224,7 +234,7 @@ namespace SparkIV.WinUI.Viewers
       }
       else
       {
-        body = CutsceneMessages.Texture(_document.Actors, name);
+        body = name.StartsWith("m", StringComparison.Ordinal) ? _document.Location?.Texture(name) : CutsceneMessages.Texture(_document.Actors, name);
       }
       args.Response = sender.Environment.CreateWebResourceResponse(new MemoryStream(body ?? Array.Empty<byte>()).AsRandomAccessStream(),
                                                                    body != null ? 200 : 404, body != null ? "OK" : "Not Found",
@@ -248,7 +258,9 @@ namespace SparkIV.WinUI.Viewers
           ShowSection(Math.Max(0, _section), _frame, play: false);
           break;
         case "loaded":
-          Working.IsActive = false;
+          // The cast's textures are there; the spinner goes on while the location still loads (its scene
+          // says "loaded" again when its textures are there).
+          Working.IsActive = _locationLoading;
           break;
         case "frame":
           _frame = root.GetProperty("frame").GetInt32();
@@ -289,6 +301,7 @@ namespace SparkIV.WinUI.Viewers
       {
         Working.IsActive = false;
       }
+      _castVisible = visible;
       Post(scene);
       Post(new { type = "options", textures = true, wireframe = false });
       Post(new { type = "background", name = BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
@@ -296,7 +309,77 @@ namespace SparkIV.WinUI.Viewers
       Post(new { type = "sceneLights", on = s_lights });
       // The sections play one after the other (here), not each over again.
       Post(new { type = "loop", on = false });
+      // The location: sent again to a page started anew, else loaded now when it is to be shown.
+      if (_document.Location != null)
+      {
+        SendLocation();
+      }
+      else if (s_location)
+      {
+        LoadLocation();
+      }
     }
+
+    /// <summary>The map around the scene, loaded in the background (some seconds), then shown.</summary>
+    private async void LoadLocation()
+    {
+      string? folder = _document.GameFolder;
+      float[]? offset = _document.Cut.Offset;
+      if (_locationLoading || _document.Location != null || folder == null || offset == null)
+      {
+        return;
+      }
+      _locationLoading = true;
+      Working.IsActive = true;
+      _locationNote = "loading the location …";
+      ShowStatus();
+      try
+      {
+        var removals = _document.Cut.Removals;
+        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius));
+      }
+      catch (Exception ex)
+      {
+        _locationNote = "no location: " + ex.Message;
+        ShowStatus();
+        _locationLoading = false;
+        Working.IsActive = false;
+        return;
+      }
+      finally
+      {
+        _locationLoading = false;
+      }
+      if (_disposed)
+      {
+        return;
+      }
+      var location = _document.Location;
+      _locationNote = "location: " + location.Objects.Count + " objects within " + LocationRadius + " m"
+                      + (location.Hidden > 0 ? ", " + location.Hidden + " hidden by the scene" : "")
+                      + (location.Missing > 0 ? ", " + location.Missing + " not found" : "");
+      ShowStatus();
+      SendLocation();
+    }
+
+    // How far round the scene's origin the map is shown, in metres.
+    private const float LocationRadius = 60;
+
+    private void SendLocation()
+    {
+      if (_document.Location == null)
+      {
+        return;
+      }
+      // After the cast's ids (meshes and materials), well clear of them.
+      var (scene, visible) = _document.Location.Message(key => Host + key, 100000, 100000);
+      Post(scene);
+      _locationVisible = visible;
+      PostVisible();
+    }
+
+    private void PostVisible() =>
+      Post(new { type = "visible", ids = s_location ? _castVisible.Concat(_locationVisible).ToList() : _castVisible, fit = false });
 
     /// <summary>A section in the page: its timeline, every actor's clip, the camera; at a frame, playing or not.</summary>
     private void ShowSection(int index, int frame, bool play)
@@ -357,7 +440,22 @@ namespace SparkIV.WinUI.Viewers
         parts.Add("no camera clip");
       }
       parts.AddRange(notes);
-      Status.Text = string.Join("   ·   ", parts);
+      _sectionStatus = string.Join("   ·   ", parts);
+      ShowStatus();
+    }
+
+    private string _sectionStatus = "";
+
+    private void ShowStatus() => Status.Text = _locationNote == null ? _sectionStatus : _sectionStatus + "   ·   " + _locationNote;
+
+    private void Location_Click(object sender, RoutedEventArgs e)
+    {
+      s_location = LocationButton.IsChecked == true;
+      if (s_location && _document.Location == null)
+      {
+        LoadLocation();
+      }
+      PostVisible();
     }
 
     #endregion
@@ -411,7 +509,8 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>
     /// While playing with sound: the picture follows the sound, to the next section when the sound gets
-    /// there, a little ahead or back when it drifts more than two frames.
+    /// there; within a section the page is told the sound's time and follows it gently (a hard correction
+    /// whenever it drifted made the picture stutter: the frame the page reported was always a little late).
     /// </summary>
     private void Timer_Tick(object? sender, object e)
     {
@@ -433,9 +532,10 @@ namespace SparkIV.WinUI.Viewers
       {
         ShowSection(section, frame, play: true);
       }
-      else if (Math.Abs(frame - _frame) > 2)
+      else
       {
-        Post(new { type = "time", frame });
+        // The sound's time with its fraction; the page follows it gently.
+        Post(new { type = "sync", frame = (seconds - _sectionStart[section]) * _fps });
       }
     }
 

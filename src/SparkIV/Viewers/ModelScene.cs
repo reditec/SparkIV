@@ -274,17 +274,22 @@ namespace SparkIV.WinUI.Viewers
     // A texture to use in place of one a material names, where there is (or null): see Load.
     private Func<string, string?>? _preferTexture;
 
+    // Whether every mesh keeps its vertex colours (see Load).
+    private bool _vertexColors;
+
     /// <summary>
     /// A model with its textures. <paramref name="moreDictionaries"/>: the bytes of a dictionary not beside
     /// the model ("vehshare"), from wherever the caller knows; null where it isn't.
     /// <paramref name="preferTexture"/>: the name of a texture to use in place of one a material names, when
-    /// it is there (a ped's texture variation), or null.
+    /// it is there (a ped's texture variation), or null. <paramref name="vertexColors"/>: every mesh keeps
+    /// its vertex colours (map objects: the light baked into them), not only terrain and dirt decals.
     /// </summary>
-    public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null, Func<string, string?>? preferTexture = null)
+    public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null, Func<string, string?>? preferTexture = null,
+                                  bool vertexColors = false)
     {
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
-      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory, _preferTexture = preferTexture };
+      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory, _preferTexture = preferTexture, _vertexColors = vertexColors };
       scene.SourceFiles.Add(file);
       // A ped part on its own (feet_000_u.wdr): its texture by the game's naming rule where the material's isn't there.
       if (file.ParentDirectory != null && extension == ".wdr")
@@ -783,6 +788,19 @@ namespace SparkIV.WinUI.Viewers
           alphas[i] = (vertices[i].DiffuseColor >> 24) / 255f;
         }
       }
+      // Dirt decals (gta_decal_dirt) take their colour from the vertices, the texture only says where; map
+      // objects shown in their place (a cutscene's location) the light baked into them.
+      if (hasColor && colors == null && (_vertexColors || (material >= 0 && material < Materials.Count && Materials[material].DirtMask != null)))
+      {
+        colors = new float[vertices.Length * 3];
+        for (int i = 0; i < vertices.Length; i++)
+        {
+          uint color = vertices[i].DiffuseColor;
+          colors[i * 3] = (color & 0xFF) / 255f;
+          colors[i * 3 + 1] = ((color >> 8) & 0xFF) / 255f;
+          colors[i * 3 + 2] = ((color >> 16) & 0xFF) / 255f;
+        }
+      }
 
       var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones)
       {
@@ -900,8 +918,14 @@ namespace SparkIV.WinUI.Viewers
         SpecularPower = VectorParameter(material, SpecularFactor)?.X ?? 0,
         SpecularIntensity = VectorParameter(material, SpecularColorFactor)?.X ?? 0,
         SpecularMask = mask == null ? new[] { 1f, 0f, 0f } : new[] { mask.Value.X, mask.Value.Y, mask.Value.Z },
+        DirtMask = material.ShaderName.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase)
+          ? (VectorParameter(material, DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
+          : null,
       };
     }
+
+    // "dirtdecalmask": which of a dirt decal's texture channels says where the dirt is (gta_decal_dirt).
+    private static readonly uint DirtDecalMask = RageLib.Text.GxtFile.Hash("dirtDecalMask");
 
     // The hashes of the map shaders' parameters for bumps and shine, named by hashing their names
     // ("bumpsampler" ...) and checked against the materials of eleven exported map archives.
@@ -1114,6 +1138,12 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Which channels of the specular map hold the shine (usually red only).</summary>
     public float[] SpecularMask { get; init; } = { 1, 0, 0 };
 
+    /// <summary>
+    /// A dirt decal's (gta_decal_dirt): which texture channels say how much dirt there is (the game's
+    /// pixel shader: alpha = dot(texture.rgb, mask) × vertex alpha, the colour the vertices'); null otherwise.
+    /// </summary>
+    public float[]? DirtMask { get; init; }
+
     /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
     public object ToMessage(Func<string, string> url) => new
     {
@@ -1131,6 +1161,7 @@ namespace SparkIV.WinUI.Viewers
       specularPower = SpecularPower,
       specularIntensity = SpecularIntensity,
       specularMask = SpecularMask,
+      dirtMask = DirtMask,
     };
 
     /// <summary>

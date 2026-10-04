@@ -110,6 +110,8 @@ namespace SparkIV.WinUI.Viewers
       }
 
       // Space plays and pauses, the arrow keys step.
+      // The keys aren't shown as a tooltip over the whole view ("Space" wherever the mouse is).
+      KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Space, () => Play_Click(this, new RoutedEventArgs())));
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Left, () => Step(-1)));
       KeyboardAccelerators.Add(Accelerator(Windows.System.VirtualKey.Right, () => Step(+1)));

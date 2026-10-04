@@ -25,6 +25,9 @@ namespace SparkIV.WinUI.Viewers
 
     public List<string> Flags { get; } = new List<string>();
 
+    /// <summary>The map objects hidden while the scene plays (the real door where the scene's own one moves).</summary>
+    public List<CutRemoval> Removals { get; } = new List<CutRemoval>();
+
     /// <summary>Which variation of a ped's parts is worn (CS_Bernie_CraneT: uppr_001, its uppr_000 an empty stand-in).</summary>
     public List<CutVariation> Variations { get; } = new List<CutVariation>();
 
@@ -111,6 +114,10 @@ namespace SparkIV.WinUI.Viewers
           case "LIGHTS" when section != null:
             section.Lights.Add(line);
             break;
+          case "REMOVE" when parts.Length >= 4:
+            var removal = new CutRemoval(F(parts[0]), F(parts[1]), F(parts[2]), parts[3]);
+            if (!cut.Removals.Contains(removal)) cut.Removals.Add(removal);
+            break;
         }
       }
       return cut;
@@ -152,6 +159,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>The part's name ("uppr"), or null for a number not known.</summary>
     public string? ComponentName => Component >= 0 && Component < Components.Length ? Components[Component] : null;
   }
+
+  /// <summary>A map object hidden during the scene: where it is in the world (to a tenth of a metre), its model.</summary>
+  public sealed record CutRemoval(float X, float Y, float Z, string Model);
 
   /// <summary>A subtitle: from when, for how long (milliseconds over the whole scene), its key in the text table.</summary>
   public sealed record CutSubtitle(int Start, int Length, string Key);

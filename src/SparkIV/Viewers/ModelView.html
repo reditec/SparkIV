@@ -36,6 +36,7 @@
   // --- Camera: orbits around a target ---
   const camera = { yaw: -0.6, pitch: 0.35, distance: 5, target: [0, 0, 0], fov: 45 * Math.PI / 180 };
   let sceneRadius = 1;
+  let backgroundReach = 0;
 
   if (!gl) {
     message.textContent = "This view needs WebGL 2, which this computer's graphics don't offer.";
@@ -84,6 +85,15 @@
     uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout;
     // See-through by the texture's alpha (the see-through and decal buckets).
     uniform bool textureAlpha;
+    // A dirt decal (gta_decal_dirt): the texture's channels in dirtMask say how much shows, the colour is the vertices'.
+    uniform bool dirtDecal; uniform vec3 dirtMask;
+    // A map object in its place (a cutscene's location): lit mostly by the light baked into its vertex colours
+    // (red: as the game's shaders pass it on to the lighting), the view's own light only a little.
+    uniform bool baked;
+    // How bright the baked light is: the game's light round about indoors is dim (Bernie's flat, whose
+    // vertices hold 0.45 on average: the game's picture of bc_1's hall is 48 of 255 bright on average, at
+    // 0.55 the view's comes out alike), the lamps and the scene's lights do the rest.
+    const float BakedLight = 0.55;
     // A cutscene's own lights (up to 8): place, the way it shines (none: all round), colour times strength,
     // range, the cosine of half its cone (-1: all round).
     uniform int sceneLights; uniform vec3 sceneLightAt[8]; uniform vec3 sceneLightDir[8]; uniform vec3 sceneLightColor[8];
@@ -121,6 +131,7 @@
         if (useTexture && layers > 3 && layerOn.z > 0.5) { vec4 l = texture(tex3, vUv3); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.w, 0.0, 1.0)); }
         base.a = 1.0;
       }
+      if (dirtDecal && useTexture) base = vec4(vColor, dot(base.rgb, dirtMask));
       if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, hair)
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
@@ -131,10 +142,11 @@
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
       float around = layers > 1 ? vColor.r : 1.0;
-      float shade = 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      float shade = baked ? vColor.r * BakedLight + 0.06 * max(dot(n, light), 0.0)
+                          : 0.35 * around + 0.65 * max(dot(n, light), 0.0);
       // A cutscene's lights on top: fading to nothing at their range, inside a spot's cone (soft at its edge).
       // The view's own light dimmed while they are on, so they show (in the game they are much of the light).
-      vec3 lit = vec3(sceneLights > 0 ? shade * 0.6 : shade);
+      vec3 lit = vec3(sceneLights > 0 && !baked ? shade * 0.6 : shade);
       for (int i = 0; i < 8; i++) {
         if (i >= sceneLights) break;
         vec3 l = sceneLightAt[i] - vPosition;
@@ -200,6 +212,9 @@
       tex3: gl.getUniformLocation(program, "tex3"),
       layerOn: gl.getUniformLocation(program, "layerOn"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
+      dirtDecal: gl.getUniformLocation(program, "dirtDecal"),
+      baked: gl.getUniformLocation(program, "baked"),
+      dirtMask: gl.getUniformLocation(program, "dirtMask"),
       sceneLights: gl.getUniformLocation(program, "sceneLights"),
       sceneLightAt: gl.getUniformLocation(program, "sceneLightAt"),
       sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
@@ -309,7 +324,7 @@
     attribute(loc.layerUvA, 4, layerUvs, 24, 0);
     attribute(loc.layerUvB, 2, layerUvs, 24, 16);
     attribute(loc.layerWeights, 4, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerWeights).buffer)) : null, 0, 0);
-    attribute(loc.vertexColor, 3, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
+    attribute(loc.vertexColor, 3, m.colors ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
     // Without its own, every vertex shows fully (the value is set before each draw: it isn't kept in the VAO).
     attribute(loc.vertexAlpha, 1, m.alphas ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.alphas).buffer)) : null, 0, 0);
     buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
@@ -339,8 +354,11 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    // actor: which of a cutscene's cast it belongs to (0: the one model or ped shown otherwise).
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0 });
+    // How far a cutscene's location reaches from the scene's origin: the far plane stays beyond it.
+    if (m.background) backgroundReach = Math.max(backgroundReach, ...[0, 1, 2].map(k => Math.max(Math.abs(min[k]), Math.abs(max[k]))).map(v => v * 1.8));
+    // actor: which of a cutscene's cast it belongs to (0: the one model or ped shown otherwise);
+    // background: around a cutscene (its location), not looked at when fitting.
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true && !!m.colors });
   }
 
   function addMaterial(m) {
@@ -357,6 +375,7 @@
       // Bumps and shine.
       normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
       specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
+      dirtMask: m.dirtMask || null,
     };
     materials.set(m.id, material);
     if (m.texture) loadTexture(m.texture, t => material.texture = t);
@@ -856,10 +875,19 @@
     if (!useFilmCamera || !filmCamera || !filmCamera.position || !filmCamera.rotation) return null;
     const f = clip ? Math.min(currentFrame() / clip.fps * filmCamera.fps, filmCamera.frames - 1) : 0;
     const e = [0, 0, 0], q = [0, 0, 0, 1];
-    // Whole frames: a cut between two frames would otherwise swing the camera across the room for a frame.
+    // Smoothly between frames, but not across a cut (the camera elsewhere from one frame to the next: more
+    // than 25 cm or 10°), which would swing it across the room for a frame.
     const whole = Math.floor(f + 1e-6);
-    sample(filmCamera.position, whole, filmCamera.frames, e, 0);
-    sample(filmCamera.rotation, whole, filmCamera.frames, q, 0);
+    const a = [0, 0, 0], b = [0, 0, 0], qa = [0, 0, 0, 1], qb = [0, 0, 0, 1];
+    sample(filmCamera.position, whole, filmCamera.frames, a, 0);
+    sample(filmCamera.position, whole + 1, filmCamera.frames, b, 0);
+    sample(filmCamera.rotation, whole, filmCamera.frames, qa, 0);
+    sample(filmCamera.rotation, whole + 1, filmCamera.frames, qb, 0);
+    const cut = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) > 0.25 ||
+                Math.abs(qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3]) < Math.cos(5 * Math.PI / 180);
+    const at = cut ? whole : f;
+    sample(filmCamera.position, at, filmCamera.frames, e, 0);
+    sample(filmCamera.rotation, at, filmCamera.frames, q, 0);
     const turn = v => qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q)).slice(0, 3);
     const fov = filmCamera.fov ? filmCamera.fov[Math.min(whole, filmCamera.fov.length - 1)] : 45;
     return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180 };
@@ -1014,7 +1042,7 @@
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
     for (const id of visible) {
       const m = meshes.get(id);
-      if (!m || m.actor) continue;
+      if (!m || m.actor || m.background) continue;
       for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
     }
     // A cutscene's actors where they are now (their meshes are made at the origin): their bones, and a
@@ -1092,8 +1120,13 @@
     const u = cross(s, f);
     const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, e), -dot(u, e), dot(f, e), 1];
     const aspect = canvas.width / Math.max(1, canvas.height);
-    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = film ? sceneRadius * 8 + 100 : camera.distance + sceneRadius * 4;
-    const nearClip = film ? 0.03 : Math.max(camera.distance / 1000, near * 0.1);
+    const reach = Math.max(sceneRadius * 4, backgroundReach + camera.distance);
+    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = film ? Math.max(sceneRadius * 8 + 100, backgroundReach * 2) : camera.distance + reach;
+    // Not nearer than needed: the nearer it is, the less exact the depth further away, and close surfaces
+    // (a wall and the dirt laid over it) flicker through each other. A cutscene's location reaches far,
+    // so its camera's near limit is 10 cm, the free view's at least a 2000th of the farthest.
+    let nearClip = film ? 0.1 : Math.max(camera.distance / 1000, near * 0.1);
+    if (!film && backgroundReach > 0) nearClip = Math.max(nearClip, Math.min(0.1, far / 2000));
     const t = 1 / Math.tan((film ? film.fov : camera.fov) / 2);
     const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + nearClip) / (nearClip - far), -1, 0, 0, 2 * far * nearClip / (nearClip - far), 0];
     const out = new Array(16);
@@ -1195,7 +1228,11 @@
           gl.uniform1i(loc.cutout, mat.cutout === true);
           gl.uniform1i(loc.textureAlpha, glassPass && !mat.glass);
           // Decals a little in front of the surface they lie on, so they don't flicker into it.
-          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); } else gl.disable(gl.POLYGON_OFFSET_FILL);
+          // See-through layers over a surface (dirt, wear, posters in the interiors) a little less, so they
+          // don't flicker into it either; glass stays where it is.
+          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); }
+          else if (mat.blend && !mat.glass) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -2); }
+          else gl.disable(gl.POLYGON_OFFSET_FILL);
           gl.uniform1i(loc.hasNormal, m.hasNormal);
           gl.uniform3fv(loc.color, mat.color);
           gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
@@ -1218,6 +1255,9 @@
           gl.uniform1f(loc.specPower, mat.specularPower || 0);
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
+          gl.uniform1i(loc.dirtDecal, !!mat.dirtMask);
+          gl.uniform1i(loc.baked, m.baked);
+          if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);
           gl.uniform1i(loc.normalTex, 5);
           gl.uniform1i(loc.specTex, 6);
           if (textured && mat.normal) { gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, mat.normal); }
@@ -1355,6 +1395,14 @@
       else if (m.type === "seek") { play(false); seek(m.frame); }
       // To a frame without stopping: a cutscene follows its sound, which keeps the time.
       else if (m.type === "time") { if (clip) { playback.time = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps; if (!playback.playing) showFrame(); } }
+      // The sound's time (a frame, with its fraction) while playing: followed gently, a few hundredths of
+      // a second at a time (a jump only when far off), so the picture doesn't stutter.
+      else if (m.type === "sync") {
+        if (clip && playback.playing) {
+          const d = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps - playback.time;
+          if (Math.abs(d) > 0.4) playback.time += d; else playback.time += d * 0.2;
+        }
+      }
       else if (m.type === "speed") { playback.speed = m.value; }
       else if (m.type === "loop") { playback.loop = m.on; }
       else if (m.type === "move") { moveInWorld = m.on; showFrame(); }

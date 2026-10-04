@@ -27,6 +27,12 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>The game whose models and texts are used ("GTA IV", "TLAD", "TBoGT"), or null.</summary>
     public string? Game { get; init; }
 
+    /// <summary>That game's folder (the one holding pc\), for the location's maps; or null.</summary>
+    public string? GameFolder { get; init; }
+
+    /// <summary>The map around the scene, once loaded (the view loads it after showing the cast).</summary>
+    public CutsceneLocation? Location { get; set; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
@@ -72,7 +78,7 @@ namespace SparkIV.WinUI.Viewers
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
       return new CutsceneDocument
       {
-        Cut = cut, Actors = actors, Sections = sections, Texts = LoadTexts(game.Folder, cut), Game = game.Name,
+        Cut = cut, Actors = actors, Sections = sections, Texts = LoadTexts(game.Folder, cut), Game = game.Name, GameFolder = game.Folder,
         AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote,
       };
     }
