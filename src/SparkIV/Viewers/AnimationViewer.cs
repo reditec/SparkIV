@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.UI.Xaml;
 using RageLib.Animation;
 using RageLib.Common;
@@ -48,7 +49,22 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>The names of the games' sounds by their hash (what a clip's AudioEvent track holds).</summary>
     public IReadOnlyDictionary<uint, string> SoundNames { get; init; } = new Dictionary<uint, string>();
+
+    /// <summary>
+    /// Whether the clips move map objects (a fan, a flag, a sign's texture), each the model it is named
+    /// after, rather than a ped.
+    /// </summary>
+    public bool IsObjects { get; init; }
+
+    /// <summary>The folder the .wad is in (the map archive, where its models are too), or null.</summary>
+    public Directory? Folder { get; init; }
+
+    /// <summary>The objects' models loaded so far, by name.</summary>
+    public Dictionary<string, ObjectModel> Objects { get; } = new Dictionary<string, ObjectModel>(StringComparer.OrdinalIgnoreCase);
   }
+
+  /// <summary>A map object's model for its clips, where it was found, or why there is none.</summary>
+  public sealed record ObjectModel(string Name, ModelScene? Scene, string? Source, string? Error);
 
   /// <summary>Animation dictionaries (.wad): their clips played on a ped.</summary>
   internal sealed class AnimationViewer : IViewer
@@ -60,7 +76,11 @@ namespace SparkIV.WinUI.Viewers
     {
       var animations = new AnimationFile();
       animations.Open(new MemoryStream(data));
-      var document = new AnimationDocument { Animations = animations, Peds = FindPeds(), SoundNames = SoundNames() };
+      if (IsObjectDictionary(animations, file.ParentDirectory))
+      {
+        return new AnimationDocument { Animations = animations, SoundNames = SoundNames(), IsObjects = true, Folder = file.ParentDirectory };
+      }
+      var document = new AnimationDocument { Animations = animations, Peds = FindPeds(), SoundNames = SoundNames(), Folder = file.ParentDirectory };
       var ped = document.Peds.FirstOrDefault(p => p.Name == s_ped) ?? document.Peds.FirstOrDefault();
       if (ped == null)
       {
@@ -74,6 +94,130 @@ namespace SparkIV.WinUI.Viewers
     }
 
     public FrameworkElement CreateView(ViewerContext context, object loaded) => new AnimationView(context, (AnimationDocument)loaded);
+
+    // The bone ids of the ped skeleton: the same 90 in Niko, Johnny and Luis (and what ped clips name).
+    private static readonly HashSet<int> PedBoneIds = new HashSet<int>
+    {
+      417, 418, 419, 420, 421, 423, 424, 425, 1200, 1202, 1203, 1204, 1205, 1216, 1217, 1218, 1219, 1223, 1224,
+      1225, 1232, 13744, 13745, 13746, 13747, 13748, 13749, 13750, 13751, 13752, 13753, 13760, 13761, 13762, 13763,
+      13764, 13776, 13777, 13778, 13779, 13780, 13781, 13782, 13783, 13784, 13785, 13792, 13793, 13794, 13795,
+      13796, 13984, 13985, 14240, 14496, 14497, 14512, 14752, 14753, 14768, 15857, 15873, 43252, 43253, 43254,
+      43255, 43256, 43257, 43258, 43259, 43260, 43267, 43268, 43269, 43270, 43271, 43272, 43273, 43274, 43275,
+      43276, 43283, 43284, 43285, 43286, 43287, 45156, 45157, 45158,
+    };
+
+    /// <summary>The model a map object's clip is for: its name, without "_uv_N" (ts_atower_dc9_uv_27).</summary>
+    internal static string ModelNameOf(Animation clip) => Regex.Replace(clip.ShortName, @"_uv_\d+$", "", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The material whose texture a clip moves ("_uv_27": material 27, whose two UV tracks are the rows of
+    /// its texture matrix), or -1.
+    /// </summary>
+    internal static int UvMaterialOf(Animation clip)
+    {
+      var match = Regex.Match(clip.ShortName, @"_uv_(\d+)$", RegexOptions.IgnoreCase);
+      return match.Success && IsUvClip(clip) ? int.Parse(match.Groups[1].Value) : -1;
+    }
+
+    /// <summary>Whether a clip moves a texture: UV tracks as numbers with a fraction (in ped clips they are whole numbers: flags, sounds).</summary>
+    internal static bool IsUvClip(Animation clip) =>
+      clip.Tracks.Any(t => (t.Kind == AnimationTrackKind.UV0 || t.Kind == AnimationTrackKind.UV1) && t.DataType != 3);
+
+    /// <summary>
+    /// Whether a dictionary's clips are for map objects. Found in the map archives (bronx_e.wad beside
+    /// bronx_e.img's models), each clip named like its model; ped clips are in anim.img. Told apart by what
+    /// the clips are, wherever the file is: a model of a clip's name beside it, a texture moved, or bones
+    /// that aren't a ped's (et_bboardanim01 moves 33, a viseme only 11 of a ped's face). A clip of a few ped
+    /// bone ids only (pris_bigtow02: 418) is an object's when the game has a model of its name.
+    /// </summary>
+    internal static bool IsObjectDictionary(AnimationFile animations, Directory? folder)
+    {
+      var clips = animations.Animations;
+      if (clips.Count == 0)
+      {
+        return false;
+      }
+      bool HasModelBeside(Animation clip) =>
+        folder != null && (folder.FindByName(ModelNameOf(clip) + ".wdr") is File || folder.FindByName(ModelNameOf(clip) + ".wft") is File);
+      if (clips.Any(HasModelBeside) || clips.Any(IsUvClip))
+      {
+        return true;
+      }
+      var ids = clips.SelectMany(c => c.Tracks)
+                     .Where(t => t.Kind == AnimationTrackKind.BonePosition || t.Kind == AnimationTrackKind.BoneRotation)
+                     .Select(t => (int)t.BoneId)
+                     .Where(id => id != 0)
+                     .Distinct()
+                     .ToList();
+      int ped = ids.Count(PedBoneIds.Contains);
+      if (ids.Count - ped > ped)
+      {
+        return true;
+      }
+      return ped > 0 && ped <= 4 && clips.Any(c => GameModels.ArchivesWith(ModelNameOf(c)).Count > 0);
+    }
+
+    /// <summary>
+    /// The model of a map object (on a background thread; remembered in the document): beside the .wad
+    /// first, else in the maps of the games installed.
+    /// </summary>
+    internal static ObjectModel LoadObject(AnimationDocument document, string name)
+    {
+      lock (document.Objects)
+      {
+        if (document.Objects.TryGetValue(name, out var known))
+        {
+          return known;
+        }
+      }
+      ObjectModel loaded;
+      try
+      {
+        loaded = FindObject(document, name);
+      }
+      catch (Exception ex)
+      {
+        loaded = new ObjectModel(name, null, null, "Could not load the model " + name + ": " + ex.Message);
+      }
+      lock (document.Objects)
+      {
+        document.Objects[name] = loaded;
+      }
+      return loaded;
+    }
+
+    private static ObjectModel FindObject(AnimationDocument document, string name)
+    {
+      foreach (string extension in new[] { ".wdr", ".wft" })
+      {
+        if (document.Folder?.FindByName(name + extension) is File beside)
+        {
+          return new ObjectModel(name, ModelScene.Load(beside, beside.GetData()), beside.Name + " beside it", null);
+        }
+      }
+      foreach (string archive in GameModels.ArchivesWith(name))
+      {
+        var fs = new IMGFileSystem();
+        fs.Open(archive);
+        try
+        {
+          foreach (string extension in new[] { ".wdr", ".wft" })
+          {
+            if (fs.RootDirectory.FindByName(name + extension) is File file)
+            {
+              // Loaded while the archive is open: the textures are looked for beside the model.
+              return new ObjectModel(name, ModelScene.Load(file, file.GetData()), file.Name + " from " + Path.GetFileName(archive), null);
+            }
+          }
+        }
+        finally
+        {
+          fs.Close();
+        }
+      }
+      return new ObjectModel(name, null, null,
+                             "The model " + name + " isn't beside the file or in the maps of the games set in Settings, so there is nothing to play this clip on.");
+    }
 
     /// <summary>The players of the games installed: Niko (GTA IV), Johnny (TLAD), Luis (TBoGT).</summary>
     internal static List<PedChoice> FindPeds()

@@ -41,7 +41,7 @@
                                 ToolTipService.ToolTip="Show what the animation signals frame by frame: action flags, facial clips, UV">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xE756;" /></AppBarToggleButton.Icon>
             </AppBarToggleButton>
-            <AppBarButton Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at the whole ped (or double-click the view)">
+            <AppBarButton x:Name="FitButton" Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at the whole ped (or double-click the view)">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
             </AppBarButton>
             <AppBarSeparator />

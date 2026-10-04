@@ -72,6 +72,11 @@ namespace SparkIV.WinUI.Viewers
     private bool _playing;
     private int _frame;
 
+    // Map objects: the model shown (of the selected clip), and whether to play when the page has it.
+    private ObjectModel? _object;
+    private string? _objectName;
+    private bool _playWhenReady;
+
     public AnimationView(ViewerContext context, AnimationDocument document)
     {
       InitializeComponent();
@@ -82,6 +87,13 @@ namespace SparkIV.WinUI.Viewers
       PedBox.SelectedItem = document.Ped;
       // Only the players of the games installed; with one there is nothing to choose.
       PedContainer.Visibility = document.Peds.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+      // Map objects have no face and don't walk.
+      if (document.IsObjects)
+      {
+        FacialsButton.Visibility = Visibility.Collapsed;
+        MoveButton.Visibility = Visibility.Collapsed;
+        ToolTipService.SetToolTip(FitButton,"Look at the whole object (or double-click the view)");
+      }
       ClipList.ItemsSource = document.Animations.Animations.Select(a => new AnimationClipRow(a)).OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
       BackgroundBox.SelectedIndex = s_background;
       SpeedBox.SelectedIndex = s_speed;
@@ -116,12 +128,48 @@ namespace SparkIV.WinUI.Viewers
     }
 
     private AnimationClipRow? SelectedClip => ClipList.SelectedItem as AnimationClipRow;
-    private ModelScene? Scene => _document.PedScene;
+    private ModelScene? Scene => _document.IsObjects ? _object?.Scene : _document.PedScene;
 
     private void ShowPedMessage()
     {
-      PedMessage.Text = _document.PedError ?? "";
-      PedMessage.Visibility = _document.PedError != null ? Visibility.Visible : Visibility.Collapsed;
+      string? error = _document.IsObjects ? _object?.Error : _document.PedError;
+      PedMessage.Text = error ?? "";
+      PedMessage.Visibility = error != null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The selected clip in the page. For a map object, its model first (loaded in the background, then the
+    /// page starts again with it) when it is another object's than the one shown.
+    /// </summary>
+    private async void ShowClip(bool play)
+    {
+      var clip = SelectedClip?.Animation;
+      if (clip == null)
+      {
+        return;
+      }
+      if (_document.IsObjects)
+      {
+        string name = AnimationViewer.ModelNameOf(clip);
+        if (!string.Equals(name, _objectName, StringComparison.OrdinalIgnoreCase))
+        {
+          _objectName = name;
+          Working.IsActive = true;
+          var loaded = await Task.Run(() => AnimationViewer.LoadObject(_document, name));
+          if (_disposed || !string.Equals(name, _objectName, StringComparison.OrdinalIgnoreCase))
+          {
+            return;  // Closed, or another object's clip was chosen meanwhile.
+          }
+          _object = loaded;
+          ShowPedMessage();
+          // The spinner goes on until the page has the model and its textures ("loaded").
+          Working.IsActive = loaded.Scene != null;
+          _playWhenReady = play;
+          RestartPage();
+          return;
+        }
+      }
+      SendClip(play);
     }
 
     #region Page
@@ -182,12 +230,24 @@ namespace SparkIV.WinUI.Viewers
       {
         case "ready":
           _pageReady = true;
-          Working.IsActive = false;
+          if (root.GetProperty("webgl").GetBoolean() && Scene != null)
+          {
+            // The spinner stays until the page says the textures are there ("loaded").
+            Working.IsActive = true;
+            SendScene();
+          }
+          else
+          {
+            Working.IsActive = false;
+          }
           if (root.GetProperty("webgl").GetBoolean())
           {
-            SendPed();
-            SendClip(play: false);
+            SendClip(play: _playWhenReady);
           }
+          _playWhenReady = false;
+          break;
+        case "loaded":
+          Working.IsActive = false;
           break;
         case "frame":
           _frame = root.GetProperty("frame").GetInt32();
@@ -205,8 +265,8 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    /// <summary>The ped: its meshes, its skeleton in rest pose, and how it is shown.</summary>
-    private void SendPed()
+    /// <summary>The ped or object: its meshes, its skeleton in rest pose, and how it is shown.</summary>
+    private void SendScene()
     {
       var scene = Scene;
       if (scene == null)
@@ -216,18 +276,22 @@ namespace SparkIV.WinUI.Viewers
       Post(new
       {
         type = "scene",
-        materials = scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, cutout = m.Cutout, texture = m.TextureKey == null ? null : Host + m.TextureKey }),
+        materials = scene.Materials.Select(m => m.ToMessage(key => Host + key)),
         meshes = scene.Meshes.Select(m => m.ToMessage()),
       });
+      // A model without a skeleton gets its one bone with the clip (SendClip).
       var bones = scene.Bones.OrderBy(b => b.Index).ToList();
-      Post(new
+      if (bones.Count > 0)
       {
-        type = "skeleton",
-        parent = bones.Select(b => b.Parent),
-        position = bones.SelectMany(b => new[] { b.X, b.Y, b.Z }),
-        rotation = bones.SelectMany(b => b.Quaternion),
-        names = bones.Select(b => b.Name),
-      });
+        Post(new
+        {
+          type = "skeleton",
+          parent = bones.Select(b => b.Parent),
+          position = bones.SelectMany(b => new[] { b.X, b.Y, b.Z }),
+          rotation = bones.SelectMany(b => b.Quaternion),
+          names = bones.Select(b => b.Name),
+        });
+      }
       Post(new { type = "options", textures = true, wireframe = false });
       Post(new { type = "background", name = BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
       Post(new { type = "visible", ids = scene.Root.CheckedMeshes().ToArray(), fit = true });
@@ -256,13 +320,68 @@ namespace SparkIV.WinUI.Viewers
       return Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
     }
 
-    /// <summary>The bone tracks of a clip for the bones the ped has (by id); how many matched and didn't.</summary>
-    private List<object> BoneTracks(Animation clip, out int matched, out int notInPed)
+    /// <summary>
+    /// A map object's root track, as its change since the first frame applied to the root's rest: the track
+    /// holds where the object stood in the artist's scene (cj_pigeon_08: 24 m aside, all the time), which
+    /// isn't movement.
+    /// </summary>
+    private static string SampledFromRest(Animation clip, AnimationTrack track, bool position, SceneBone rest)
+    {
+      int frames = Math.Max(1, clip.FrameCount);
+      int components = position ? 3 : 4;
+      var values = new float[frames * components];
+      var first = track.GetValue(0, clip.SequenceFrameLimit);
+      var restTurn = new System.Numerics.Quaternion(rest.Quaternion[0], rest.Quaternion[1], rest.Quaternion[2], rest.Quaternion[3]);
+      var firstTurn = position ? System.Numerics.Quaternion.Identity : new System.Numerics.Quaternion(first[0], first[1], first[2], first[3]);
+      for (int f = 0; f < frames; f++)
+      {
+        var value = track.GetValue(f, clip.SequenceFrameLimit);
+        if (position)
+        {
+          values[f * 3] = rest.X + value[0] - first[0];
+          values[f * 3 + 1] = rest.Y + value[1] - first[1];
+          values[f * 3 + 2] = rest.Z + value[2] - first[2];
+        }
+        else
+        {
+          // rest × (first⁻¹ × now): the turn since the first frame, in the root's own frame.
+          var now = new System.Numerics.Quaternion(value[0], value[1], value[2], value[3]);
+          var turned = System.Numerics.Quaternion.Normalize(System.Numerics.Quaternion.Concatenate(System.Numerics.Quaternion.Concatenate(now, System.Numerics.Quaternion.Inverse(firstTurn)), restTurn));
+          values[f * 4] = turned.X;
+          values[f * 4 + 1] = turned.Y;
+          values[f * 4 + 2] = turned.Z;
+          values[f * 4 + 3] = turned.W;
+        }
+      }
+      return Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
+    }
+
+    /// <summary>
+    /// The bone tracks of a clip for the bones the ped or object has (by id, or by <paramref name="boneOfId"/>);
+    /// how many matched and didn't.
+    /// </summary>
+    private List<object> BoneTracks(Animation clip, out int matched, out int notInPed, Dictionary<int, int>? boneOfId = null)
     {
       matched = 0;
       notInPed = 0;
       var tracks = new List<object>();
-      var boneOfId = Scene?.Bones.GroupBy(b => b.Id).ToDictionary(g => g.Key, g => g.First().Index) ?? new Dictionary<int, int>();
+      boneOfId ??= Scene?.Bones.GroupBy(b => b.Id).ToDictionary(g => g.Key, g => g.First().Index) ?? new Dictionary<int, int>();
+      int rootById = -1;
+      if (_document.IsObjects && boneOfId.ContainsKey(0))
+      {
+        // A map object's root bone has id 0 in the model, but its clips name it by its own id (cj_dm_flag_1:
+        // 5041); in all 26 such clips of the games that is the one id the model lacks, with no track for 0.
+        var ids = clip.Tracks.Where(t => t.Kind == AnimationTrackKind.BonePosition || t.Kind == AnimationTrackKind.BoneRotation)
+                             .Select(t => (int)t.BoneId)
+                             .Distinct()
+                             .ToList();
+        var lacking = ids.Where(id => !boneOfId.ContainsKey(id)).ToList();
+        if (lacking.Count == 1 && !ids.Contains(0))
+        {
+          rootById = lacking[0];
+          boneOfId = new Dictionary<int, int>(boneOfId) { [rootById] = boneOfId[0] };
+        }
+      }
       foreach (var track in clip.Tracks)
       {
         bool position = track.Kind == AnimationTrackKind.BonePosition, rotation = track.Kind == AnimationTrackKind.BoneRotation;
@@ -272,10 +391,17 @@ namespace SparkIV.WinUI.Viewers
         }
         if (!track.IsDecoded || !boneOfId.TryGetValue(track.BoneId, out int bone))
         {
-          notInPed++;
+          // The root of an object without a skeleton (it stays) isn't missing.
+          if (track.BoneId != 0 || Scene == null || Scene.Bones.Count > 0)
+          {
+            notInPed++;
+          }
           continue;
         }
-        tracks.Add(new { bone, kind = position ? "position" : "rotation", values = Sampled(clip, track, position ? 3 : 4) });
+        string values = track.BoneId == rootById && Scene?.Bones.FirstOrDefault(b => b.Index == bone) is SceneBone root
+          ? SampledFromRest(clip, track, position, root)
+          : Sampled(clip, track, position ? 3 : 4);
+        tracks.Add(new { bone, kind = position ? "position" : "rotation", values });
         matched++;
       }
       return tracks;
@@ -298,7 +424,10 @@ namespace SparkIV.WinUI.Viewers
       FrameSlider.Maximum = Math.Max(1, frames - 1);
       _frame = 0;
 
-      var tracks = BoneTracks(clip, out int matched, out int notInPed);
+      var objectNotes = new List<string>();
+      Dictionary<int, int>? oneBone = _document.IsObjects ? OneBoneOf(clip, objectNotes) : null;
+      var tracks = BoneTracks(clip, out int matched, out int notInPed, oneBone);
+      object? uv = _document.IsObjects ? TextureMatrix(clip, objectNotes) : null;
 
       var moverPosition = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelPosition && t.IsDecoded);
       var moverRotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelRotation && t.IsDecoded);
@@ -383,13 +512,22 @@ namespace SparkIV.WinUI.Viewers
       FacialsButton.IsEnabled = facials.Count > 0;
       ShowFrame();
 
-      Post(new { type = "clip", frames, fps, tracks, mover, facials, play });
+      Post(new { type = "clip", frames, fps, tracks, mover = _document.IsObjects ? null : mover, facials, uv, play });
 
-      var notes = new List<string> { matched + " bone tracks played" };
+      var notes = new List<string>();
+      if (_document.IsObjects && _object?.Source != null)
+      {
+        notes.Add(_object.Source);
+      }
+      if (matched > 0 || uv == null)
+      {
+        notes.Add(matched + " bone tracks played");
+      }
       if (notInPed > 0)
       {
-        notes.Add(notInPed + " for bones this ped doesn't have");
+        notes.Add(notInPed + (_document.IsObjects ? " for bones the model doesn't have" : " for bones this ped doesn't have"));
       }
+      notes.AddRange(objectNotes);
       if (facialsFound > 0)
       {
         notes.Add(facialsFound + (facialsFound == 1 ? " facial clip" : " facial clips"));
@@ -398,11 +536,79 @@ namespace SparkIV.WinUI.Viewers
       {
         notes.Add(facialsMissing + " facial " + (facialsMissing == 1 ? "event" : "events") + " without a clip for this face");
       }
-      if (mover != null)
+      if (mover != null && !_document.IsObjects)
       {
         notes.Add("moves through the world" + (s_move ? "" : " (off)"));
       }
       Status.Text = clip.Name + "   ·   " + frames + " frames at " + fps.ToString("0.#") + " fps   ·   " + string.Join("   ·   ", notes);
+    }
+
+    /// <summary>
+    /// For a model without a skeleton (bkn2_bs_logobust2): the clip turns it as a whole when it moves one
+    /// bone besides the root (the object's own, its pivot at that track's place); the page gets that one
+    /// bone, in rest where the clip starts. Null otherwise (the model's bones are used).
+    /// </summary>
+    private Dictionary<int, int>? OneBoneOf(Animation clip, List<string> notes)
+    {
+      var scene = Scene;
+      if (scene == null || scene.Bones.Count > 0)
+      {
+        return null;
+      }
+      var ids = clip.Tracks.Where(t => (t.Kind == AnimationTrackKind.BonePosition || t.Kind == AnimationTrackKind.BoneRotation) && t.IsDecoded && t.BoneId != 0)
+                           .Select(t => (int)t.BoneId)
+                           .Distinct()
+                           .ToList();
+      if (ids.Count == 0)
+      {
+        return null;
+      }
+      if (ids.Count > 1)
+      {
+        // Several parts (p_crane_3: the hook among them), but nothing says which vertices belong to which.
+        notes.Add("the model has no skeleton, so its " + ids.Count + " parts can't move apart");
+        return new Dictionary<int, int>();
+      }
+      int id = ids[0];
+      var position = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.BonePosition && t.BoneId == id && t.IsDecoded)?.GetValue(0, clip.SequenceFrameLimit);
+      var rotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.BoneRotation && t.BoneId == id && t.IsDecoded)?.GetValue(0, clip.SequenceFrameLimit);
+      Post(new
+      {
+        type = "skeleton",
+        parent = new[] { -1 },
+        position = position == null ? new[] { 0f, 0f, 0f } : new[] { position[0], position[1], position[2] },
+        rotation = rotation == null ? new[] { 0f, 0f, 0f, 1f } : new[] { rotation[0], rotation[1], rotation[2], rotation[3] },
+        names = new[] { AnimationViewer.ModelNameOf(clip) },
+      });
+      return new Dictionary<int, int> { [id] = 0 };
+    }
+
+    /// <summary>
+    /// A clip moving a texture ("_uv_N"): material N's texture matrix at every frame, its two rows (u' =
+    /// row0 · (u, v, 1), v' = row1 · (u, v, 1)); null for other clips.
+    /// </summary>
+    private object? TextureMatrix(Animation clip, List<string> notes)
+    {
+      int material = AnimationViewer.UvMaterialOf(clip);
+      if (material < 0)
+      {
+        return null;
+      }
+      var scene = Scene;
+      var row0 = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.UV0 && t.DataType != 3 && t.IsDecoded);
+      var row1 = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.UV1 && t.DataType != 3 && t.IsDecoded);
+      if (scene == null || row0 == null || row1 == null)
+      {
+        return null;
+      }
+      if (material >= scene.Materials.Count)
+      {
+        notes.Add("moves the texture of material " + material + ", which the model doesn't have (it has " + scene.Materials.Count + ")");
+        return null;
+      }
+      var target = scene.Materials[material];
+      notes.Add("moves the texture of material " + material + (target.TextureName != null ? " (" + target.TextureName + ")" : ""));
+      return new[] { new { material, row0 = Sampled(clip, row0, 3), row1 = Sampled(clip, row1, 3) } };
     }
 
     // What the ActionFlags bits signal. Documented nowhere (OpenIV shows the number); worked out from the
@@ -507,7 +713,7 @@ namespace SparkIV.WinUI.Viewers
       if (_ready)
       {
         // A new clip plays at once (as in OpenIV) while something was playing; else it shows its first frame.
-        SendClip(play: _playing);
+        ShowClip(play: _playing);
       }
     }
 
@@ -585,12 +791,34 @@ namespace SparkIV.WinUI.Viewers
       }
       Working.IsActive = true;
       PedBox.IsEnabled = false;
+      _playWhenReady = false;
       await Task.Run(() => AnimationViewer.LoadPed(_document, ped));
       PedBox.IsEnabled = true;
       ShowPedMessage();
-      _pageReady = false;
       _playing = false;
-      Web.CoreWebView2?.Reload();
+      RestartPage();
+    }
+
+    /// <summary>
+    /// The page from the start, for another ped or object; it asks for the scene when ready. Navigating
+    /// again rather than Reload: Reload fails while the page is still loading (two objects' clips clicked
+    /// quickly). Nothing when the page isn't there yet (it loads with the scene then) or the view closed.
+    /// </summary>
+    private void RestartPage()
+    {
+      if (_disposed || Web.CoreWebView2 == null)
+      {
+        return;
+      }
+      _pageReady = false;
+      try
+      {
+        Web.CoreWebView2.Navigate(Host + "index.html");
+      }
+      catch (COMException)
+      {
+        // The view is closing.
+      }
     }
 
     private async void ExportOriginal_Click(object sender, RoutedEventArgs e)
@@ -606,8 +834,11 @@ namespace SparkIV.WinUI.Viewers
 
     #endregion
 
+    private bool _disposed;
+
     public void Dispose()
     {
+      _disposed = true;
       if (Web.CoreWebView2 != null)
       {
         Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;

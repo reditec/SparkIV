@@ -97,7 +97,7 @@ namespace SparkIV.WinUI.Viewers
     // Raised up when the textures are made again, so the page doesn't take the old pictures from its cache.
     private int _textureVersion;
 
-    private string? TextureUrl(SceneMaterial m) => m.TextureKey == null ? null : Host + m.TextureKey + "?v=" + _textureVersion;
+    private string TextureUrl(string key) => Host + key + "?v=" + _textureVersion;
 
     private bool _reloading;
     private bool _reloadAgain;
@@ -127,7 +127,7 @@ namespace SparkIV.WinUI.Viewers
             return;
           }
           _textureVersion++;
-          Post(new { type = "materials", materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, cutout = m.Cutout, texture = TextureUrl(m) }) });
+          Post(new { type = "materials", materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)) });
           ShowEmbeddedTextures();
           UpdateStatus();
         }
@@ -223,7 +223,7 @@ namespace SparkIV.WinUI.Viewers
       Post(new
       {
         type = "scene",
-        materials = _scene.Materials.Select(m => new { id = m.Id, glass = m.Glass, cutout = m.Cutout, texture = TextureUrl(m) }),
+        materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)),
         meshes = _scene.Meshes.Select(m => m.ToMessage()),
       });
       SendOptions();

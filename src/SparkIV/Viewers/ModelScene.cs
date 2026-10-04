@@ -470,6 +470,7 @@ namespace SparkIV.WinUI.Viewers
       // The skeleton for the export: of the first drawable that has one (the body of a fragment, a ped).
       if (Bones.Count == 0 && drawable.Skeleton != null)
       {
+        _bonesFrom = drawable.Skeleton;
         var stack = new Stack<Bone>();
         stack.Push(drawable.Skeleton.RootBone);
         var all = new List<Bone>();
@@ -508,12 +509,20 @@ namespace SparkIV.WinUI.Viewers
       }
       var node = parent.Add(new ModelPart(name, drawable.Models.Count + (drawable.Models.Count == 1 ? " level of detail" : " levels of detail"), "\uF158"));
 
+      // Parts that aren't skinned hang on a bone, their vertices relative to it (map objects with moving
+      // parts: a fan, a crane's hook); they are put in place with the bone's rest pose. Only for the
+      // drawable's own skeleton, which is then the scene's (Bones).
+      var rest = drawable.Skeleton != null && placements == null && ReferenceEquals(drawable.Skeleton, _bonesFrom) ? RestPose(drawable.Skeleton) : null;
+      bool wholeOnOneBone = drawable.Skeleton == null && Bones.Count == 0 && placements == null;
+
       string[] lodNames = LodNames.Split('|');
       for (int index = 0; index < drawable.Models.Count; index++)
       {
         // The slot it is in: high, medium, low or very low (a drawable may lack some, also in the middle).
         int lod = index < drawable.LevelsOfDetail.Count ? drawable.LevelsOfDetail[index] : index;
         var meshes = drawable.Models[index].Geometries.SelectMany(g => g.Meshes).ToList();
+        var boneOfMesh = drawable.Models[index].Geometries.SelectMany(g => g.Meshes.Select(m => (m, g.IsSkinned ? -1 : g.BoneIndex)))
+                                                         .ToDictionary(p => p.m, p => p.Item2);
         int lodFaces = meshes.Sum(m => m.FaceCount);
         var lodNode = node.Add(new ModelPart("LOD " + lod + (lod < lodNames.Length ? " \u00B7 " + lodNames[lod] : ""),
                                              meshes.Count + (meshes.Count == 1 ? " mesh, " : " meshes, ") + lodFaces.ToString("N0") + " triangles", "\uE81E") { Lod = lod });
@@ -532,7 +541,12 @@ namespace SparkIV.WinUI.Viewers
           var meshParent = placement == null ? lodNode : lodNode.Add(new ModelPart(placement.Bone, "", "\uE81D"));
           foreach (var mesh in meshes)
           {
-            int id = AddMesh(mesh, mesh.MaterialIndex >= 0 && mesh.MaterialIndex < drawable.Materials.Count ? firstMaterial + mesh.MaterialIndex : -1, placement);
+            // Without any skeleton (bkn2_bs_logobust2), everything on one bone, as it is: an animation of the
+            // object can still turn it as a whole.
+            int rigidBone = rest != null && boneOfMesh[mesh] >= 0 && boneOfMesh[mesh] < rest.Length && !mesh.VertexHasBlendInfo ? boneOfMesh[mesh]
+                          : wholeOnOneBone ? 0 : -1;
+            int id = AddMesh(mesh, mesh.MaterialIndex >= 0 && mesh.MaterialIndex < drawable.Materials.Count ? firstMaterial + mesh.MaterialIndex : -1, placement,
+                             rigidBone, rigidBone >= 0 && rest != null ? rest[rigidBone] : System.Numerics.Matrix4x4.Identity);
             string shader = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < drawable.Materials.Count ? drawable.Materials[mesh.MaterialIndex].ShaderName : "";
             meshParent.Add(new ModelPart("Mesh " + (meshParent.Children.Count + 1), shader + " \u00B7 " + mesh.FaceCount.ToString("N0") + " triangles", "\uE7B8") { MeshId = id });
           }
@@ -542,10 +556,54 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
+    // The skeleton Bones were taken from.
+    private Skeleton? _bonesFrom;
+
+    /// <summary>
+    /// Each bone's place in the model in rest pose, by index: down the chain parent × translate × turn (as
+    /// the page poses them; row vectors here, so the other way round).
+    /// </summary>
+    private static System.Numerics.Matrix4x4[] RestPose(Skeleton skeleton)
+    {
+      var all = new List<Bone>();
+      var stack = new Stack<Bone>();
+      stack.Push(skeleton.RootBone);
+      while (stack.Count > 0)
+      {
+        var bone = stack.Pop();
+        all.Add(bone);
+        foreach (var child in bone.Children)
+        {
+          stack.Push(child);
+        }
+      }
+      var world = new System.Numerics.Matrix4x4[all.Count == 0 ? 0 : all.Max(b => b.Index) + 1];
+      var done = new bool[world.Length];
+      System.Numerics.Matrix4x4 Of(Bone bone)
+      {
+        if (!done[bone.Index])
+        {
+          var q = bone.RotationQuaternion;
+          var local = System.Numerics.Matrix4x4.CreateFromQuaternion(new System.Numerics.Quaternion(q.X, q.Y, q.Z, q.W)) *
+                      System.Numerics.Matrix4x4.CreateTranslation(bone.Position.X, bone.Position.Y, bone.Position.Z);
+          world[bone.Index] = bone.Parent == null ? local : local * Of(bone.Parent);
+          done[bone.Index] = true;
+        }
+        return world[bone.Index];
+      }
+      foreach (var bone in all)
+      {
+        Of(bone);
+      }
+      return world;
+    }
+
     private static int SkeletonBone(Mesh mesh, uint blendIndex) =>
       mesh.BoneMapping.Length > 0 ? mesh.BoneMapping[Math.Min((int)blendIndex, mesh.BoneMapping.Length - 1)] : (int)blendIndex;
 
-    private int AddMesh(Mesh mesh, int material, Placement? placement)
+    /// <param name="rigidBone">For a part that isn't skinned: the bone it hangs on (its vertices are moved
+    /// from the bone into the model by <paramref name="atBone"/>, the bone's rest pose), else -1.</param>
+    private int AddMesh(Mesh mesh, int material, Placement? placement, int rigidBone = -1, System.Numerics.Matrix4x4 atBone = default)
     {
       var vertices = mesh.DecodeVertexData();
       var positions = new float[vertices.Length * 3];
@@ -557,14 +615,31 @@ namespace SparkIV.WinUI.Viewers
       for (int i = 0; i < vertices.Length; i++)
       {
         var v = vertices[i];
-        positions[i * 3] = v.Position.X * turn + dx;
-        positions[i * 3 + 1] = v.Position.Y * turn + dy;
-        positions[i * 3 + 2] = v.Position.Z + dz;
-        if (normals != null)
+        if (rigidBone >= 0)
         {
-          normals[i * 3] = v.Normal.X * turn;
-          normals[i * 3 + 1] = v.Normal.Y * turn;
-          normals[i * 3 + 2] = v.Normal.Z;
+          var p = System.Numerics.Vector3.Transform(new System.Numerics.Vector3(v.Position.X, v.Position.Y, v.Position.Z), atBone);
+          var n = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(v.Normal.X, v.Normal.Y, v.Normal.Z), atBone);
+          positions[i * 3] = p.X;
+          positions[i * 3 + 1] = p.Y;
+          positions[i * 3 + 2] = p.Z;
+          if (normals != null)
+          {
+            normals[i * 3] = n.X;
+            normals[i * 3 + 1] = n.Y;
+            normals[i * 3 + 2] = n.Z;
+          }
+        }
+        else
+        {
+          positions[i * 3] = v.Position.X * turn + dx;
+          positions[i * 3 + 1] = v.Position.Y * turn + dy;
+          positions[i * 3 + 2] = v.Position.Z + dz;
+          if (normals != null)
+          {
+            normals[i * 3] = v.Normal.X * turn;
+            normals[i * 3 + 1] = v.Normal.Y * turn;
+            normals[i * 3 + 2] = v.Normal.Z;
+          }
         }
         if (uvs != null)
         {
@@ -583,7 +658,7 @@ namespace SparkIV.WinUI.Viewers
       var bones = new int[vertices.Length];
       float[]? skinBones = null, skinWeights = null;
       bool skinned = mesh.VertexHasBlendInfo && mesh.BoneMapping.Length > 0;
-      if (skinned)
+      if (skinned || rigidBone >= 0)
       {
         skinBones = new float[vertices.Length * 4];
         skinWeights = new float[vertices.Length * 4];
@@ -592,7 +667,14 @@ namespace SparkIV.WinUI.Viewers
       for (int i = 0; i < vertices.Length; i++)
       {
         bones[i] = placedAt;
-        if (mesh.VertexHasBlendInfo && vertices[i].BlendIndices != null)
+        if (rigidBone >= 0)
+        {
+          // All of it on its bone.
+          bones[i] = rigidBone;
+          skinBones![i * 4] = rigidBone;
+          skinWeights![i * 4] = 1;
+        }
+        else if (mesh.VertexHasBlendInfo && vertices[i].BlendIndices != null)
         {
           int strongest = 0;
           for (int k = 0; k < 4; k++)
@@ -616,17 +698,67 @@ namespace SparkIV.WinUI.Viewers
         }
       }
 
-      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones) { SkinBones = skinBones, SkinWeights = skinWeights };
+      // Terrain with N layers: texture coordinates 1 to N-1 tile the layers laid over the first; the next
+      // two hold how much of each layer covers the one below (0 the first, about always 1; 1 to 3 from 0 to
+      // 1), as found in the games' 2-, 3- and 4-layer terrain; the vertex colour shades it (hollows darker).
+      float[]? layerUvs = null, layerWeights = null, colors = null;
+      int layers = material >= 0 && material < Materials.Count ? Materials[material].LayerCount : 1;
+      int texcoords = mesh.VertexDeclaration.Elements.TakeWhile(e => e.Stream != -1).Count(e => e.Usage == VertexElementUsage.TextureCoordinate);
+      if (layers > 1 && texcoords >= layers + 1)
+      {
+        layerUvs = new float[vertices.Length * 6];
+        layerWeights = new float[vertices.Length * 4];
+        colors = new float[vertices.Length * 3];
+        for (int i = 0; i < vertices.Length; i++)
+        {
+          var t = vertices[i].TextureCoordinates;
+          for (int layer = 1; layer < layers; layer++)
+          {
+            layerUvs[i * 6 + (layer - 1) * 2] = t[layer].X;
+            layerUvs[i * 6 + (layer - 1) * 2 + 1] = t[layer].Y;
+          }
+          layerWeights[i * 4] = t[layers].X;
+          layerWeights[i * 4 + 1] = t[layers].Y;
+          layerWeights[i * 4 + 2] = layers + 1 < Vertex.MaxTextureCoordinates ? t[layers + 1].X : 0;
+          layerWeights[i * 4 + 3] = layers + 1 < Vertex.MaxTextureCoordinates ? t[layers + 1].Y : 0;
+          // Red in the lowest byte (OpenIV's export of tmp_ci6_7_beach04: 236 231 231 for 0xffe7e7ec).
+          uint color = vertices[i].DiffuseColor;
+          colors[i * 3] = (color & 0xFF) / 255f;
+          colors[i * 3 + 1] = ((color >> 8) & 0xFF) / 255f;
+          colors[i * 3 + 2] = ((color >> 16) & 0xFF) / 255f;
+        }
+      }
+
+      var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones)
+      {
+        SkinBones = skinBones,
+        SkinWeights = skinWeights,
+        LayerUvs = layerUvs,
+        LayerWeights = layerWeights,
+        Colors = colors,
+      };
       Meshes.Add(scene);
       return scene.Id;
     }
 
+    // The hash of "texturesampler_layer0", the first layer of the terrain shaders.
+    private const uint TerrainLayer0 = 0xd52b11df;
+
     /// <param name="assigned">The texture the game gives the model itself (the plants), in place of the one it names.</param>
     private SceneMaterial CreateMaterial(Material material, TextureFile? embedded, string? assigned = null)
     {
-      string? textureName = assigned ?? (material.Parameters.TryGetValue((uint)ParamNameHash.Texture, out var param)
+      // Terrain (gta_terrain_va_2lyr ... 4lyr) has no single texture but layers mixed per vertex; its
+      // first layer, the ground the others are laid over, stands for it (tmp_ci6_7_beach04: CI_sandLHT_cm).
+      string? textureName = assigned ?? (material.Parameters.TryGetValue((uint)ParamNameHash.Texture, out var param) ||
+                                         material.Parameters.TryGetValue(TerrainLayer0, out param)
         ? (param as MaterialParamTexture)?.TextureName
         : null);
+      // Planes the game never draws (boats' no-water and no-splash planes) have no real texture, only the
+      // artists' placeholder "givemechecker": not looked for, so it isn't reported missing.
+      if (material.DrawBucket is 29 or 30)
+      {
+        textureName = null;
+      }
 
       string? key = null;
       if (!string.IsNullOrEmpty(textureName))
@@ -667,9 +799,47 @@ namespace SparkIV.WinUI.Viewers
         }
       }
 
+      // Terrain: the layers laid over the first (the texture above), each its own texture.
+      var layerKeys = new List<string?>();
+      if (material.Parameters.ContainsKey(TerrainLayer0))
+      {
+        for (int layer = 1; layer < TerrainLayers.Length && material.Parameters.ContainsKey(TerrainLayers[layer]); layer++)
+        {
+          string? name = (material.Parameters[TerrainLayers[layer]] as MaterialParamTexture)?.TextureName;
+          layerKeys.Add(string.IsNullOrEmpty(name) ? null : AddTexture(name, embedded, Materials.Count + "_" + layer + ".png"));
+        }
+      }
+
       // Glass is drawn see-through; it is named so in the shader (gta_vehicle_vehglass, gta_glass ...).
       bool glass = material.ShaderName.Contains("glass", StringComparison.OrdinalIgnoreCase);
-      return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass);
+      return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass) { LayerKeys = layerKeys, DrawBucket = material.DrawBucket };
+    }
+
+    // The hashes of "texturesampler_layer0" to "_layer3": the terrain shaders' layers.
+    private static readonly uint[] TerrainLayers = { TerrainLayer0, 0x2420afd1, 0x31934ab6, 0x78b758fd };
+
+    /// <summary>A texture of the model (from it or the dictionaries) as PNG under a key, listed; null if not found.</summary>
+    private string? AddTexture(string name, TextureFile? embedded, string key)
+    {
+      var texture = FindTexture(name, embedded, out string source);
+      Listed(texture?.Name ?? name, source, texture).IsUsed = true;
+      if (texture == null)
+      {
+        MissingTextures.Add(name);
+        return null;
+      }
+      try
+      {
+        using var image = texture.Decode();
+        using var png = new MemoryStream();
+        image.Save(png, ImageFormat.Png);
+        Textures[key] = png.ToArray();
+        return key;
+      }
+      catch (Exception)
+      {
+        return null;
+      }
     }
   }
 
@@ -693,6 +863,12 @@ namespace SparkIV.WinUI.Viewers
     public float[]? SkinBones { get; init; }
     public float[]? SkinWeights { get; init; }
 
+    /// <summary>Terrain: the texture coordinates of layers 1 to 3 (6 per vertex), how much each layer covers
+    /// (4 per vertex) and the vertex colour (3 per vertex); null otherwise.</summary>
+    public float[]? LayerUvs { get; init; }
+    public float[]? LayerWeights { get; init; }
+    public float[]? Colors { get; init; }
+
     public int Id { get; }
     public int Material { get; }
     public float[] Positions { get; }
@@ -712,6 +888,9 @@ namespace SparkIV.WinUI.Viewers
       uvs = Uvs == null ? null : Base64(Uvs),
       skinBones = SkinBones == null ? null : Base64(SkinBones),
       skinWeights = SkinWeights == null ? null : Base64(SkinWeights),
+      layerUvs = LayerUvs == null ? null : Base64(LayerUvs),
+      layerWeights = LayerWeights == null ? null : Base64(LayerWeights),
+      colors = Colors == null ? null : Base64(Colors),
       indices = Convert.ToBase64String(MemoryMarshal.AsBytes(Indices.AsSpan())),
     };
 
@@ -782,11 +961,46 @@ namespace SparkIV.WinUI.Viewers
     public bool Glass { get; }
 
     /// <summary>
-    /// Whether see-through texels are cut out (leaves, fences, hair). Not for peds' skin and clothes: their
-    /// textures' alpha holds something else (the face would be gone).
+    /// Terrain: the textures of the layers laid over the first one (layer 1 to 3; null where not found);
+    /// empty for other materials.
     /// </summary>
-    public bool Cutout =>
-      !Shader.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase) ||
-      Shader.Contains("alpha", StringComparison.OrdinalIgnoreCase) || Shader.Contains("hair", StringComparison.OrdinalIgnoreCase);
+    public IReadOnlyList<string?> LayerKeys { get; init; } = Array.Empty<string?>();
+
+    /// <summary>How many texture layers it has: 1, or 2 to 4 for terrain.</summary>
+    public int LayerCount => 1 + LayerKeys.Count;
+
+    /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
+    public object ToMessage(Func<string, string> url) => new
+    {
+      id = Id,
+      glass = Glass,
+      cutout = Cutout,
+      blend = Blend,
+      decal = Decal,
+      hidden = Hidden,
+      texture = TextureKey == null ? null : url(TextureKey),
+      layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
+    };
+
+    /// <summary>
+    /// The material's draw bucket (RageLib's Material.DrawBucket): 0 opaque, 1 see-through, 2 decal, 3 cut
+    /// out, 4 and 5 emissive (5 see-through), 29 and 30 vehicles' no-splash and no-water planes.
+    /// </summary>
+    public int DrawBucket { get; init; }
+
+    /// <summary>
+    /// Whether see-through texels are cut out (leaves, fences, hair): the cut-out bucket. Opaque ones keep
+    /// them (peds' skin: its alpha holds something else, the face would be gone).
+    /// </summary>
+    public bool Cutout => DrawBucket == 3;
+
+    /// <summary>Whether it is drawn over what is behind it by its texture's alpha (see-through, decals); glass has its own way.</summary>
+    public bool Blend => !Glass && DrawBucket is 1 or 2 or 5;
+
+    /// <summary>Whether it lies on another surface (a puddle, dirt, a poster): drawn a little in front of it.</summary>
+    public bool Decal => DrawBucket == 2;
+
+    /// <summary>Planes the game doesn't draw (a vehicle's no-splash and no-water planes, keeping water out).</summary>
+    public bool Hidden => DrawBucket is 29 or 30;
   }
 }

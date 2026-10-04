@@ -42,7 +42,12 @@
   // the pose shown) are in a float texture, four texels (columns) per bone.
   const VERTEX = `#version 300 es
     in vec3 position; in vec3 normal; in vec2 uv; in vec4 skinBones; in vec4 skinWeights;
+    // Terrain: the coordinates of layers 1 and 2, of layer 3, how much each layer covers, the vertex colour.
+    in vec4 layerUvA; in vec2 layerUvB; in vec4 layerWeights; in vec3 vertexColor;
+    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor;
     uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
+    // A texture moved by an animation (map objects: signs, screens, flames): its texture matrix's two rows.
+    uniform bool uvAnim; uniform vec3 uvRow0; uniform vec3 uvRow1;
     out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
     mat4 bone(float i) {
       int b = int(i);
@@ -58,24 +63,42 @@
         p = m * p;
         n = mat3(m) * n;
       }
-      vNormal = n; vUv = uv; vPosition = p.xyz; gl_Position = viewProjection * p;
+      vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
+      vUv = uvAnim ? vec2(dot(uvRow0, vec3(uv, 1.0)), dot(uvRow1, vec3(uv, 1.0))) : uv;
+      vUv1 = layerUvA.xy; vUv2 = layerUvA.zw; vUv3 = layerUvB; vWeights = layerWeights; vColor = vertexColor;
     }`;
 
   const FRAGMENT = `#version 300 es
     precision highp float;
     in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
+    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
     uniform vec3 light; uniform float alpha; uniform bool lines; uniform bool cutout;
+    // See-through by the texture's alpha (the see-through and decal buckets).
+    uniform bool textureAlpha;
+    // Terrain: how many layers (1 for anything else), their textures, and which of them are there.
+    uniform int layers; uniform sampler2D tex1; uniform sampler2D tex2; uniform sampler2D tex3; uniform vec3 layerOn;
     out vec4 outColor;
     void main() {
       if (lines) { outColor = vec4(color, 1.0); return; }
       vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
-      if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, decals, hair)
+      if (layers > 1) {
+        // Each layer over the ones below as far as it covers; then the vertex colour's shade.
+        if (useTexture && layerOn.x > 0.5) base = mix(base, texture(tex1, vUv1), clamp(vWeights.y, 0.0, 1.0));
+        if (useTexture && layers > 2 && layerOn.y > 0.5) base = mix(base, texture(tex2, vUv2), clamp(vWeights.z, 0.0, 1.0));
+        if (useTexture && layers > 3 && layerOn.z > 0.5) base = mix(base, texture(tex3, vUv3), clamp(vWeights.w, 0.0, 1.0));
+        base = vec4(base.rgb * vColor, 1.0);
+      }
+      if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, hair)
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
       float diffuse = abs(dot(n, light));
       float shade = 0.35 + 0.65 * diffuse;
       float a = alpha < 1.0 ? alpha : 1.0;
+      if (textureAlpha) {
+        if (base.a < 0.01) discard;
+        a = base.a;
+      }
       outColor = vec4(base.rgb * shade * a, a);
     }`;
 
@@ -99,6 +122,19 @@
       alpha: gl.getUniformLocation(program, "alpha"),
       lines: gl.getUniformLocation(program, "lines"),
       cutout: gl.getUniformLocation(program, "cutout"),
+      uvAnim: gl.getUniformLocation(program, "uvAnim"),
+      uvRow0: gl.getUniformLocation(program, "uvRow0"),
+      uvRow1: gl.getUniformLocation(program, "uvRow1"),
+      layerUvA: gl.getAttribLocation(program, "layerUvA"),
+      layerUvB: gl.getAttribLocation(program, "layerUvB"),
+      layerWeights: gl.getAttribLocation(program, "layerWeights"),
+      vertexColor: gl.getAttribLocation(program, "vertexColor"),
+      layers: gl.getUniformLocation(program, "layers"),
+      tex1: gl.getUniformLocation(program, "tex1"),
+      tex2: gl.getUniformLocation(program, "tex2"),
+      tex3: gl.getUniformLocation(program, "tex3"),
+      layerOn: gl.getUniformLocation(program, "layerOn"),
+      textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
     };
   }
 
@@ -175,6 +211,23 @@
       gl.disableVertexAttribArray(loc.uv);
       gl.vertexAttrib2f(loc.uv, 0, 0);
     }
+    // Terrain's layers: their coordinates (6 floats a vertex: layer 1, 2, 3), cover and the vertex colour.
+    const layerData = m.layerUvs && m.layerWeights && m.colors;
+    const attribute = (location, size, data, stride, offset) => {
+      if (location < 0) return;
+      if (data) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, data);
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+      } else {
+        gl.disableVertexAttribArray(location);
+      }
+    };
+    const layerUvs = layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerUvs).buffer)) : null;
+    attribute(loc.layerUvA, 4, layerUvs, 24, 0);
+    attribute(loc.layerUvB, 2, layerUvs, 24, 16);
+    attribute(loc.layerWeights, 4, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerWeights).buffer)) : null, 0, 0);
+    attribute(loc.vertexColor, 3, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
     buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
     gl.bindVertexArray(null);
 
@@ -202,31 +255,51 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, min, max });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, min, max });
   }
 
   function addMaterial(m) {
     // Without a texture: a quiet colour of its own, so the parts can be told apart.
     const hue = (m.id * 0.618) % 1;
     // Cut out where the texture is see-through, unless its alpha means something else (peds: gloss).
-    const material = { texture: null, glass: m.glass, cutout: m.cutout !== false, color: hsl(hue, 0.25, 0.62) };
+    // Terrain: the textures of the layers laid over the first (null until loaded, or if not found).
+    const layerCount = 1 + (m.layers ? m.layers.length : 0);
+    // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
+    // another surface (decal), or not at all (a vehicle's no-water planes).
+    const material = {
+      texture: null, glass: m.glass, cutout: m.cutout === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
+      color: hsl(hue, 0.25, 0.62), layerCount, layers: [null, null, null],
+    };
     materials.set(m.id, material);
-    if (m.texture) {
-      const image = new Image();
-      image.onload = () => {
-        const t = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, t);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-        gl.generateMipmap(gl.TEXTURE_2D);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-        material.texture = t;
-        draw();
-      };
-      image.src = m.texture;
-    }
+    if (m.texture) loadTexture(m.texture, t => material.texture = t);
+    (m.layers || []).forEach((url, i) => { if (url && i < 3) loadTexture(url, t => material.layers[i] = t); });
+  }
+
+  function loadTexture(url, done) {
+    const image = new Image();
+    texturesLoading++;
+    image.onerror = textureDone;
+    image.onload = () => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      done(t);
+      draw();
+      textureDone();
+    };
+    image.src = url;
+  }
+
+  // Textures still on their way; when the last has come (or failed), SparkIV hears "loaded" (it shows a
+  // spinner until then).
+  let texturesLoading = 0;
+  function textureDone() {
+    if (--texturesLoading === 0) post({ type: "loaded" });
   }
 
   function hsl(h, s, l) {
@@ -237,7 +310,7 @@
   // The same meshes with new textures (one was replaced): the old textures go, the new ones are loaded.
   function setMaterials(list) {
     for (const material of materials.values()) {
-      if (material.texture) gl.deleteTexture(material.texture);
+      for (const t of [material.texture, ...material.layers]) if (t) gl.deleteTexture(t);
     }
     materials.clear();
     for (const m of list) addMaterial(m);
@@ -248,6 +321,7 @@
     for (const m of scene.materials) addMaterial(m);
     for (const m of scene.meshes) addMesh(m);
     message.textContent = scene.meshes.length ? "" : "This model has no meshes.";
+    if (texturesLoading === 0) post({ type: "loaded" });
   }
 
   // --- Skeleton and animation (peds) ---
@@ -472,6 +546,11 @@
       tracks: c.tracks.map(track),
       mover: c.mover ? { position: c.mover.position ? track(c.mover.position) : null, rotation: c.mover.rotation ? track(c.mover.rotation) : null } : null,
       facials: (c.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
+      uv: (c.uv || []).map(u => ({
+        material: u.material,
+        row0: { kind: "position", values: new Float32Array(bytes(u.row0).buffer) },
+        row1: { kind: "position", values: new Float32Array(bytes(u.row1).buffer) },
+      })),
     };
     if (clip.mover) clip.mover.path = moverPath(clip.mover, clip.frames);
     playback.time = 0;
@@ -482,9 +561,27 @@
 
   function currentFrame() { return clip ? Math.min(playback.time * clip.fps, clip.frames - 1) : 0; }
 
+  // The texture matrices the clip sets now, by material: [row0, row1]. Frame by frame, not in between:
+  // many switch between pictures side by side in one texture (et_emissivegas02_uv_0 between a lit and a
+  // dimmed lamp, offset 0 and 0.5); in between, the texture would slide across the seam.
+  let uvNow = new Map();
+  function updateUv(frame) {
+    uvNow = new Map();
+    if (!clip) return;
+    const whole = Math.floor(frame + 1e-6);
+    for (const u of clip.uv) {
+      const row0 = [0, 0, 0], row1 = [0, 0, 0];
+      sample(u.row0, whole, clip.frames, row0, 0);
+      sample(u.row1, whole, clip.frames, row1, 0);
+      uvNow.set(u.material, [row0, row1]);
+    }
+  }
+
   function showFrame() {
     const frame = currentFrame();
+    updateUv(frame);
     pose(clip ? frame : null);
+    if (!skeleton) draw();
     const whole = Math.floor(frame + 1e-6);
     if (whole !== playback.reportedFrame) {
       playback.reportedFrame = whole;
@@ -641,14 +738,34 @@
           const m = meshes.get(id);
           if (!m) continue;
           const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
-          if (mat.glass !== glassPass) continue;
+          if (mat.hidden) continue;
+          // Glass and what is see-through by its texture after everything solid, without writing depth.
+          const seeThrough = mat.glass || (mat.blend && showTextures && !!mat.texture);
+          if (seeThrough !== glassPass) continue;
           const textured = showTextures && !!mat.texture;
           gl.uniform1i(loc.useTexture, textured);
-          gl.uniform1i(loc.cutout, mat.cutout !== false);
+          gl.uniform1i(loc.cutout, mat.cutout === true);
+          gl.uniform1i(loc.textureAlpha, glassPass && !mat.glass);
+          // Decals a little in front of the surface they lie on, so they don't flicker into it.
+          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); } else gl.disable(gl.POLYGON_OFFSET_FILL);
           gl.uniform1i(loc.hasNormal, m.hasNormal);
           gl.uniform3fv(loc.color, mat.color);
-          gl.uniform1f(loc.alpha, glassPass ? 0.45 : 1.0);
+          gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
           gl.uniform1i(loc.lines, false);
+          // Terrain's layers on texture units 2 to 4 (1 holds the bone matrices).
+          const layered = m.layered && textured && mat.layerCount > 1;
+          gl.uniform1i(loc.layers, layered ? mat.layerCount : 1);
+          if (layered) {
+            gl.uniform3fv(loc.layerOn, mat.layers.map(t => t ? 1 : 0));
+            mat.layers.forEach((t, i) => {
+              gl.uniform1i([loc.tex1, loc.tex2, loc.tex3][i], 2 + i);
+              if (t) { gl.activeTexture(gl.TEXTURE2 + i); gl.bindTexture(gl.TEXTURE_2D, t); }
+            });
+            gl.activeTexture(gl.TEXTURE0);
+          }
+          const uvMatrix = uvNow.get(m.material);
+          gl.uniform1i(loc.uvAnim, !!uvMatrix);
+          if (uvMatrix) { gl.uniform3fv(loc.uvRow0, uvMatrix[0]); gl.uniform3fv(loc.uvRow1, uvMatrix[1]); }
           useSkin(m);
           if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
           gl.bindVertexArray(m.vao);
@@ -656,6 +773,7 @@
         }
       }
       gl.disable(gl.BLEND);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.depthMask(true);
 
       // A grid on the ground while the ped moves through the world, so the movement can be seen.
