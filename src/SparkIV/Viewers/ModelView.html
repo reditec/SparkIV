@@ -84,6 +84,10 @@
     uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout;
     // See-through by the texture's alpha (the see-through and decal buckets).
     uniform bool textureAlpha;
+    // A cutscene's own lights (up to 8): place, the way it shines (none: all round), colour times strength,
+    // range, the cosine of half its cone (-1: all round).
+    uniform int sceneLights; uniform vec3 sceneLightAt[8]; uniform vec3 sceneLightDir[8]; uniform vec3 sceneLightColor[8];
+    uniform float sceneLightRange[8]; uniform float sceneLightCone[8];
     // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
     uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
@@ -128,6 +132,23 @@
       // from the side.
       float around = layers > 1 ? vColor.r : 1.0;
       float shade = 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      // A cutscene's lights on top: fading to nothing at their range, inside a spot's cone (soft at its edge).
+      // The view's own light dimmed while they are on, so they show (in the game they are much of the light).
+      vec3 lit = vec3(sceneLights > 0 ? shade * 0.6 : shade);
+      for (int i = 0; i < 8; i++) {
+        if (i >= sceneLights) break;
+        vec3 l = sceneLightAt[i] - vPosition;
+        float d = length(l);
+        if (d >= sceneLightRange[i] || d < 1e-4) continue;
+        l /= d;
+        float fade = 1.0 - d / sceneLightRange[i];
+        float spot = 1.0;
+        if (sceneLightCone[i] > -1.0) {
+          float c = dot(-l, sceneLightDir[i]);
+          spot = smoothstep(sceneLightCone[i], mix(sceneLightCone[i], 1.0, 0.25), c);
+        }
+        lit += sceneLightColor[i] * fade * fade * spot * max(dot(n, l), 0.0);
+      }
       // The shine, where the surface faces half way between the light and the camera: how bright from the
       // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
       float shine = 0.0;
@@ -141,7 +162,7 @@
         a = base.a * vAlpha;
         if (a < 0.01) discard;
       }
-      outColor = vec4((base.rgb * shade + shine) * a, a);
+      outColor = vec4((base.rgb * lit + shine) * a, a);
     }`;
 
   let program, loc;
@@ -179,6 +200,12 @@
       tex3: gl.getUniformLocation(program, "tex3"),
       layerOn: gl.getUniformLocation(program, "layerOn"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
+      sceneLights: gl.getUniformLocation(program, "sceneLights"),
+      sceneLightAt: gl.getUniformLocation(program, "sceneLightAt"),
+      sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
+      sceneLightColor: gl.getUniformLocation(program, "sceneLightColor"),
+      sceneLightRange: gl.getUniformLocation(program, "sceneLightRange"),
+      sceneLightCone: gl.getUniformLocation(program, "sceneLightCone"),
       marker: gl.getUniformLocation(program, "marker"),
       markerAt: gl.getUniformLocation(program, "markerAt"),
       markerScale: gl.getUniformLocation(program, "markerScale"),
@@ -738,6 +765,42 @@
   // root bone holds its place itself.
   const cast = new Map();   // id → { skeleton, clip, root: { position, rotation } | null }
 
+  // The scene's own lights (cutscenes): per frame place, colour, range, strength, cone and direction.
+  let sceneLights = [];
+  let showSceneLights = true;
+  // How bright a light of strength 1 is against the view's own light (the game's light units aren't
+  // known; a strength of 6 to 10, the most common, comes out about as bright as the view's light).
+  const SceneLightScale = 0.12;
+
+  function setSceneLights(list) {
+    const floats = v => v ? new Float32Array(bytes(v).buffer) : null;
+    sceneLights = (list || []).map(l => ({
+      name: l.name, frames: l.frames, fps: l.fps,
+      position: floats(l.position), color: floats(l.color), range: floats(l.range),
+      intensity: floats(l.intensity), cone: floats(l.cone), direction: floats(l.direction),
+    }));
+  }
+
+  // The lights now (whole frames: their values step as the game's do), at most 8: the strongest.
+  function sceneLightsNow() {
+    if (!showSceneLights || !sceneLights.length || !clip) return [];
+    const now = [];
+    for (const l of sceneLights) {
+      const f = Math.min(Math.floor(currentFrame() / clip.fps * l.fps + 1e-6), l.frames - 1);
+      const v3 = (a, d) => a ? [a[f * 3], a[f * 3 + 1], a[f * 3 + 2]] : d;
+      const v1 = (a, d) => a ? a[Math.min(f, a.length - 1)] : d;
+      const strength = v1(l.intensity, 1);
+      const range = v1(l.range, 10);
+      if (strength <= 0.15 || range <= 0) continue;
+      const color = v3(l.color, [1, 1, 1]).map(c => c * strength * SceneLightScale);
+      const dir = v3(l.direction, null);
+      const cone = l.cone && dir ? Math.cos(Math.min(170, Math.max(1, v1(l.cone, 90))) / 2 * Math.PI / 180) : -1;
+      now.push({ at: v3(l.position, [0, 0, 0]), dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, strength });
+    }
+    now.sort((a, b) => b.strength - a.strength);
+    return now.slice(0, 8);
+  }
+
   function setCast(list) {
     for (const a of cast.values()) if (a.skeleton) gl.deleteTexture(a.skeleton.texture);
     cast.clear();
@@ -1101,6 +1164,16 @@
       gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
       gl.uniform3fv(loc.light, vp.light);
       gl.uniform3fv(loc.toEye, vp.toEye);
+      const lightsNow = sceneLightsNow();
+      gl.uniform1i(loc.sceneLights, lightsNow.length);
+      if (lightsNow.length) {
+        const pad = (f, n) => { const a = new Float32Array(8 * n); lightsNow.forEach((l, i) => a.set([].concat(f(l)), i * n)); return a; };
+        gl.uniform3fv(loc.sceneLightAt, pad(l => l.at, 3));
+        gl.uniform3fv(loc.sceneLightDir, pad(l => l.dir, 3));
+        gl.uniform3fv(loc.sceneLightColor, pad(l => l.color, 3));
+        gl.uniform1fv(loc.sceneLightRange, pad(l => l.range, 1));
+        gl.uniform1fv(loc.sceneLightCone, pad(l => l.cone, 1));
+      }
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
 
@@ -1286,7 +1359,8 @@
       else if (m.type === "loop") { playback.loop = m.on; }
       else if (m.type === "move") { moveInWorld = m.on; showFrame(); }
       else if (m.type === "facials") { showFacials = m.on; showFrame(); }
-      else if (m.type === "cast") { setCast(m.actors); }
+      else if (m.type === "cast") { setSceneLights(m.lights); setCast(m.actors); }
+      else if (m.type === "sceneLights") { showSceneLights = m.on; draw(); }
       else if (m.type === "camera") { setFilmCamera(m.camera); }
       else if (m.type === "useCamera") { useFilmCamera = m.on; draw(); }
     });

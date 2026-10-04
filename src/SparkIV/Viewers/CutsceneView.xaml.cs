@@ -70,6 +70,7 @@ namespace SparkIV.WinUI.Viewers
     private static int s_background;
     private static bool s_camera = true;
     private static bool s_subtitles = true;
+    private static bool s_lights = true;
 
     private readonly ViewerContext _context;
     private readonly CutsceneDocument _document;
@@ -128,6 +129,7 @@ namespace SparkIV.WinUI.Viewers
       BackgroundBox.SelectedIndex = s_background;
       CameraButton.IsChecked = s_camera;
       SubtitlesButton.IsChecked = s_subtitles;
+      LightsButton.IsChecked = s_lights;
       Message.Text = document.Error ?? "";
       Message.Visibility = document.Error != null ? Visibility.Visible : Visibility.Collapsed;
       _ready = true;
@@ -291,6 +293,7 @@ namespace SparkIV.WinUI.Viewers
       Post(new { type = "options", textures = true, wireframe = false });
       Post(new { type = "background", name = BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
       Post(new { type = "visible", ids = visible, fit = true });
+      Post(new { type = "sceneLights", on = s_lights });
       // The sections play one after the other (here), not each over again.
       Post(new { type = "loop", on = false });
     }
@@ -337,6 +340,10 @@ namespace SparkIV.WinUI.Viewers
         _frames + " frames at " + _fps.ToString("0.#") + " fps",
         _document.Actors.Count(a => a.Scene != null) + " of " + _document.Actors.Count + " models",
       };
+      if (section.Lights.Count > 0)
+      {
+        parts.Add(section.Lights.Count + (section.Lights.Count == 1 ? " light" : " lights"));
+      }
       if (_document.Game != null)
       {
         parts.Add("models and texts of " + _document.Game);
@@ -566,6 +573,12 @@ namespace SparkIV.WinUI.Viewers
       {
         Post(new { type = "fit" });
       }
+    }
+
+    private void Lights_Click(object sender, RoutedEventArgs e)
+    {
+      s_lights = LightsButton.IsChecked == true;
+      Post(new { type = "sceneLights", on = s_lights });
     }
 
     private void Subtitles_Click(object sender, RoutedEventArgs e)

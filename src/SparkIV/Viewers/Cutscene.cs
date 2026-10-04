@@ -108,6 +108,9 @@ namespace SparkIV.WinUI.Viewers
           case "AUDIO" when section != null:
             section.Audio = line;
             break;
+          case "LIGHTS" when section != null:
+            section.Lights.Add(line);
+            break;
         }
       }
       return cut;
@@ -117,6 +120,9 @@ namespace SparkIV.WinUI.Viewers
   public sealed class CutSection
   {
     public List<CutModel> Models { get; } = new List<CutModel>();
+
+    /// <summary>The scene's own lights: their clips in the section's dictionary (spt_dr_0, fil_red_0).</summary>
+    public List<string> Lights { get; } = new List<string>();
 
     /// <summary>The animation dictionary (B_1_0: b_1_0.wad).</summary>
     public string? Anim { get; set; }
@@ -165,6 +171,27 @@ namespace SparkIV.WinUI.Viewers
     public ModelScene? Scene { get; set; }
     public string? Source { get; set; }
     public string? Error { get; set; }
+
+    /// <summary>The texture variation of each part the cutscene asks for ("uppr" → 1: uppr_diff_…_b_…).</summary>
+    public Dictionary<string, int> TextureVariations { get; } = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The texture of the variation asked for in place of a ped texture's name (uppr_diff_001_a_uni →
+    /// uppr_diff_001_b_uni), or null.
+    /// </summary>
+    public string? VariationOf(string texture)
+    {
+      var match = System.Text.RegularExpressions.Regex.Match(texture, @"^([a-z0-9]+)_diff_(\d{3})_([a-z])(.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+      if (!match.Success || !TextureVariations.TryGetValue(match.Groups[1].Value, out int variation) || variation <= 0 || variation > 25)
+      {
+        return null;
+      }
+      // The letter swapped, in the name's own case: "uppr_diff_001_" + "b" + "_uni".
+      bool upper = char.IsUpper(match.Groups[3].Value[0]);
+      char letter = (char)((upper ? 'A' : 'a') + variation);
+      int at = match.Groups[3].Index;
+      return texture.Substring(0, at) + letter + texture.Substring(at + 1);
+    }
 
     /// <summary>A ped (placed in the scene by its clip's model tracks) rather than a prop (by its root bone).</summary>
     public bool IsPed => Scene != null && Scene.Bones.Count > 40;
@@ -466,8 +493,38 @@ namespace SparkIV.WinUI.Viewers
         notes.Add("no camera clip " + section.Camera);
       }
 
+      // The scene's lights, each a clip: place, colour, range, strength, cone, direction per frame.
+      var lights = new List<object>();
+      foreach (string name in section.Lights)
+      {
+        if (!clips.TryGetValue(name, out var light))
+        {
+          continue;
+        }
+        AnimationTrack? Track(AnimationTrackKind kind) => light.Tracks.FirstOrDefault(t => t.Kind == kind && t.IsDecoded);
+        var place = Track(AnimationTrackKind.BonePosition);
+        if (place == null)
+        {
+          continue;
+        }
+        string? Scalar(AnimationTrackKind kind) => Track(kind) is AnimationTrack t ? SampledScalar(light, t) : null;
+        string? Vector(AnimationTrackKind kind) => Track(kind) is AnimationTrack t ? Sampled(light, t, 3) : null;
+        lights.Add(new
+        {
+          name,
+          frames = Math.Max(1, light.FrameCount),
+          fps = FramesPerSecond(light),
+          position = Sampled(light, place, 3),
+          color = Vector(AnimationTrackKind.LightColor),
+          range = Scalar(AnimationTrackKind.LightRange),
+          intensity = Scalar(AnimationTrackKind.LightIntensity1),
+          cone = Scalar(AnimationTrackKind.LightIntensity2),
+          direction = Vector(AnimationTrackKind.LightDirection),
+        });
+      }
+
       var timeline = new { type = "clip", frames, fps, tracks = Array.Empty<object>() };
-      return (timeline, new { type = "cast", actors = cast }, camera == null ? null : new { type = "camera", camera }, notes);
+      return (timeline, new { type = "cast", actors = cast, lights }, camera == null ? null : new { type = "camera", camera }, notes);
     }
 
     // The parts of the player shown, one of each: the first variation there is (head_000_r before head_001_r).
@@ -564,7 +621,7 @@ namespace SparkIV.WinUI.Viewers
               }
               return null;
             }
-            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere);
+            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null);
             actor.Source = file.Name + " · " + RelativeArchive(from);
           }
           catch (Exception ex)
@@ -651,7 +708,7 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>
     /// Shows the variation of each ped's parts the cutscene asks for (the first one, where a part changes
     /// during the scene): of the parts of that kind (uppr_000_u, uppr_001_u) only the one of that number.
-    /// The texture variations aren't applied yet.
+    /// The texture variations are applied when the models load (<see cref="CutActor.TextureVariations"/>).
     /// </summary>
     public static void ApplyVariations(CutFile cut, IEnumerable<CutActor> actors)
     {
@@ -691,6 +748,17 @@ namespace SparkIV.WinUI.Viewers
         if (!actors.Any(a => a.Id == model.Id + 1))
         {
           actors.Add(new CutActor(model.Id + 1, model.Model));
+        }
+      }
+      // The texture variations asked for (the first of a part, where it changes during the scene).
+      foreach (var actor in actors)
+      {
+        foreach (var variation in cut.Variations.Where(v => v.Model == actor.Id - 1 && v.ComponentName != null).GroupBy(v => v.Component).Select(g => g.OrderBy(v => v.Time).First()))
+        {
+          if (variation.Texture > 0)
+          {
+            actor.TextureVariations[variation.ComponentName!] = variation.Texture;
+          }
         }
       }
       return actors;

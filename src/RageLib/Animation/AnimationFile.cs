@@ -44,6 +44,15 @@ namespace RageLib.Animation
     CameraDof = 137,
     CameraMatrixRotateFactor = 138,
     CameraControl = 144,
+
+    // A cutscene's light (spt_dr_0, fil_red_0 in its dictionaries; its place is a BonePosition track of
+    // bone 0), named as OpenIV's export names them: its colour, range in metres, strength (0.1: as good as
+    // off), a second number of 35 to 105 (most likely the cone's angle in degrees), the way it shines.
+    LightColor = 139,
+    LightRange = 140,
+    LightIntensity1 = 141,
+    LightIntensity2 = 142,
+    LightDirection = 143,
   }
 
   /// <summary>

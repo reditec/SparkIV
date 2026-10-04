@@ -271,15 +271,20 @@ namespace SparkIV.WinUI.Viewers
       return file == null ? null : Path.GetFileNameWithoutExtension(file.Name);
     }
 
+    // A texture to use in place of one a material names, where there is (or null): see Load.
+    private Func<string, string?>? _preferTexture;
+
     /// <summary>
     /// A model with its textures. <paramref name="moreDictionaries"/>: the bytes of a dictionary not beside
     /// the model ("vehshare"), from wherever the caller knows; null where it isn't.
+    /// <paramref name="preferTexture"/>: the name of a texture to use in place of one a material names, when
+    /// it is there (a ped's texture variation), or null.
     /// </summary>
-    public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null)
+    public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null, Func<string, string?>? preferTexture = null)
     {
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
-      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory };
+      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory, _preferTexture = preferTexture };
       scene.SourceFiles.Add(file);
       // A ped part on its own (feet_000_u.wdr): its texture by the game's naming rule where the material's isn't there.
       if (file.ParentDirectory != null && extension == ".wdr")
@@ -814,6 +819,12 @@ namespace SparkIV.WinUI.Viewers
       string? key = null;
       if (!string.IsNullOrEmpty(textureName))
       {
+        // Another texture in its place where the caller wants one and it is there (see Load).
+        if (_preferTexture?.Invoke(textureName) is string other && !other.Equals(textureName, StringComparison.OrdinalIgnoreCase) &&
+            FindTexture(other, embedded, out _) != null)
+        {
+          textureName = other;
+        }
         // The model's own textures first, then the dictionaries next to it.
         var texture = FindTexture(textureName, embedded, out string source);
         if (texture == null && _pedTexture != null)
@@ -913,6 +924,13 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A texture of the model (from it or the dictionaries) as PNG under a key, listed; null if not found.</summary>
     private string? AddTexture(string name, TextureFile? embedded, string key)
     {
+      // Another texture in its place where the caller wants one and it is there (a ped's texture
+      // variation: uppr_diff_000_b_uni for uppr_diff_000_a_uni).
+      if (_preferTexture?.Invoke(name) is string other && !other.Equals(name, StringComparison.OrdinalIgnoreCase) &&
+          FindTexture(other, embedded, out _) != null)
+      {
+        name = other;
+      }
       var texture = FindTexture(name, embedded, out string source);
       Listed(texture?.Name ?? name, source, texture).IsUsed = true;
       if (texture == null)

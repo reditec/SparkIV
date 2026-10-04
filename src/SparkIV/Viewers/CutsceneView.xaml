@@ -18,6 +18,10 @@
                                 ToolTipService.ToolTip="Look through the cutscene's camera (turning the view by mouse leaves it)">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xE714;" /></AppBarToggleButton.Icon>
             </AppBarToggleButton>
+            <AppBarToggleButton x:Name="LightsButton" Label="Scene lights" IsChecked="True" Click="Lights_Click"
+                                ToolTipService.ToolTip="Light the scene with its own lights (the spots and fill lights the cutscene sets)">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE781;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
             <AppBarToggleButton x:Name="SubtitlesButton" Label="Subtitles" IsChecked="True" Click="Subtitles_Click"
                                 ToolTipService.ToolTip="Show the subtitles over the view">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xED1E;" /></AppBarToggleButton.Icon>
