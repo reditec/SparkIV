@@ -42,6 +42,20 @@
             <AppBarButton Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at all that is shown (or double-click the view)">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
             </AppBarButton>
+            <!-- Only for models whose parts lie apart (a pier's lamps): go from one place to the next -->
+            <AppBarElementContainer x:Name="SpotContainer" VerticalContentAlignment="Center" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" Spacing="2" Margin="4,0,8,0">
+                    <Button Click="PreviousSpot_Click" Style="{StaticResource SubtleButtonStyle}" AutomationProperties.Name="Previous spot"
+                            ToolTipService.ToolTip="Look at the previous spot (Page Up)">
+                        <FontIcon Glyph="&#xE76B;" FontSize="14" />
+                    </Button>
+                    <TextBlock x:Name="SpotText" VerticalAlignment="Center" MinWidth="72" TextAlignment="Center" />
+                    <Button Click="NextSpot_Click" Style="{StaticResource SubtleButtonStyle}" AutomationProperties.Name="Next spot"
+                            ToolTipService.ToolTip="Look at the next spot (Page Down): the places of the model whose parts lie apart">
+                        <FontIcon Glyph="&#xE76C;" FontSize="14" />
+                    </Button>
+                </StackPanel>
+            </AppBarElementContainer>
             <AppBarSeparator />
             <AppBarButton Label="Export model…" Click="ExportModel_Click"
                           ToolTipService.ToolTip="Save what is shown (this level of detail, the parts ticked) as OBJ or SMD, with its textures as PNG next to it">

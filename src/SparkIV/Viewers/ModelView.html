@@ -51,6 +51,9 @@
     uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
     // A texture moved by an animation (map objects: signs, screens, flames): its texture matrix's two rows.
     uniform bool uvAnim; uniform vec3 uvRow0; uniform vec3 uvRow1;
+    // A light's marker: made round the origin, put at the light, as large as the camera is far (the same
+    // size on screen however near).
+    uniform bool marker; uniform vec3 markerAt; uniform float markerScale;
     out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
     mat4 bone(float i) {
       int b = int(i);
@@ -58,7 +61,7 @@
                   texelFetch(boneMatrices, ivec2(2, b), 0), texelFetch(boneMatrices, ivec2(3, b), 0));
     }
     void main() {
-      vec4 p = vec4(position, 1.0);
+      vec4 p = marker ? vec4(markerAt + position * markerScale, 1.0) : vec4(position, 1.0);
       vec3 n = normal;
       if (skinned) {
         mat4 m = bone(skinBones.x) * skinWeights.x + bone(skinBones.y) * skinWeights.y +
@@ -138,6 +141,9 @@
       tex3: gl.getUniformLocation(program, "tex3"),
       layerOn: gl.getUniformLocation(program, "layerOn"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
+      marker: gl.getUniformLocation(program, "marker"),
+      markerAt: gl.getUniformLocation(program, "markerAt"),
+      markerScale: gl.getUniformLocation(program, "markerScale"),
     };
   }
 
@@ -258,7 +264,7 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, min, max });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, min, max, positions, indices });
   }
 
   function addMaterial(m) {
@@ -310,26 +316,32 @@
     return [f(0), f(8), f(4)];
   }
 
-  // A marker for each light, as lines: a small diamond where it is; a spot also its cone, showing which
-  // way and how wide it shines (not how far: et_pierlight05's spots reach 20 to 30 m from lamps 0.7 m
-  // big). Sized by the model, so they show on a lamp and on a block.
+  // A marker for each light, as lines: an omni light a small diamond; a spot a small dot (a tiny cross)
+  // and its cone, showing which way and how wide it shines (not how far: et_pierlight05's spots reach 20
+  // to 30 m from lamps 0.7 m big). Different, so a spot with an omni light beside it (each of the club
+  // rig's lamps: 4 to 14 cm apart) shows both even from afar, a diamond at the cone's tip. Made round the
+  // origin, the diamond 2 across; drawn at the light, the same size on screen however near the camera is
+  // (MarkerSize of its distance), so they neither hide a lamp nor vanish on a block.
+  const MarkerSize = 0.012;
   function setLights(list) {
-    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-    for (const m of meshes.values()) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
-    for (const l of list) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
-    const radius =min[0] === Infinity ? 1 : Math.max(0.2, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
-    const size = Math.min(0.25, radius * 0.03);
+    const size = 1;
     lights = list.map(l => {
-      const [x, y, z] = l.position;
+      const [x, y, z] = [0, 0, 0];
       const lines = [];
-      const corners = [[size, 0, 0], [-size, 0, 0], [0, size, 0], [0, -size, 0], [0, 0, size], [0, 0, -size]];
-      // The diamond: each of the four side corners to top and bottom, and round the middle.
-      for (const [a, b] of [[0, 4], [1, 4], [2, 4], [3, 4], [0, 5], [1, 5], [2, 5], [3, 5], [0, 2], [2, 1], [1, 3], [3, 0]]) {
-        lines.push(x + corners[a][0], y + corners[a][1], z + corners[a][2], x + corners[b][0], y + corners[b][1], z + corners[b][2]);
+      if (!l.spot) {
+        const corners = [[size, 0, 0], [-size, 0, 0], [0, size, 0], [0, -size, 0], [0, 0, size], [0, 0, -size]];
+        // The diamond: each of the four side corners to top and bottom, and round the middle.
+        for (const [a, b] of [[0, 4], [1, 4], [2, 4], [3, 4], [0, 5], [1, 5], [2, 5], [3, 5], [0, 2], [2, 1], [1, 3], [3, 0]]) {
+          lines.push(x + corners[a][0], y + corners[a][1], z + corners[a][2], x + corners[b][0], y + corners[b][1], z + corners[b][2]);
+        }
+      } else {
+        // The dot: three short lines across each other.
+        const dot = size * 0.35;
+        lines.push(-dot, 0, 0, dot, 0, 0, 0, -dot, 0, 0, dot, 0, 0, 0, -dot, 0, 0, dot);
       }
       if (l.spot) {
         const d = norm(l.direction);
-        const length = Math.min(l.range > 0 ? l.range : Infinity, size * 12);
+        const length = size * 5;
         // Two axes across the direction, for the rim.
         const side = norm(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
         const up = cross(side, d);
@@ -358,6 +370,118 @@
       const color = l.color.some(c => c > 0.05) ? l.color : [0.6, 0.6, 0.6];
       return { vao, count: lines.length / 3, color, meshes: l.meshes, position: l.position };
     });
+    findSpots();
+    draw();
+  }
+
+  // --- Spots: the places of a model whose parts lie far apart (et_pierlight05: seven lamps along 132 m
+  // of pier), to go through one after the other ---
+  //
+  // The triangles shown are put on a grid of cells a 40th of the model across (each into the cells of its
+  // box: a wall's few vertices alone would leave the cells between them empty); cells touching each other
+  // (also corner to corner) are one spot. A light joins the spot it is at, or is a spot of its own (a
+  // light rig: one tiny triangle, its lights metres away). Offered only when the spots are small beside
+  // the model (lamps along a pier; not three blocks of a building) and there are 2 to 80.
+  let spots = [];
+  let spotIndex = -1;
+
+  function findSpots() {
+    spots = [];
+    spotIndex = -1;
+    const shownLights = showLights ? lights.filter(l => l.meshes.some(id => visible.has(id))) : [];
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    let vertices = 0;
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m) continue;
+      vertices += m.positions.length / 3;
+      for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    }
+    for (const l of shownLights) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
+    if (min[0] === Infinity) { reportSpot(); return; }
+    const cell = Math.max(1e-3, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 40);
+    const key = (x, y, z) => x + "," + y + "," + z;
+    // Each cell's box (the part of the triangles' boxes in it); very large models are sampled (every n-th
+    // triangle), which still finds the parts.
+    const cells = new Map();
+    const index = c => Math.min(39, Math.max(0, Math.floor(c)));
+    let triangles = 0;
+    for (const id of visible) { const m = meshes.get(id); if (m) triangles += m.indices.length / 3; }
+    const stride = Math.max(1, Math.floor(triangles / 200000)) * 3;
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m) continue;
+      const p = m.positions, t = m.indices;
+      for (let i = 0; i + 2 < t.length; i += stride) {
+        const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for (let v = 0; v < 3; v++) for (let a = 0; a < 3; a++) {
+          const value = p[t[i + v] * 3 + a];
+          lo[a] = Math.min(lo[a], value); hi[a] = Math.max(hi[a], value);
+        }
+        const from = lo.map((v, a) => index((v - min[a]) / cell)), to = hi.map((v, a) => index((v - min[a]) / cell));
+        for (let ix = from[0]; ix <= to[0]; ix++) for (let iy = from[1]; iy <= to[1]; iy++) for (let iz = from[2]; iz <= to[2]; iz++) {
+          const k = key(ix, iy, iz);
+          const cellLo = [min[0] + ix * cell, min[1] + iy * cell, min[2] + iz * cell];
+          const partLo = lo.map((v, a) => Math.max(v, cellLo[a])), partHi = hi.map((v, a) => Math.min(v, cellLo[a] + cell));
+          let c = cells.get(k);
+          if (!c) cells.set(k, c = { ix, iy, iz, min: partLo, max: partHi, spot: -1 });
+          else for (let a = 0; a < 3; a++) { c.min[a] = Math.min(c.min[a], partLo[a]); c.max[a] = Math.max(c.max[a], partHi[a]); }
+        }
+      }
+    }
+    // Touching cells into spots.
+    const found = [];
+    for (const start of cells.values()) {
+      if (start.spot >= 0) continue;
+      const spot = { min: start.min.slice(), max: start.max.slice() };
+      start.spot = found.length;
+      const queue = [start];
+      while (queue.length) {
+        const c = queue.pop();
+        for (let a = 0; a < 3; a++) { spot.min[a] = Math.min(spot.min[a], c.min[a]); spot.max[a] = Math.max(spot.max[a], c.max[a]); }
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+          const n = cells.get(key(c.ix + dx, c.iy + dy, c.iz + dz));
+          if (n && n.spot < 0) { n.spot = found.length; queue.push(n); }
+        }
+      }
+      found.push(spot);
+      if (found.length > 80) { reportSpot(); return; }
+    }
+    // Lights to the spot they are at, else a spot of their own.
+    for (const l of shownLights) {
+      const near = found.find(s => [0, 1, 2].every(a => l.position[a] >= s.min[a] - cell && l.position[a] <= s.max[a] + cell));
+      if (near) {
+        for (let a = 0; a < 3; a++) { near.min[a] = Math.min(near.min[a], l.position[a]); near.max[a] = Math.max(near.max[a], l.position[a]); }
+      } else {
+        found.push({ min: l.position.map(v => v - cell / 2), max: l.position.map(v => v + cell / 2) });
+      }
+    }
+    // Small beside the model: the middle spot (by size) under a fifth of the model across.
+    const across = s => Math.hypot(s.max[0] - s.min[0], s.max[1] - s.min[1], s.max[2] - s.min[2]);
+    const sizes = found.map(across).sort((a, b) => a - b);
+    const small = sizes.length > 0 && sizes[Math.floor(sizes.length / 2)] < cell * 40 / 5;
+    if (found.length >= 2 && found.length <= 80 && small) {
+      // In order along the model's longest side, then across it.
+      const long = [0, 1, 2].sort((a, b) => (max[b] - min[b]) - (max[a] - min[a]));
+      const centre = s => s.min.map((v, a) => (v + s.max[a]) / 2);
+      spots = found.sort((p, q) => {
+        const a = centre(p), b = centre(q);
+        return Math.abs(a[long[0]] - b[long[0]]) > cell ? a[long[0]] - b[long[0]] : a[long[1]] - b[long[1]];
+      });
+    }
+    reportSpot();
+  }
+
+  function reportSpot() { post({ type: "spot", index: spotIndex, count: spots.length }); }
+
+  // To the next (+1) or previous (-1) spot: looked at from where the camera looks now, filling the view.
+  function goToSpot(step) {
+    if (!spots.length) return;
+    spotIndex = spotIndex < 0 ? (step > 0 ? 0 : spots.length - 1) : (spotIndex + step + spots.length) % spots.length;
+    const s = spots[spotIndex];
+    camera.target = s.min.map((v, a) => (v + s.max[a]) / 2);
+    camera.distance = fitDistance(s.min, s.max, true);
+    reportSpot();
     draw();
   }
 
@@ -701,13 +825,16 @@
     const height = max[2] - min[2], width = Math.max(max[0] - min[0], max[1] - min[1]);
     camera.pitch = height < width * 0.15 ? 1.1 : 0.35;
     camera.distance = fitDistance(min, max);
+    // The whole model again: no spot is the current one.
+    if (spotIndex >= 0) { spotIndex = -1; reportSpot(); }
     draw();
   }
 
   // How far the camera must be, looking from its yaw and pitch, for the box's eight corners to fit the
   // view (with a little room): each corner seen from the camera, not a sphere round the box, which left a
   // lot of empty room round long flat models (et_pierlight05: 132 by 49 m, under a metre high).
-  function fitDistance(min, max) {
+  // A spot (close) may be looked at from much nearer than a 20th of the whole model.
+  function fitDistance(min, max, close) {
     const c = Math.cos(camera.pitch);
     const toEye = [c * Math.cos(camera.yaw), c * Math.sin(camera.yaw), Math.sin(camera.pitch)];
     const forward = toEye.map(v => -v);
@@ -722,7 +849,7 @@
       const z = dot(corner, toEye);
       distance = Math.max(distance, z + Math.abs(dot(corner, side)) / tanX, z + Math.abs(dot(corner, up)) / tanY);
     }
-    return Math.max(distance, sceneRadius * 0.05, 0.05);
+    return Math.max(distance, close ? 0 : sceneRadius * 0.05, 0.05);
   }
 
   function eye() {
@@ -882,19 +1009,26 @@
           gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
         }
       }
-      // The lights, in front of everything (inside a lamp's housing they would hide), while a mesh of
-      // their drawable is shown.
+      // The lights, while a mesh of their drawable is shown: faint where the model hides them (inside a
+      // lamp's housing they would be gone), in their full colour where they are in sight.
       if (showLights && lights.length) {
-        gl.disable(gl.DEPTH_TEST);
         gl.uniform1i(loc.lines, true);
         gl.uniform1i(loc.skinned, false);
-        for (const l of lights) {
-          if (!l.meshes.some(id => visible.has(id))) continue;
-          gl.uniform3fv(loc.color, l.color);
-          gl.bindVertexArray(l.vao);
-          gl.drawArrays(gl.LINES, 0, l.count);
+        gl.uniform1i(loc.marker, true);
+        const e = eye();
+        for (const hidden of [true, false]) {
+          if (hidden) gl.disable(gl.DEPTH_TEST); else { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); }
+          for (const l of lights) {
+            if (!l.meshes.some(id => visible.has(id))) continue;
+            gl.uniform3fv(loc.color, hidden ? l.color.map(c => c * 0.3 + 0.12) : l.color);
+            gl.uniform3fv(loc.markerAt, l.position);
+            gl.uniform1f(loc.markerScale, Math.hypot(l.position[0] - e[0], l.position[1] - e[1], l.position[2] - e[2]) * MarkerSize);
+            gl.bindVertexArray(l.vao);
+            gl.drawArrays(gl.LINES, 0, l.count);
+          }
         }
-        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
+        gl.uniform1i(loc.marker, false);
       }
       gl.bindVertexArray(null);
     });
@@ -936,7 +1070,8 @@
   canvas.addEventListener("auxclick", e => e.preventDefault());
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
-    camera.distance = Math.max(sceneRadius * 0.02, Math.min(sceneRadius * 50, camera.distance * Math.pow(1.15, Math.sign(e.deltaY))));
+    // Close enough for a small part of a large model (a lamp of a 132 m pier).
+    camera.distance = Math.max(Math.min(0.02, sceneRadius * 0.02), sceneRadius * 0.002, Math.min(sceneRadius * 50, camera.distance * Math.pow(1.15, Math.sign(e.deltaY))));
     draw();
   }, { passive: false });
   canvas.addEventListener("dblclick", fit);
@@ -951,8 +1086,15 @@
       if (!gl) return;
       if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
-      else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); if (first || m.fit) fit(); else draw(); }
-      else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; showLights = m.lights === true; draw(); }
+      else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); findSpots(); if (first || m.fit) fit(); else draw(); }
+      else if (m.type === "options") {
+        showTextures = m.textures; wireframe = m.wireframe;
+        const lightsChanged = showLights !== (m.lights === true);
+        showLights = m.lights === true;
+        if (lightsChanged) findSpots();
+        draw();
+      }
+      else if (m.type === "spot") { goToSpot(m.step); }
       else if (m.type === "lights") { setLights(m.lights); }
       else if (m.type === "background") { document.body.className = m.name; }
       else if (m.type === "fit") { fit(); }

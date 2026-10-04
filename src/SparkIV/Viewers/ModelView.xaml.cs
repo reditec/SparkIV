@@ -67,6 +67,20 @@ namespace SparkIV.WinUI.Viewers
       LightsButton.Visibility = scene.Lights.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
       UpdateStatus();
       UpdateStepText();
+      // Page Up and Down go through the spots (while there are some).
+      foreach (var (key, step) in new[] { (Windows.System.VirtualKey.PageUp, -1), (Windows.System.VirtualKey.PageDown, 1) })
+      {
+        var accelerator = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = key };
+        accelerator.Invoked += (s, args) =>
+        {
+          if (SpotContainer.Visibility == Visibility.Visible)
+          {
+            args.Handled = true;
+            Post(new { type = "spot", step });
+          }
+        };
+        KeyboardAccelerators.Add(accelerator);
+      }
       Loaded += ModelView_Loaded;
     }
 
@@ -211,6 +225,11 @@ namespace SparkIV.WinUI.Viewers
     {
       using var message = JsonDocument.Parse(args.WebMessageAsJson);
       var root = message.RootElement;
+      if (root.GetProperty("type").GetString() == "spot")
+      {
+        ShowSpot(root.GetProperty("index").GetInt32(), root.GetProperty("count").GetInt32());
+        return;
+      }
       if (root.GetProperty("type").GetString() != "ready")
       {
         return;
@@ -290,6 +309,20 @@ namespace SparkIV.WinUI.Viewers
       }
       Status.Text = text;
     }
+
+    #region Spots
+
+    /// <summary>The page found the places of the model (index -1: the whole model is shown).</summary>
+    private void ShowSpot(int index, int count)
+    {
+      SpotContainer.Visibility = count >= 2 ? Visibility.Visible : Visibility.Collapsed;
+      SpotText.Text = index >= 0 ? "Spot " + (index + 1) + " / " + count : count + " spots";
+    }
+
+    private void PreviousSpot_Click(object sender, RoutedEventArgs e) => Post(new { type = "spot", step = -1 });
+    private void NextSpot_Click(object sender, RoutedEventArgs e) => Post(new { type = "spot", step = 1 });
+
+    #endregion
 
     private void Options_Click(object sender, RoutedEventArgs e)
     {
