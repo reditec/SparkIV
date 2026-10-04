@@ -757,6 +757,19 @@ namespace SparkIV.WinUI.Viewers
         }
       }
 
+      // See-through materials and decals fade by their vertices' alpha too (the coastline decal of
+      // tmp_ci6_7_beach04: 0 at its edges, so the dark hollow below shows, as in OpenIV).
+      float[]? alphas = null;
+      bool hasColor = mesh.VertexDeclaration.Elements.TakeWhile(e => e.Stream != -1).Any(e => e.Usage == VertexElementUsage.Color && e.UsageIndex == 0);
+      if (hasColor && material >= 0 && material < Materials.Count && Materials[material].Blend)
+      {
+        alphas = new float[vertices.Length];
+        for (int i = 0; i < vertices.Length; i++)
+        {
+          alphas[i] = (vertices[i].DiffuseColor >> 24) / 255f;
+        }
+      }
+
       var scene = new SceneMesh(Meshes.Count, material, positions, normals, uvs, triangles, bones)
       {
         SkinBones = skinBones,
@@ -764,6 +777,7 @@ namespace SparkIV.WinUI.Viewers
         LayerUvs = layerUvs,
         LayerWeights = layerWeights,
         Colors = colors,
+        Alphas = alphas,
       };
       Meshes.Add(scene);
       return scene.Id;
@@ -838,10 +852,51 @@ namespace SparkIV.WinUI.Viewers
         }
       }
 
+      // Normal and specular maps, and how bumpy and shiny (the map shaders' parameters: gta_normal...,
+      // gta_spec...). Not for planes the game doesn't draw.
+      string? normalKey = null, specularKey = null;
+      if (material.DrawBucket is not (29 or 30))
+      {
+        if (TextureParameter(material, BumpSampler) is string normalName)
+        {
+          normalKey = AddTexture(normalName, embedded, Materials.Count + "_n.png");
+        }
+        if (TextureParameter(material, SpecSampler) is string specularName)
+        {
+          specularKey = AddTexture(specularName, embedded, Materials.Count + "_s.png");
+        }
+      }
+      var mask = VectorParameter(material, SpecMapIntMask);
+
       // Glass is drawn see-through; it is named so in the shader (gta_vehicle_vehglass, gta_glass ...).
       bool glass = material.ShaderName.Contains("glass", StringComparison.OrdinalIgnoreCase);
-      return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass) { LayerKeys = layerKeys, DrawBucket = material.DrawBucket };
+      return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass)
+      {
+        LayerKeys = layerKeys,
+        DrawBucket = material.DrawBucket,
+        NormalKey = normalKey,
+        SpecularKey = specularKey,
+        Bumpiness = VectorParameter(material, Bumpiness)?.X ?? 1,
+        SpecularPower = VectorParameter(material, SpecularFactor)?.X ?? 0,
+        SpecularIntensity = VectorParameter(material, SpecularColorFactor)?.X ?? 0,
+        SpecularMask = mask == null ? new[] { 1f, 0f, 0f } : new[] { mask.Value.X, mask.Value.Y, mask.Value.Z },
+      };
     }
+
+    // The hashes of the map shaders' parameters for bumps and shine, named by hashing their names
+    // ("bumpsampler" ...) and checked against the materials of eleven exported map archives.
+    private const uint BumpSampler = 0x46b7c64f, SpecSampler = 0x608799c6, Bumpiness = 0xf6712b81,
+                       SpecularFactor = 0x166e0fd1, SpecularColorFactor = 0x484a5ebd, SpecMapIntMask = 0xff11711d;
+
+    // Rockstar's placeholder for a texture never given (some vehicles' normal maps): not looked for.
+    private static string? TextureParameter(Material material, uint hash) =>
+      material.Parameters.TryGetValue(hash, out var param) && param is MaterialParamTexture texture && !string.IsNullOrEmpty(texture.TextureName) &&
+      !texture.TextureName.Equals("givemechecker", StringComparison.OrdinalIgnoreCase)
+        ? texture.TextureName
+        : null;
+
+    private static RageLib.Common.ResourceTypes.Vector4? VectorParameter(Material material, uint hash) =>
+      material.Parameters.TryGetValue(hash, out var param) && param is MaterialParamVector4 vector ? vector.Value : null;
 
     // The hashes of "texturesampler_layer0" to "_layer3": the terrain shaders' layers.
     private static readonly uint[] TerrainLayers = { TerrainLayer0, 0x2420afd1, 0x31934ab6, 0x78b758fd };
@@ -897,6 +952,9 @@ namespace SparkIV.WinUI.Viewers
     public float[]? LayerWeights { get; init; }
     public float[]? Colors { get; init; }
 
+    /// <summary>See-through materials and decals: each vertex's alpha (how much of it shows); null otherwise.</summary>
+    public float[]? Alphas { get; init; }
+
     public int Id { get; }
     public int Material { get; }
     public float[] Positions { get; }
@@ -919,6 +977,7 @@ namespace SparkIV.WinUI.Viewers
       layerUvs = LayerUvs == null ? null : Base64(LayerUvs),
       layerWeights = LayerWeights == null ? null : Base64(LayerWeights),
       colors = Colors == null ? null : Base64(Colors),
+      alphas = Alphas == null ? null : Base64(Alphas),
       indices = Convert.ToBase64String(MemoryMarshal.AsBytes(Indices.AsSpan())),
     };
 
@@ -1014,6 +1073,20 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>How many texture layers it has: 1, or 2 to 4 for terrain.</summary>
     public int LayerCount => 1 + LayerKeys.Count;
 
+    /// <summary>The normal map (bumps) and the specular map (where it shines), or null.</summary>
+    public string? NormalKey { get; init; }
+    public string? SpecularKey { get; init; }
+
+    /// <summary>How strongly the normal map bends the surface (1 as made).</summary>
+    public float Bumpiness { get; init; } = 1;
+
+    /// <summary>How sharp the shine is (the exponent; 0 for no shine) and how bright.</summary>
+    public float SpecularPower { get; init; }
+    public float SpecularIntensity { get; init; }
+
+    /// <summary>Which channels of the specular map hold the shine (usually red only).</summary>
+    public float[] SpecularMask { get; init; } = { 1, 0, 0 };
+
     /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
     public object ToMessage(Func<string, string> url) => new
     {
@@ -1025,6 +1098,12 @@ namespace SparkIV.WinUI.Viewers
       hidden = Hidden,
       texture = TextureKey == null ? null : url(TextureKey),
       layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
+      normal = NormalKey == null ? null : url(NormalKey),
+      specular = SpecularKey == null ? null : url(SpecularKey),
+      bumpiness = Bumpiness,
+      specularPower = SpecularPower,
+      specularIntensity = SpecularIntensity,
+      specularMask = SpecularMask,
     };
 
     /// <summary>

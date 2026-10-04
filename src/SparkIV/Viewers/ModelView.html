@@ -47,7 +47,9 @@
     in vec3 position; in vec3 normal; in vec2 uv; in vec4 skinBones; in vec4 skinWeights;
     // Terrain: the coordinates of layers 1 and 2, of layer 3, how much each layer covers, the vertex colour.
     in vec4 layerUvA; in vec2 layerUvB; in vec4 layerWeights; in vec3 vertexColor;
-    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor;
+    // See-through materials and decals: how much of each vertex shows.
+    in float vertexAlpha;
+    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor; out float vAlpha;
     uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
     // A texture moved by an animation (map objects: signs, screens, flames): its texture matrix's two rows.
     uniform bool uvAnim; uniform vec3 uvRow0; uniform vec3 uvRow1;
@@ -71,17 +73,35 @@
       }
       vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
       vUv = uvAnim ? vec2(dot(uvRow0, vec3(uv, 1.0)), dot(uvRow1, vec3(uv, 1.0))) : uv;
-      vUv1 = layerUvA.xy; vUv2 = layerUvA.zw; vUv3 = layerUvB; vWeights = layerWeights; vColor = vertexColor;
+      vUv1 = layerUvA.xy; vUv2 = layerUvA.zw; vUv3 = layerUvB; vWeights = layerWeights; vColor = vertexColor; vAlpha = vertexAlpha;
     }`;
 
   const FRAGMENT = `#version 300 es
     precision highp float;
     in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
-    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor;
+    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
-    uniform vec3 light; uniform float alpha; uniform bool lines; uniform bool cutout;
+    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout;
     // See-through by the texture's alpha (the see-through and decal buckets).
     uniform bool textureAlpha;
+    // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
+    // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
+    uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
+    uniform bool useSpecMap; uniform sampler2D specTex; uniform vec3 specMask; uniform float specPower; uniform float specIntensity;
+    // The normal map's direction turned into the surface: the surface's directions of u and v from how
+    // position and texture coordinates change across the screen (the meshes carry no tangents we read).
+    vec3 bumped(vec3 n, vec3 p, vec2 uv) {
+      vec3 m = texture(normalTex, uv).xyz * 2.0 - 1.0;
+      m.xy *= bumpiness;
+      m.y = -m.y;
+      vec3 dp1 = dFdx(p), dp2 = dFdy(p);
+      vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+      vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
+      vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+      vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+      float scale = inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
+      return normalize(mat3(t * scale, b * scale, n) * m);
+    }
     // Terrain: how many layers (1 for anything else), their textures, and which of them are there.
     uniform int layers; uniform sampler2D tex1; uniform sampler2D tex2; uniform sampler2D tex3; uniform vec3 layerOn;
     out vec4 outColor;
@@ -89,23 +109,39 @@
       if (lines) { outColor = vec4(color, 1.0); return; }
       vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
       if (layers > 1) {
-        // Each layer over the ones below as far as it covers; then the vertex colour's shade.
-        if (useTexture && layerOn.x > 0.5) base = mix(base, texture(tex1, vUv1), clamp(vWeights.y, 0.0, 1.0));
-        if (useTexture && layers > 2 && layerOn.y > 0.5) base = mix(base, texture(tex2, vUv2), clamp(vWeights.z, 0.0, 1.0));
-        if (useTexture && layers > 3 && layerOn.z > 0.5) base = mix(base, texture(tex3, vUv3), clamp(vWeights.w, 0.0, 1.0));
-        base = vec4(base.rgb * vColor, 1.0);
+        // Each layer over the ones below as far as it covers, masked by its own alpha (scrub in tufts over
+        // the sand), as the game's gta_terrain_va_*lyr pixel shader does: lrp(c, layer, layer.a * weight).
+        // The vertex colour doesn't tint them: in the game it only dims the light from around (below).
+        if (useTexture && layerOn.x > 0.5) { vec4 l = texture(tex1, vUv1); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.y, 0.0, 1.0)); }
+        if (useTexture && layers > 2 && layerOn.y > 0.5) { vec4 l = texture(tex2, vUv2); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.z, 0.0, 1.0)); }
+        if (useTexture && layers > 3 && layerOn.z > 0.5) { vec4 l = texture(tex3, vUv3); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.w, 0.0, 1.0)); }
+        base.a = 1.0;
       }
       if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, hair)
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
-      float diffuse = abs(dot(n, light));
-      float shade = 0.35 + 0.65 * diffuse;
+      // Both sides lit: the normal turned to the camera, then bent by the normal map.
+      if (dot(n, toEye) < 0.0) n = -n;
+      if (useNormalMap && useTexture) n = bumped(n, vPosition, vUv);
+      // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
+      // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
+      // from the side.
+      float around = layers > 1 ? vColor.r : 1.0;
+      float shade = 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      // The shine, where the surface faces half way between the light and the camera: how bright from the
+      // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
+      float shine = 0.0;
+      if (specPower > 0.0 && specIntensity > 0.0) {
+        vec4 spec = useSpecMap && useTexture ? texture(specTex, vUv) : vec4(1.0);
+        float where = useSpecMap && useTexture ? dot(spec.rgb, specMask) : 1.0;
+        shine = pow(max(dot(n, normalize(light + toEye)), 0.0), max(specPower * spec.a, 1.0)) * specIntensity * where;
+      }
       float a = alpha < 1.0 ? alpha : 1.0;
       if (textureAlpha) {
-        if (base.a < 0.01) discard;
-        a = base.a;
+        a = base.a * vAlpha;
+        if (a < 0.01) discard;
       }
-      outColor = vec4(base.rgb * shade * a, a);
+      outColor = vec4((base.rgb * shade + shine) * a, a);
     }`;
 
   let program, loc;
@@ -125,6 +161,7 @@
       hasNormal: gl.getUniformLocation(program, "hasNormal"),
       color: gl.getUniformLocation(program, "color"),
       light: gl.getUniformLocation(program, "light"),
+      toEye: gl.getUniformLocation(program, "toEye"),
       alpha: gl.getUniformLocation(program, "alpha"),
       lines: gl.getUniformLocation(program, "lines"),
       cutout: gl.getUniformLocation(program, "cutout"),
@@ -135,6 +172,7 @@
       layerUvB: gl.getAttribLocation(program, "layerUvB"),
       layerWeights: gl.getAttribLocation(program, "layerWeights"),
       vertexColor: gl.getAttribLocation(program, "vertexColor"),
+      vertexAlpha: gl.getAttribLocation(program, "vertexAlpha"),
       layers: gl.getUniformLocation(program, "layers"),
       tex1: gl.getUniformLocation(program, "tex1"),
       tex2: gl.getUniformLocation(program, "tex2"),
@@ -144,6 +182,14 @@
       marker: gl.getUniformLocation(program, "marker"),
       markerAt: gl.getUniformLocation(program, "markerAt"),
       markerScale: gl.getUniformLocation(program, "markerScale"),
+      useNormalMap: gl.getUniformLocation(program, "useNormalMap"),
+      normalTex: gl.getUniformLocation(program, "normalTex"),
+      bumpiness: gl.getUniformLocation(program, "bumpiness"),
+      useSpecMap: gl.getUniformLocation(program, "useSpecMap"),
+      specTex: gl.getUniformLocation(program, "specTex"),
+      specMask: gl.getUniformLocation(program, "specMask"),
+      specPower: gl.getUniformLocation(program, "specPower"),
+      specIntensity: gl.getUniformLocation(program, "specIntensity"),
     };
   }
 
@@ -237,6 +283,8 @@
     attribute(loc.layerUvB, 2, layerUvs, 24, 16);
     attribute(loc.layerWeights, 4, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerWeights).buffer)) : null, 0, 0);
     attribute(loc.vertexColor, 3, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
+    // Without its own, every vertex shows fully (the value is set before each draw: it isn't kept in the VAO).
+    attribute(loc.vertexAlpha, 1, m.alphas ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.alphas).buffer)) : null, 0, 0);
     buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
     gl.bindVertexArray(null);
 
@@ -264,7 +312,7 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, min, max, positions, indices });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices });
   }
 
   function addMaterial(m) {
@@ -277,12 +325,20 @@
     // another surface (decal), or not at all (a vehicle's no-water planes).
     const material = {
       texture: null, glass: m.glass, cutout: m.cutout === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
-      color: hsl(hue, 0.25, 0.62), layerCount, layers: [null, null, null],
+      color: m.color || hsl(hue, 0.25, 0.62), layerCount, layers: [null, null, null],
+      // Bumps and shine.
+      normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
+      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
     };
     materials.set(m.id, material);
     if (m.texture) loadTexture(m.texture, t => material.texture = t);
+    if (m.normal) loadTexture(m.normal, t => material.normal = t);
+    if (m.specular) loadTexture(m.specular, t => material.specular = t);
     (m.layers || []).forEach((url, i) => { if (url && i < 3) loadTexture(url, t => material.layers[i] = t); });
   }
+
+  const anisotropic = gl && gl.getExtension("EXT_texture_filter_anisotropic");
+  const maxAnisotropy = anisotropic ? Math.min(16, gl.getParameter(anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 1;
 
   function loadTexture(url, done) {
     const image = new Image();
@@ -297,6 +353,8 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      // Sharp also when seen at a slant (ground, walls towards the horizon), as far as the card allows.
+      if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
       done(t);
       draw();
       textureDone();
@@ -488,7 +546,7 @@
   // The same meshes with new textures (one was replaced): the old textures go, the new ones are loaded.
   function setMaterials(list) {
     for (const material of materials.values()) {
-      for (const t of [material.texture, ...material.layers]) if (t) gl.deleteTexture(t);
+      for (const t of [material.texture, material.normal, material.specular, ...material.layers]) if (t) gl.deleteTexture(t);
     }
     materials.clear();
     for (const m of list) addMaterial(m);
@@ -883,7 +941,10 @@
       for (let k = 0; k < 4; k++) v += proj[k * 4 + r] * view[c * 4 + k];
       out[c * 4 + r] = v;
     }
-    return { matrix: out, light: f.map(x => -x) };
+    // The light from a little above and to the left of the camera, so bumps and shapes show (straight from
+    // the camera a normal map's bumps hardly change the shade).
+    const toEye = f.map(x => -x);
+    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye };
   }
 
   // --- Drawing ---
@@ -938,6 +999,7 @@
       const vp = viewProjection();
       gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
       gl.uniform3fv(loc.light, vp.light);
+      gl.uniform3fv(loc.toEye, vp.toEye);
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
 
@@ -975,10 +1037,23 @@
             });
             gl.activeTexture(gl.TEXTURE0);
           }
+          // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
+          gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
+          gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
+          gl.uniform1f(loc.bumpiness, mat.bumpiness ?? 1);
+          gl.uniform1f(loc.specPower, mat.specularPower || 0);
+          gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
+          gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
+          gl.uniform1i(loc.normalTex, 5);
+          gl.uniform1i(loc.specTex, 6);
+          if (textured && mat.normal) { gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, mat.normal); }
+          if (textured && mat.specular) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, mat.specular); }
+          gl.activeTexture(gl.TEXTURE0);
           const uvMatrix = uvNow.get(m.material);
           gl.uniform1i(loc.uvAnim, !!uvMatrix);
           if (uvMatrix) { gl.uniform3fv(loc.uvRow0, uvMatrix[0]); gl.uniform3fv(loc.uvRow1, uvMatrix[1]); }
           useSkin(m);
+          if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
           if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
           gl.bindVertexArray(m.vao);
           gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
