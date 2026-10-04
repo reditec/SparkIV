@@ -271,7 +271,11 @@ namespace SparkIV.WinUI.Viewers
       return file == null ? null : Path.GetFileNameWithoutExtension(file.Name);
     }
 
-    public static ModelScene Load(File file, byte[] data)
+    /// <summary>
+    /// A model with its textures. <paramref name="moreDictionaries"/>: the bytes of a dictionary not beside
+    /// the model ("vehshare"), from wherever the caller knows; null where it isn't.
+    /// </summary>
+    public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null)
     {
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
@@ -292,6 +296,11 @@ namespace SparkIV.WinUI.Viewers
           if (file.ParentDirectory?.FindByName(name + ".wtd") is File wtd)
           {
             scene.OpenDictionary(wtd);
+          }
+          else if (moreDictionaries?.Invoke(name) is byte[] elsewhere)
+          {
+            // In another archive the caller knows of (TBoGT's vehicles.img lacks GTA IV's vehshare.wtd).
+            scene.OpenDictionary(name + ".wtd", elsewhere);
           }
         }
         // Models loose in the game folder have theirs in the textures folder beside: pc\models\plantsmgr.wdd,

@@ -234,6 +234,92 @@ namespace SparkIV.WinUI.Viewers
       return (new JsonObject { ["type"] = "scene", ["materials"] = materials, ["meshes"] = meshes }, visible);
     }
 
+    /// <summary>A track's values at every frame (3 or 4 a frame).</summary>
+    private static float[] SampledValues(Animation clip, AnimationTrack track, int components)
+    {
+      int frames = Math.Max(1, clip.FrameCount);
+      var values = new float[frames * components];
+      for (int f = 0; f < frames; f++)
+      {
+        var value = track.GetValue(f, clip.SequenceFrameLimit);
+        for (int c = 0; c < components && value != null && c < value.Length; c++)
+        {
+          values[f * components + c] = value[c];
+        }
+      }
+      return values;
+    }
+
+    /// <summary>
+    /// Tracks made for another parent than the model's skeleton has: a vehicle's clip moves its wheels as
+    /// children of the suspension (banshee_0: wheel_lf at -0.44, 0.05, 0.13 from suspension_lf), the
+    /// skeleton has them under the chassis beside it. Such a bone's track is the place where the sibling's
+    /// place plus the track's value is the bone's rest (within 2 cm), the value itself far from it; it is
+    /// turned into the place and turn under the real parent, frame by frame (sibling × track).
+    /// </summary>
+    private static void ReparentToSiblings(List<SceneBone> bones, Dictionary<int, float[]> positions, Dictionary<int, float[]> rotations)
+    {
+      static System.Numerics.Vector3 P(float[] v, int f) => new System.Numerics.Vector3(v[f * 3], v[f * 3 + 1], v[f * 3 + 2]);
+      static System.Numerics.Quaternion Q(float[] v, int f) => new System.Numerics.Quaternion(v[f * 4], v[f * 4 + 1], v[f * 4 + 2], v[f * 4 + 3]);
+      var byIndex = bones.ToDictionary(b => b.Index);
+      var moves = new List<(int Bone, int Sibling)>();
+      foreach (var (bone, values) in positions)
+      {
+        if (!byIndex.TryGetValue(bone, out var b))
+        {
+          continue;
+        }
+        var rest = new System.Numerics.Vector3(b.X, b.Y, b.Z);
+        var first = P(values, 0);
+        if (System.Numerics.Vector3.Distance(first, rest) < 0.05f)
+        {
+          continue;
+        }
+        foreach (var (sibling, siblingValues) in positions)
+        {
+          if (sibling == bone || !byIndex.TryGetValue(sibling, out var s) || s.Parent != b.Parent || moves.Any(m => m.Bone == sibling))
+          {
+            continue;
+          }
+          var turn = rotations.TryGetValue(sibling, out var r) ? Q(r, 0) : new System.Numerics.Quaternion(s.Quaternion[0], s.Quaternion[1], s.Quaternion[2], s.Quaternion[3]);
+          if (System.Numerics.Vector3.Distance(P(siblingValues, 0) + System.Numerics.Vector3.Transform(first, turn), rest) < 0.02f)
+          {
+            moves.Add((bone, sibling));
+            break;
+          }
+        }
+      }
+      foreach (var (bone, sibling) in moves)
+      {
+        var place = positions[bone];
+        var siblingPlace = positions[sibling];
+        var b = byIndex[bone];
+        var s = byIndex[sibling];
+        int frames = Math.Min(place.Length / 3, siblingPlace.Length / 3);
+        rotations.TryGetValue(bone, out var turnValues);
+        rotations.TryGetValue(sibling, out var siblingTurns);
+        var newTurns = new float[frames * 4];
+        for (int f = 0; f < frames; f++)
+        {
+          var siblingTurn = siblingTurns != null && f * 4 + 3 < siblingTurns.Length ? Q(siblingTurns, f)
+                            : new System.Numerics.Quaternion(s.Quaternion[0], s.Quaternion[1], s.Quaternion[2], s.Quaternion[3]);
+          var ownTurn = turnValues != null && f * 4 + 3 < turnValues.Length ? Q(turnValues, f)
+                        : new System.Numerics.Quaternion(b.Quaternion[0], b.Quaternion[1], b.Quaternion[2], b.Quaternion[3]);
+          var at = P(siblingPlace, f) + System.Numerics.Vector3.Transform(P(place, f), siblingTurn);
+          place[f * 3] = at.X;
+          place[f * 3 + 1] = at.Y;
+          place[f * 3 + 2] = at.Z;
+          // q = sibling × own (the own turn applied first, in the sibling's frame).
+          var turned = System.Numerics.Quaternion.Normalize(System.Numerics.Quaternion.Concatenate(ownTurn, siblingTurn));
+          newTurns[f * 4] = turned.X;
+          newTurns[f * 4 + 1] = turned.Y;
+          newTurns[f * 4 + 2] = turned.Z;
+          newTurns[f * 4 + 3] = turned.W;
+        }
+        rotations[bone] = newTurns;
+      }
+    }
+
     /// <summary>A track's values at every frame (3 or 4 a frame), as the page takes them.</summary>
     public static string Sampled(Animation clip, AnimationTrack track, int components)
     {
@@ -317,6 +403,8 @@ namespace SparkIV.WinUI.Viewers
         if (clip != null)
         {
           // The face's clip moves the face's bones of the same skeleton, frame for frame with the body's.
+          var positions = new Dictionary<int, float[]>();
+          var rotations = new Dictionary<int, float[]>();
           foreach (var source in head == null ? new[] { clip } : new[] { clip, head })
           {
             foreach (var track in source.Tracks)
@@ -326,8 +414,17 @@ namespace SparkIV.WinUI.Viewers
               {
                 continue;
               }
-              tracks.Add(new { bone, kind = position ? "position" : "rotation", values = Sampled(source, track, position ? 3 : 4) });
+              (position ? positions : rotations)[bone] = SampledValues(source, track, position ? 3 : 4);
             }
+          }
+          ReparentToSiblings(bones, positions, rotations);
+          foreach (var (bone, values) in positions)
+          {
+            tracks.Add(new { bone, kind = "position", values = Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan())) });
+          }
+          foreach (var (bone, values) in rotations)
+          {
+            tracks.Add(new { bone, kind = "rotation", values = Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan())) });
           }
           var rootPosition = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelPosition && t.IsDecoded);
           var rootRotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelRotation && t.IsDecoded);
@@ -377,20 +474,60 @@ namespace SparkIV.WinUI.Viewers
     private static readonly string[] PlayerParts = { "head", "uppr", "lowr", "feet", "hand", "hair", "teef" };
 
     /// <summary>
-    /// Loads the actors' models (on a background thread, the archives' key set): the player from the
-    /// game's playerped.rpf, everyone and everything else from its cutsprops.img (a ped's .wdd holds its
-    /// parts and skeleton, a prop is a .wdr).
+    /// The archives a cutscene's models are looked for in, in this order, for a game's folder (the one
+    /// holding pc\) and GTA IV's (null for GTA IV itself): its cutsprops.img, then GTA IV's (the episodes'
+    /// scenes use its props and some of its people: csPistol, CS_Luis); the ordinary peds of the streets
+    /// (componentpeds.img: M_Y_Goon_01, F_Y_HotChick_01); the vehicles (vehicles.img: schafter, hexer).
     /// </summary>
-    public static void LoadActors(IEnumerable<CutActor> actors, string? cutsProps, string? playerPed, string playerName)
+    public static List<string> ModelArchives(string folder, string? gtaIV)
     {
-      RageLib.FileSystem.IMGFileSystem? props = null;
+      var folders = gtaIV == null || string.Equals(Path.GetFullPath(gtaIV), Path.GetFullPath(folder), StringComparison.OrdinalIgnoreCase)
+        ? new[] { folder }
+        : new[] { folder, gtaIV };
+      var archives = new List<string>();
+      foreach (string relative in new[] { Path.Combine("pc", "anim", "cutsprops.img"), Path.Combine("pc", "models", "cdimages", "componentpeds.img"),
+                                          Path.Combine("pc", "models", "cdimages", "vehicles.img") })
+      {
+        foreach (string f in folders)
+        {
+          string path = Path.Combine(f, relative);
+          if (System.IO.File.Exists(path))
+          {
+            archives.Add(path);
+          }
+        }
+      }
+      return archives;
+    }
+
+    /// <summary>
+    /// Loads the actors' models (on a background thread, the archives' key set): the player from the
+    /// game's playerped.rpf, everyone and everything else from the first of <paramref name="archives"/>
+    /// that has it (a ped's .wdd holds its parts and skeleton, a prop is a .wdr, a vehicle a .wft); the
+    /// textures beside the model in its archive.
+    /// </summary>
+    public static void LoadActors(IEnumerable<CutActor> actors, IReadOnlyList<string> archives, string? playerPed, string playerName)
+    {
+      var open = new List<RageLib.FileSystem.IMGFileSystem?>();
+      RageLib.FileSystem.IMGFileSystem? Open(int i)
+      {
+        while (open.Count <= i)
+        {
+          RageLib.FileSystem.IMGFileSystem? img = new RageLib.FileSystem.IMGFileSystem();
+          try
+          {
+            img.Open(archives[open.Count]);
+          }
+          catch (Exception)
+          {
+            img = null;
+          }
+          open.Add(img);
+        }
+        return open[i];
+      }
       try
       {
-        if (cutsProps != null && System.IO.File.Exists(cutsProps))
-        {
-          props = new RageLib.FileSystem.IMGFileSystem();
-          props.Open(cutsProps);
-        }
         foreach (var actor in actors)
         {
           try
@@ -400,16 +537,35 @@ namespace SparkIV.WinUI.Viewers
               LoadPlayer(actor, playerPed, playerName);
               continue;
             }
-            var file = props == null ? null
-              : new[] { ".wdd", ".wdr", ".wft" }.Select(e => props.RootDirectory.FindByName(actor.Model + e) as RageLib.FileSystem.Common.File).FirstOrDefault(f => f != null);
-            if (file == null)
+            RageLib.FileSystem.Common.File? file = null;
+            string? from = null;
+            for (int i = 0; i < archives.Count && file == null; i++)
             {
-              actor.Error = actor.Model + " isn't in " + (cutsProps == null ? "the game's cutsprops.img (no game folder known)" : Path.GetFileName(cutsProps));
+              var img = Open(i);
+              file = img == null ? null
+                : new[] { ".wdd", ".wdr", ".wft" }.Select(e => img.RootDirectory.FindByName(actor.Model + e) as RageLib.FileSystem.Common.File).FirstOrDefault(f => f != null);
+              from = archives[i];
+            }
+            if (file == null || from == null)
+            {
+              actor.Error = actor.Model + (archives.Count == 0 ? " can't be looked for (no game folder known)" : " isn't in the game's cutsprops, peds or vehicles");
               continue;
             }
-            // Loaded while the archive is open: the textures are looked for beside the model.
-            actor.Scene = ModelScene.Load(file, file.GetData());
-            actor.Source = file.Name;
+            // Loaded while the archive is open: the textures are looked for beside the model, the shared ones
+            // (vehshare) in the other archives too.
+            byte[]? Elsewhere(string name)
+            {
+              for (int i = 0; i < archives.Count; i++)
+              {
+                if (Open(i)?.RootDirectory.FindByName(name + ".wtd") is RageLib.FileSystem.Common.File wtd)
+                {
+                  return wtd.GetData();
+                }
+              }
+              return null;
+            }
+            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere);
+            actor.Source = file.Name + " · " + RelativeArchive(from);
           }
           catch (Exception ex)
           {
@@ -419,8 +575,27 @@ namespace SparkIV.WinUI.Viewers
       }
       finally
       {
-        props?.Close();
+        foreach (var img in open)
+        {
+          img?.Close();
+        }
       }
+    }
+
+    /// <summary>An archive's place for the list: "TBoGT\…\componentpeds.img" or "…\cutsprops.img".</summary>
+    private static string RelativeArchive(string path)
+    {
+      string name = Path.GetFileName(path);
+      var dir = new DirectoryInfo(Path.GetDirectoryName(path)!);
+      // ...\<game or episode>\pc\anim\x.img or ...\pc\models\cdimages\x.img
+      while (dir != null && !dir.Name.Equals("pc", StringComparison.OrdinalIgnoreCase))
+      {
+        dir = dir.Parent;
+      }
+      string? game = dir?.Parent?.Name;
+      return game != null && (game.Equals("TLAD", StringComparison.OrdinalIgnoreCase) || game.Equals("TBoGT", StringComparison.OrdinalIgnoreCase))
+        ? game + " " + name
+        : name;
     }
 
     private static void LoadPlayer(CutActor actor, string? playerPed, string playerName)

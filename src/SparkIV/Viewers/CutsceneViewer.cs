@@ -66,7 +66,7 @@ namespace SparkIV.WinUI.Viewers
         var keyUtil = install.KeyUtil;
         KeyStore.SetKeyLoader(() => keyUtil.FindKey(install.Folder));
       }
-      CutsceneMessages.LoadActors(actors, Path.Combine(anim, "cutsprops.img"),
+      CutsceneMessages.LoadActors(actors, CutsceneMessages.ModelArchives(game.Folder, Games.InstallFolder(Games.GtaIV, "Windows")),
                                   Path.Combine(game.Folder, "pc", "models", "cdimages", "playerped.rpf"), game.Player);
       CutsceneMessages.ApplyVariations(cut, actors);
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
