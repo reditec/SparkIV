@@ -33,8 +33,17 @@ namespace RageLib.Models.Data
     public Skeleton Skeleton { get; private set; }
     public Textures.TextureFile AttachedTexture { get; private set; }
 
+    /// <summary>The model's lights (street lamps, neon, spots); empty for most.</summary>
+    public List<Light> Lights { get; private set; }
+
     internal Drawable(DrawableModel drawableModel)
     {
+      Lights = new List<Light>();
+      foreach (var light in drawableModel.Lights)
+      {
+        Lights.Add(new Light(light));
+      }
+
       if (drawableModel.ShaderGroup != null)
       {
         Materials = new List<Material>(drawableModel.ShaderGroup.Shaders.Count);

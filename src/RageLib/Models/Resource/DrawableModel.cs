@@ -60,8 +60,8 @@ namespace RageLib.Models.Resource
     private uint Unk4 { get; set; }
     private uint Unk5 { get; set; }
 
-    private uint Unk6 { get; set; }  // This should be a CSimpleCollection
-    private uint Unk7 { get; set; }
+    /// <summary>The drawable's lights (pointer, then count and capacity as two ushorts); empty without.</summary>
+    public LightAttributes[] Lights { get; private set; } = new LightAttributes[0];
 
     public void ReadData(BinaryReader br)
     {
@@ -120,9 +120,12 @@ namespace RageLib.Models.Resource
       Unk4 = br.ReadUInt32();
       Unk5 = br.ReadUInt32();
 
-      // Collection<LightAttrs>
-      Unk6 = br.ReadUInt32();
-      Unk7 = br.ReadUInt32();
+      // Collection<LightAttrs>: in the drawables of models (gtaDrawable); a fragment's drawable has no such
+      // collection there, so only a pointer (0x5...) with a count no larger than its capacity counts.
+      uint lightsPointer = br.ReadUInt32();
+      int lightCount = br.ReadUInt16();
+      int lightCapacity = br.ReadUInt16();
+      uint lightsOffset = (lightsPointer >> 28) == 5 && lightCount <= lightCapacity ? lightsPointer & 0x0FFFFFFF : 0;
 
       // The data follows:
 
@@ -136,6 +139,16 @@ namespace RageLib.Models.Resource
       {
         br.BaseStream.Seek(skeletonOffset, SeekOrigin.Begin);
         Skeleton = new Skeleton(br);
+      }
+
+      if (lightsOffset != 0 && lightCount > 0)
+      {
+        Lights = new LightAttributes[lightCount];
+        for (int i = 0; i < lightCount; i++)
+        {
+          br.BaseStream.Seek(lightsOffset + i * LightAttributes.Size, SeekOrigin.Begin);
+          Lights[i] = new LightAttributes(br);
+        }
       }
 
       // The four slots are high, medium, low and very low; any of them may be empty, also one in the middle.

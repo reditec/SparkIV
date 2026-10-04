@@ -26,8 +26,19 @@ namespace RageLib.Models.Data
   {
     public List<Mesh> Meshes { get; private set; }
 
+    /// <summary>
+    /// The bone (index in the drawable's skeleton) the meshes move with when they aren't skinned; their
+    /// vertices are then relative to that bone (et_cargoship36's parts on bones 1 and 2 lie about the origin).
+    /// </summary>
+    public int BoneIndex { get; private set; }
+
+    /// <summary>Whether the meshes' vertices carry bones and weights of their own (peds, flags).</summary>
+    public bool IsSkinned { get; private set; }
+
     internal Geometry(Resource.Models.Model info)
     {
+      BoneIndex = info.BoneIndex;
+      IsSkinned = info.IsSkinned;
       int index = 0;
       Meshes = new List<Mesh>(info.Geometries.Count);
       foreach (var dataInfo in info.Geometries)
