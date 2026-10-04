@@ -29,6 +29,9 @@
   let visible = new Set();
   let showTextures = true;
   let wireframe = false;
+  // The model's lights as markers: [{ vao, count, color, meshes }].
+  let lights = [];
+  let showLights = false;
 
   // --- Camera: orbits around a target ---
   const camera = { yaw: -0.6, pitch: 0.35, distance: 5, target: [0, 0, 0], fov: 45 * Math.PI / 180 };
@@ -305,6 +308,57 @@
   function hsl(h, s, l) {
     const f = n => { const k = (n + h * 12) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
     return [f(0), f(8), f(4)];
+  }
+
+  // A marker for each light, as lines: a small diamond where it is; a spot also its cone, showing which
+  // way and how wide it shines (not how far: et_pierlight05's spots reach 20 to 30 m from lamps 0.7 m
+  // big). Sized by the model, so they show on a lamp and on a block.
+  function setLights(list) {
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const m of meshes.values()) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    for (const l of list) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
+    const radius =min[0] === Infinity ? 1 : Math.max(0.2, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+    const size = Math.min(0.25, radius * 0.03);
+    lights = list.map(l => {
+      const [x, y, z] = l.position;
+      const lines = [];
+      const corners = [[size, 0, 0], [-size, 0, 0], [0, size, 0], [0, -size, 0], [0, 0, size], [0, 0, -size]];
+      // The diamond: each of the four side corners to top and bottom, and round the middle.
+      for (const [a, b] of [[0, 4], [1, 4], [2, 4], [3, 4], [0, 5], [1, 5], [2, 5], [3, 5], [0, 2], [2, 1], [1, 3], [3, 0]]) {
+        lines.push(x + corners[a][0], y + corners[a][1], z + corners[a][2], x + corners[b][0], y + corners[b][1], z + corners[b][2]);
+      }
+      if (l.spot) {
+        const d = norm(l.direction);
+        const length = Math.min(l.range > 0 ? l.range : Infinity, size * 12);
+        // Two axes across the direction, for the rim.
+        const side = norm(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+        const up = cross(side, d);
+        const half = Math.max(1, Math.min(89, (l.falloff || 60) / 2)) * Math.PI / 180;
+        const r = Math.tan(half) * length;
+        const end = [x + d[0] * length, y + d[1] * length, z + d[2] * length];
+        const rim = [];
+        for (let i = 0; i < 12; i++) {
+          const a = i / 12 * Math.PI * 2, c = Math.cos(a) * r, s = Math.sin(a) * r;
+          rim.push([end[0] + side[0] * c + up[0] * s, end[1] + side[1] * c + up[1] * s, end[2] + side[2] * c + up[2] * s]);
+        }
+        lines.push(x, y, z, ...end);
+        for (let i = 0; i < 12; i++) {
+          lines.push(...rim[i], ...rim[(i + 1) % 12]);
+          if (i % 3 === 0) lines.push(x, y, z, ...rim[i]);
+        }
+      }
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      bindSkin(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+      gl.enableVertexAttribArray(loc.position);
+      gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+      // A light that is black (some are) still shows, grey.
+      const color = l.color.some(c => c > 0.05) ? l.color : [0.6, 0.6, 0.6];
+      return { vao, count: lines.length / 3, color, meshes: l.meshes, position: l.position };
+    });
+    draw();
   }
 
   // The same meshes with new textures (one was replaced): the old textures go, the new ones are loaded.
@@ -628,16 +682,47 @@
       if (!m) continue;
       for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
     }
+    // The lights shown too (a light rig is a single small triangle with its lights metres away).
+    if (showLights) {
+      for (const l of lights) {
+        if (!l.meshes.some(id => visible.has(id))) continue;
+        for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
+      }
+    }
     if (min[0] === Infinity) return;
     camera.target = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
     sceneRadius = Math.max(0.01, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
-    camera.distance = sceneRadius / Math.sin(camera.fov / 2) * 1.1;
-    camera.yaw = -0.6;
+    // From the side and a little to the front; a long model from its long side, a little turned (et_pierlight05,
+    // 132 by 49 m: half the distance than looking along its diagonal).
+    const lengthX = max[0] - min[0], lengthY = max[1] - min[1];
+    camera.yaw = lengthX > lengthY * 1.5 ? -1.25 : lengthY > lengthX * 1.5 ? -0.3 : -0.6;
     // Flat things (the far-away LODs of trees and blocks, made to be seen from above) are looked at from
     // high up; anything else from the side and a little above.
     const height = max[2] - min[2], width = Math.max(max[0] - min[0], max[1] - min[1]);
     camera.pitch = height < width * 0.15 ? 1.1 : 0.35;
+    camera.distance = fitDistance(min, max);
     draw();
+  }
+
+  // How far the camera must be, looking from its yaw and pitch, for the box's eight corners to fit the
+  // view (with a little room): each corner seen from the camera, not a sphere round the box, which left a
+  // lot of empty room round long flat models (et_pierlight05: 132 by 49 m, under a metre high).
+  function fitDistance(min, max) {
+    const c = Math.cos(camera.pitch);
+    const toEye = [c * Math.cos(camera.yaw), c * Math.sin(camera.yaw), Math.sin(camera.pitch)];
+    const forward = toEye.map(v => -v);
+    const side = norm(cross(forward, [0, 0, 1]));
+    const up = cross(side, forward);
+    const tanY = Math.tan(camera.fov / 2) * 0.92;
+    const tanX = tanY * (canvas.clientWidth / Math.max(1, canvas.clientHeight));
+    let distance = 0;
+    for (let i = 0; i < 8; i++) {
+      const corner = [i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]].map((v, k) => v - camera.target[k]);
+      // A corner at x across, y up and z towards the camera is in view while (distance - z) * tan >= |x|, |y|.
+      const z = dot(corner, toEye);
+      distance = Math.max(distance, z + Math.abs(dot(corner, side)) / tanX, z + Math.abs(dot(corner, up)) / tanY);
+    }
+    return Math.max(distance, sceneRadius * 0.05, 0.05);
   }
 
   function eye() {
@@ -797,6 +882,20 @@
           gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
         }
       }
+      // The lights, in front of everything (inside a lamp's housing they would hide), while a mesh of
+      // their drawable is shown.
+      if (showLights && lights.length) {
+        gl.disable(gl.DEPTH_TEST);
+        gl.uniform1i(loc.lines, true);
+        gl.uniform1i(loc.skinned, false);
+        for (const l of lights) {
+          if (!l.meshes.some(id => visible.has(id))) continue;
+          gl.uniform3fv(loc.color, l.color);
+          gl.bindVertexArray(l.vao);
+          gl.drawArrays(gl.LINES, 0, l.count);
+        }
+        gl.enable(gl.DEPTH_TEST);
+      }
       gl.bindVertexArray(null);
     });
   }
@@ -853,7 +952,8 @@
       if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
       else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); if (first || m.fit) fit(); else draw(); }
-      else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; draw(); }
+      else if (m.type === "options") { showTextures = m.textures; wireframe = m.wireframe; showLights = m.lights === true; draw(); }
+      else if (m.type === "lights") { setLights(m.lights); }
       else if (m.type === "background") { document.body.className = m.name; }
       else if (m.type === "fit") { fit(); }
       else if (m.type === "skeleton") { setSkeleton(m); }

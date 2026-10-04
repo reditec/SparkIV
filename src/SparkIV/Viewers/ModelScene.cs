@@ -28,6 +28,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>The bones of the model's skeleton by index (empty without one), for the export.</summary>
     public List<SceneBone> Bones { get; } = new List<SceneBone>();
 
+    /// <summary>The lights of the drawables (street lamps, neon, spots), placed in the model.</summary>
+    public List<SceneLight> Lights { get; } = new List<SceneLight>();
+
     /// <summary>Whether the model has textures of its own (stored in it, not in a .wtd).</summary>
     public bool HasEmbeddedTextures { get; private set; }
 
@@ -515,6 +518,8 @@ namespace SparkIV.WinUI.Viewers
       var rest = drawable.Skeleton != null && placements == null && ReferenceEquals(drawable.Skeleton, _bonesFrom) ? RestPose(drawable.Skeleton) : null;
       bool wholeOnOneBone = drawable.Skeleton == null && Bones.Count == 0 && placements == null;
 
+      int firstMesh = Meshes.Count;
+
       string[] lodNames = LodNames.Split('|');
       for (int index = 0; index < drawable.Models.Count; index++)
       {
@@ -553,6 +558,29 @@ namespace SparkIV.WinUI.Viewers
         }
         // The most detailed one there is is shown; the others are there to look at.
         lodNode.Initialize(show && index == 0);
+      }
+
+      // The drawable's lights: at their bone (in its rest pose) when the drawable has a skeleton; shown
+      // while a mesh of the drawable is.
+      if (drawable.Lights.Count > 0 && placements == null)
+      {
+        var meshIds = Enumerable.Range(firstMesh, Meshes.Count - firstMesh).ToArray();
+        var boneOfId = new Dictionary<int, int>();
+        if (rest != null)
+        {
+          foreach (var bone in Bones)
+          {
+            boneOfId.TryAdd(bone.Id, bone.Index);
+          }
+        }
+        foreach (var light in drawable.Lights)
+        {
+          var at = boneOfId.TryGetValue(light.BoneId, out int index) && index < rest!.Length ? rest[index] : System.Numerics.Matrix4x4.Identity;
+          var position = System.Numerics.Vector3.Transform(new System.Numerics.Vector3(light.Position.X, light.Position.Y, light.Position.Z), at);
+          var direction = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(light.Direction.X, light.Direction.Y, light.Direction.Z), at);
+          Lights.Add(new SceneLight(position, direction, light.Color[0] / 255f, light.Color[1] / 255f, light.Color[2] / 255f,
+                                    light.IsSpot, light.Range, light.Falloff, meshIds));
+        }
       }
     }
 
@@ -895,6 +923,23 @@ namespace SparkIV.WinUI.Viewers
     };
 
     private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
+  }
+
+  /// <summary>A light of the model: where, which way, its colour (0 to 1), a spot's outer angle (degrees), the meshes of its drawable.</summary>
+  public sealed record SceneLight(System.Numerics.Vector3 Position, System.Numerics.Vector3 Direction, float Red, float Green, float Blue,
+                                  bool Spot, float Range, float Falloff, int[] Meshes)
+  {
+    /// <summary>For the page.</summary>
+    public object ToMessage() => new
+    {
+      position = new[] { Position.X, Position.Y, Position.Z },
+      direction = new[] { Direction.X, Direction.Y, Direction.Z },
+      color = new[] { Red, Green, Blue },
+      spot = Spot,
+      range = Range,
+      falloff = Falloff,
+      meshes = Meshes,
+    };
   }
 
   /// <summary>A bone: its place and turn relative to its parent (Euler angles in radians, as RageLib reads them).</summary>

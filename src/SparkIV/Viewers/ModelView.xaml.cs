@@ -22,6 +22,7 @@ namespace SparkIV.WinUI.Viewers
     private static int s_background;
     private static bool s_textures = true;
     private static bool s_wireframe;
+    private static bool s_lights = true;
 
     private readonly ViewerContext _context;
     private readonly ModelScene _scene;
@@ -62,6 +63,8 @@ namespace SparkIV.WinUI.Viewers
       BackgroundBox.SelectedIndex = s_background;
       TexturesButton.IsChecked = s_textures;
       WireframeButton.IsChecked = s_wireframe;
+      LightsButton.IsChecked = s_lights;
+      LightsButton.Visibility = scene.Lights.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
       UpdateStatus();
       UpdateStepText();
       Loaded += ModelView_Loaded;
@@ -226,6 +229,10 @@ namespace SparkIV.WinUI.Viewers
         materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)),
         meshes = _scene.Meshes.Select(m => m.ToMessage()),
       });
+      if (_scene.Lights.Count > 0)
+      {
+        Post(new { type = "lights", lights = _scene.Lights.Select(l => l.ToMessage()) });
+      }
       SendOptions();
       SendBackground();
       SendVisible(fit: true);
@@ -241,7 +248,13 @@ namespace SparkIV.WinUI.Viewers
 
     private void SendVisible(bool fit) => Post(new { type = "visible", ids = _scene.Root.CheckedMeshes().ToArray(), fit });
 
-    private void SendOptions() => Post(new { type = "options", textures = TexturesButton.IsChecked == true, wireframe = WireframeButton.IsChecked == true });
+    private void SendOptions() => Post(new
+    {
+      type = "options",
+      textures = TexturesButton.IsChecked == true,
+      wireframe = WireframeButton.IsChecked == true,
+      lights = LightsButton.IsChecked == true,
+    });
 
     private static readonly string[] BackgroundNames = { "", "grey", "black", "white" };
 
@@ -266,6 +279,11 @@ namespace SparkIV.WinUI.Viewers
       {
         text += " from " + string.Join(", ", external);
       }
+      if (_scene.Lights.Count > 0)
+      {
+        int spots = _scene.Lights.Count(l => l.Spot);
+        text += "   \u00B7   " + _scene.Lights.Count + (_scene.Lights.Count == 1 ? " light" : " lights") + (spots > 0 ? " (" + spots + (spots == 1 ? " spot)" : " spots)") : "");
+      }
       if (_scene.MissingTextures.Count > 0)
       {
         text += "   \u00B7   not found: " + string.Join(", ", _scene.MissingTextures);
@@ -277,6 +295,10 @@ namespace SparkIV.WinUI.Viewers
     {
       s_textures = TexturesButton.IsChecked == true;
       s_wireframe = WireframeButton.IsChecked == true;
+      if (_scene.Lights.Count > 0)
+      {
+        s_lights = LightsButton.IsChecked == true;
+      }
       SendOptions();
     }
 

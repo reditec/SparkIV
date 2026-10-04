@@ -25,6 +25,11 @@
                                 ToolTipService.ToolTip="Draw the edges of the triangles">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xE80A;" /></AppBarToggleButton.Icon>
             </AppBarToggleButton>
+            <!-- Only for models with lights (street lamps, neon signs, spots) -->
+            <AppBarToggleButton x:Name="LightsButton" Label="Lights" IsChecked="True" Click="Options_Click" Visibility="Collapsed"
+                                ToolTipService.ToolTip="Show where the model's lights are: their colour, a spot's cone">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xEA80;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
             <AppBarElementContainer VerticalContentAlignment="Center">
                 <ComboBox x:Name="BackgroundBox" MinWidth="120" Margin="8,0,8,0" SelectionChanged="BackgroundBox_SelectionChanged"
                           ToolTipService.ToolTip="Background of the view">
