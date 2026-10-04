@@ -89,6 +89,7 @@ namespace SparkIV.WinUI.Viewers
       ByExtension[".wtd"] = new TextureViewer();
       ByExtension[".whm"] = new WebPageViewer();
       ByExtension[".wad"] = new AnimationViewer();
+      ByExtension[".cut"] = new CutsceneViewer();
       var models = new ModelViewer();
       foreach (var ext in new[] { ".wdr", ".wdd", ".wft" })
       {

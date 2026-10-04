@@ -312,7 +312,8 @@
         max[k] = Math.max(max[k], positions[i + k]);
       }
     }
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices });
+    // actor: which of a cutscene's cast it belongs to (0: the one model or ped shown otherwise).
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0 });
   }
 
   function addMaterial(m) {
@@ -606,12 +607,12 @@
     return r;
   }
 
-  function worldMatrices(position, rotation) {
-    const n = skeleton.parent.length, world = new Array(n);
+  function worldMatrices(position, rotation, s = skeleton) {
+    const n = s.parent.length, world = new Array(n);
     const of = i => {
       if (!world[i]) {
         const local = mat4FromQuat(rotation.slice(i * 4, i * 4 + 4), position.slice(i * 3, i * 3 + 3));
-        const p = skeleton.parent[i];
+        const p = s.parent[i];
         world[i] = p >= 0 && p < n && p !== i ? mul(of(p), local) : local;
       }
       return world[i];
@@ -638,45 +639,167 @@
   // bone also takes half of the hand's turn about the arm, so the wrist doesn't wring. "The same place"
   // within 3 cm: Johnny's R_ArmRoll is 7 mm beside his upper arm (Niko's exactly on it); the next bones
   // of an arm are 15 to 30 cm apart.
-  function findFollowers() {
-    skeleton.followers = [];
-    if (!clip) return;
-    const tracked = new Set(clip.tracks.filter(t => t.kind === "rotation").map(t => t.bone));
-    const n = skeleton.parent.length;
-    const at = i => skeleton.position.slice(i * 3, i * 3 + 3);
+  function findFollowers(sk = skeleton, cl = clip) {
+    sk.followers = [];
+    if (!cl) return;
+    const tracked = new Set(cl.tracks.filter(t => t.kind === "rotation").map(t => t.bone));
+    const n = sk.parent.length;
+    const at = i => sk.position.slice(i * 3, i * 3 + 3);
     for (let b = 0; b < n; b++) {
       // Only helper bones (named so): a finger without a track (the little one in many clips) keeps its rest.
-      const helperName = (skeleton.names && skeleton.names[b]) || "";
+      const helperName = (sk.names && sk.names[b]) || "";
       if (tracked.has(b) || !/roll|twist/i.test(helperName)) continue;
       // The nearest tracked sibling, if near enough (and not at the parent itself: then it just moves with it).
       const pb = at(b);
       let leader = -1, nearest = 0.03;
       for (let s = 0; s < n; s++) {
-        if (s === b || !tracked.has(s) || skeleton.parent[s] !== skeleton.parent[b]) continue;
+        if (s === b || !tracked.has(s) || sk.parent[s] !== sk.parent[b]) continue;
         const ps = at(s);
         const d = Math.hypot(pb[0] - ps[0], pb[1] - ps[1], pb[2] - ps[2]);
         if (d <= nearest && Math.hypot(ps[0], ps[1], ps[2]) >= 0.03) { nearest = d; leader = s; }
       }
       if (leader < 0) continue;
-      const name = (skeleton.names && skeleton.names[b]) || "";
+      const name = (sk.names && sk.names[b]) || "";
       let twistFrom = -1;
       if (/twist/i.test(name)) {
-        for (let c = 0; c < n; c++) if (skeleton.parent[c] === leader && tracked.has(c)) { twistFrom = c; break; }
+        for (let c = 0; c < n; c++) if (sk.parent[c] === leader && tracked.has(c)) { twistFrom = c; break; }
       }
-      skeleton.followers.push({ bone: b, leader, twistFrom });
+      sk.followers.push({ bone: b, leader, twistFrom });
     }
   }
 
-  function setSkeleton(s) {
-    // The rest pose is worked out once.
-    skeleton = { parent: s.parent, position: s.position, rotation: s.rotation, names: s.names, followers: [] };
-    skeleton.inverseRest = worldMatrices(s.position, s.rotation).map(inverseRigid);
-    boneTexture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, boneTexture);
+  // A skeleton from SparkIV, its rest pose worked out once, with a texture for its bone matrices.
+  function makeSkeleton(s) {
+    const sk = { parent: s.parent, position: s.position, rotation: s.rotation, names: s.names, followers: [] };
+    sk.inverseRest = worldMatrices(s.position, s.rotation, sk).map(inverseRigid);
+    sk.texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sk.texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return sk;
+  }
+
+  function setSkeleton(s) {
+    skeleton = makeSkeleton(s);
+    boneTexture = skeleton.texture;
     findFollowers();
     pose(clip ? currentFrame() : null);
+  }
+
+  // The bones of a pose: the clip's tracks over the rest, the facial clip playing then, the helper bones.
+  // Returns the local positions and rotations.
+  function sampledPose(sk, cl, frame) {
+    const position = sk.position.slice(), rotation = sk.rotation.slice();
+    if (!cl || frame === null) return { position, rotation };
+    for (const track of cl.tracks) sample(track, frame, cl.frames, track.kind === "position" ? position : rotation, track.bone);
+    // Facial clips: the one started last at or before this frame plays on the face's bones, from its
+    // start, until it ends (over the body clip's face, if it has one).
+    if (showFacials && cl.facials) {
+      let facial = null;
+      for (const f of cl.facials) if (f.start <= frame) facial = f;
+      if (facial) {
+        const local = (frame - facial.start) / cl.fps * facial.fps;
+        if (local <= facial.frames - 1) {
+          for (const track of facial.tracks) sample(track, local, facial.frames, track.kind === "position" ? position : rotation, track.bone);
+        }
+      }
+    }
+    // Helper bones: the leader's turn away from its rest, applied to the helper's rest.
+    const restOf = i => sk.rotation.slice(i * 4, i * 4 + 4);
+    const nowOf = i => rotation.slice(i * 4, i * 4 + 4);
+    for (const f of sk.followers) {
+      let q = qmul(qmul(nowOf(f.leader), qconj(restOf(f.leader))), restOf(f.bone));
+      if (f.twistFrom >= 0) {
+        // The hand's turn away from its rest, about the arm's long axis (x), half of it.
+        const d = qmul(nowOf(f.twistFrom), qconj(restOf(f.twistFrom)));
+        let twist = qnorm([d[0], 0, 0, d[3]]);
+        if (twist[3] < 0) twist = twist.map(v => -v);
+        // Half the angle of a turn q (w >= 0) is normalize(q + 1).
+        q = qmul(q, qnorm([twist[0], 0, 0, twist[3] + 1]));
+      }
+      q = qnorm(q);
+      for (let k = 0; k < 4; k++) rotation[f.bone * 4 + k] = q[k];
+    }
+    return { position, rotation };
+  }
+
+  // The bone matrices of world bones into the skeleton's texture (what skinned vertices move by).
+  function uploadBones(sk, world) {
+    const data = new Float32Array(world.length * 16);
+    for (let i = 0; i < world.length; i++) data.set(mul(world[i], sk.inverseRest[i]), i * 16);
+    gl.bindTexture(gl.TEXTURE_2D, sk.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, world.length, 0, gl.RGBA, gl.FLOAT, data);
+  }
+
+  // --- A cutscene's cast ---
+  //
+  // Every actor (a ped, a prop) has its own skeleton and clip, all on the one timeline (the clip without
+  // tracks the main clip then is). A ped's clip places it in the scene by its model tracks (root); a prop's
+  // root bone holds its place itself.
+  const cast = new Map();   // id → { skeleton, clip, root: { position, rotation } | null }
+
+  function setCast(list) {
+    for (const a of cast.values()) if (a.skeleton) gl.deleteTexture(a.skeleton.texture);
+    cast.clear();
+    for (const a of list) {
+      const track = t => t ? { bone: t.bone, kind: t.kind, values: new Float32Array(bytes(t.values).buffer) } : null;
+      const sk = a.skeleton ? makeSkeleton(a.skeleton) : null;
+      const cl = a.clip ? {
+        frames: a.clip.frames, fps: a.clip.fps, tracks: a.clip.tracks.map(track),
+        facials: (a.clip.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
+      } : null;
+      if (sk) findFollowers(sk, cl);
+      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null });
+    }
+    showFrame();
+    // Where the actors are now (the view fitted before their clips were there looked at the origin).
+    if (list.length) fit();
+  }
+
+  function poseCast(frame) {
+    for (const a of cast.values()) {
+      if (!a.skeleton) continue;
+      // The actor's clip runs at its own rate on the timeline's time.
+      const f = a.clip && clip ? Math.min(frame / clip.fps * a.clip.fps, a.clip.frames - 1) : null;
+      const p = sampledPose(a.skeleton, a.clip, f);
+      let world = worldMatrices(p.position, p.rotation, a.skeleton);
+      if (a.root && a.clip && f !== null) {
+        const at = [0, 0, 0], q = [0, 0, 0, 1];
+        if (a.root.position) sample(a.root.position, f, a.clip.frames, at, 0);
+        if (a.root.rotation) sample(a.root.rotation, f, a.clip.frames, q, 0);
+        const place = mat4FromQuat(q, at);
+        world = world.map(m => mul(place, m));
+      }
+      a.world = world;
+      uploadBones(a.skeleton, world);
+    }
+  }
+
+  // --- The cutscene's camera ---
+  //
+  // Its clip: a place and a turn (looking along its y, z up) and the field of view in degrees, per frame
+  // of the timeline. While on, the view is the camera's; turning the view by mouse switches it off.
+  let filmCamera = null;    // { frames, fps, position, rotation, fov } (tracks)
+  let useFilmCamera = false;
+
+  function setFilmCamera(c) {
+    const track = (t, kind) => t ? { bone: 0, kind, values: new Float32Array(bytes(t).buffer) } : null;
+    filmCamera = c ? { frames: c.frames, fps: c.fps, position: track(c.position, "position"), rotation: track(c.rotation, "rotation"), fov: c.fov ? new Float32Array(bytes(c.fov).buffer) : null } : null;
+    draw();
+  }
+
+  // The camera's eye, forward, up and field of view (radians) now, or null.
+  function filmView() {
+    if (!useFilmCamera || !filmCamera || !filmCamera.position || !filmCamera.rotation) return null;
+    const f = clip ? Math.min(currentFrame() / clip.fps * filmCamera.fps, filmCamera.frames - 1) : 0;
+    const e = [0, 0, 0], q = [0, 0, 0, 1];
+    // Whole frames: a cut between two frames would otherwise swing the camera across the room for a frame.
+    const whole = Math.floor(f + 1e-6);
+    sample(filmCamera.position, whole, filmCamera.frames, e, 0);
+    sample(filmCamera.rotation, whole, filmCamera.frames, q, 0);
+    const turn = v => qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q)).slice(0, 3);
+    const fov = filmCamera.fov ? filmCamera.fov[Math.min(whole, filmCamera.fov.length - 1)] : 45;
+    return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180 };
   }
 
   // A track's value between frames: positions linearly, rotations by normalized linear interpolation.
@@ -699,45 +822,15 @@
 
   // The pose at a time of the clip.
   function pose(frame) {
-    if (!skeleton) return;
-    const position = skeleton.position.slice(), rotation = skeleton.rotation.slice();
+    if (cast.size) poseCast(frame === null ? 0 : frame);
+    if (!skeleton) { if (cast.size) draw(); return; }
+    const { position, rotation } = sampledPose(skeleton, clip, frame);
     let mover = null;
-    if (clip && frame !== null) {
-      for (const track of clip.tracks) sample(track, frame, clip.frames, track.kind === "position" ? position : rotation, track.bone);
-      // Facial clips: the one started last at or before this frame plays on the face's bones, from its
-      // start, until it ends (over the body clip's face, if it has one).
-      if (showFacials && clip.facials) {
-        let facial = null;
-        for (const f of clip.facials) if (f.start <= frame) facial = f;
-        if (facial) {
-          const local = (frame - facial.start) / clip.fps * facial.fps;
-          if (local <= facial.frames - 1) {
-            for (const track of facial.tracks) sample(track, local, facial.frames, track.kind === "position" ? position : rotation, track.bone);
-          }
-        }
-      }
-      if (moveInWorld && clip.mover) {
-        const p = [0, 0, 0], q = [0, 0, 0, 1];
-        if (clip.mover.path) sample(clip.mover.path, frame, clip.frames, p, 0);
-        if (clip.mover.rotation) sample(clip.mover.rotation, frame, clip.frames, q, 0);
-        mover = mat4FromQuat(q, p);
-      }
-      // Helper bones: the leader's turn away from its rest, applied to the helper's rest.
-      const restOf = i => skeleton.rotation.slice(i * 4, i * 4 + 4);
-      const nowOf = i => rotation.slice(i * 4, i * 4 + 4);
-      for (const f of skeleton.followers) {
-        let q = qmul(qmul(nowOf(f.leader), qconj(restOf(f.leader))), restOf(f.bone));
-        if (f.twistFrom >= 0) {
-          // The hand's turn away from its rest, about the arm's long axis (x), half of it.
-          const d = qmul(nowOf(f.twistFrom), qconj(restOf(f.twistFrom)));
-          let twist = qnorm([d[0], 0, 0, d[3]]);
-          if (twist[3] < 0) twist = twist.map(v => -v);
-          // Half the angle of a turn q (w >= 0) is normalize(q + 1).
-          q = qmul(q, qnorm([twist[0], 0, 0, twist[3] + 1]));
-        }
-        q = qnorm(q);
-        for (let k = 0; k < 4; k++) rotation[f.bone * 4 + k] = q[k];
-      }
+    if (clip && frame !== null && moveInWorld && clip.mover) {
+      const p = [0, 0, 0], q = [0, 0, 0, 1];
+      if (clip.mover.path) sample(clip.mover.path, frame, clip.frames, p, 0);
+      if (clip.mover.rotation) sample(clip.mover.rotation, frame, clip.frames, q, 0);
+      mover = mat4FromQuat(q, p);
     }
     let world = worldMatrices(position, rotation);
     if (mover) {
@@ -750,10 +843,7 @@
       for (let k = 0; k < 3; k++) camera.target[k] -= lastMover[k];
       lastMover = null;
     }
-    const data = new Float32Array(world.length * 16);
-    for (let i = 0; i < world.length; i++) data.set(mul(world[i], skeleton.inverseRest[i]), i * 16);
-    gl.bindTexture(gl.TEXTURE_2D, boneTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, world.length, 0, gl.RGBA, gl.FLOAT, data);
+    uploadBones(skeleton, world);
     draw();
   }
 
@@ -861,8 +951,14 @@
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
     for (const id of visible) {
       const m = meshes.get(id);
-      if (!m) continue;
+      if (!m || m.actor) continue;
       for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    }
+    // A cutscene's actors where they are now (their meshes are made at the origin): their bones, and a
+    // little room round them for the body about the bones.
+    for (const a of cast.values()) {
+      if (!a.world) continue;
+      for (const w of a.world) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], w[12 + k] - 0.3); max[k] = Math.max(max[k], w[12 + k] + 0.3); }
     }
     // The lights shown too (a light rig is a single small triangle with its lights metres away).
     if (showLights) {
@@ -925,15 +1021,17 @@
   const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
   function viewProjection() {
-    const e = eye();
-    const f = norm(sub(camera.target, e));
-    const s = norm(cross(f, [0, 0, 1]));
+    // Through a cutscene's camera (tilted as it is), or the viewer's own looking at its target.
+    const film = filmView();
+    const e = film ? film.eye : eye();
+    const f = film ? film.forward : norm(sub(camera.target, e));
+    const s = norm(cross(f, film ? film.up : [0, 0, 1]));
     const u = cross(s, f);
     const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, e), -dot(u, e), dot(f, e), 1];
     const aspect = canvas.width / Math.max(1, canvas.height);
-    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = camera.distance + sceneRadius * 4;
-    const nearClip = Math.max(camera.distance / 1000, near * 0.1);
-    const t = 1 / Math.tan(camera.fov / 2);
+    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = film ? sceneRadius * 8 + 100 : camera.distance + sceneRadius * 4;
+    const nearClip = film ? 0.03 : Math.max(camera.distance / 1000, near * 0.1);
+    const t = 1 / Math.tan((film ? film.fov : camera.fov) / 2);
     const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + nearClip) / (nearClip - far), -1, 0, 0, 2 * far * nearClip / (nearClip - far), 0];
     const out = new Array(16);
     for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
@@ -972,11 +1070,14 @@
 
   // The bone matrices on texture unit 1 for a skinned mesh, while there is a skeleton.
   function useSkin(m) {
-    const on = !!(m.skinned && skeleton && boneTexture);
+    // A cutscene actor's mesh moves with its own skeleton.
+    const actor = m.actor ? cast.get(m.actor) : null;
+    const texture = m.actor ? actor && actor.skeleton && actor.skeleton.texture : skeleton && boneTexture;
+    const on = !!(m.skinned && texture);
     gl.uniform1i(loc.skinned, on);
     if (on) {
       gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, boneTexture);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(loc.boneMatrices, 1);
       gl.activeTexture(gl.TEXTURE0);
     }
@@ -1116,6 +1217,8 @@
   let drag = null;
   canvas.addEventListener("pointerdown", e => {
     drag = { x: e.clientX, y: e.clientY, button: e.button };
+    // Looking round by hand leaves the cutscene's camera.
+    if (useFilmCamera) { useFilmCamera = false; post({ type: "filmCamera", on: false }); }
     canvas.setPointerCapture(e.pointerId);
     canvas.classList.add("moving");
     if (e.button === 1) e.preventDefault();
@@ -1177,10 +1280,15 @@
       else if (m.type === "clip") { play(false); setClip(m); if (m.play) play(true); }
       else if (m.type === "play") { play(m.on); }
       else if (m.type === "seek") { play(false); seek(m.frame); }
+      // To a frame without stopping: a cutscene follows its sound, which keeps the time.
+      else if (m.type === "time") { if (clip) { playback.time = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps; if (!playback.playing) showFrame(); } }
       else if (m.type === "speed") { playback.speed = m.value; }
       else if (m.type === "loop") { playback.loop = m.on; }
       else if (m.type === "move") { moveInWorld = m.on; showFrame(); }
       else if (m.type === "facials") { showFacials = m.on; showFrame(); }
+      else if (m.type === "cast") { setCast(m.actors); }
+      else if (m.type === "camera") { setFilmCamera(m.camera); }
+      else if (m.type === "useCamera") { useFilmCamera = m.on; draw(); }
     });
   }
   post({ type: "ready", webgl: !!gl });

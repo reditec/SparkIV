@@ -34,6 +34,16 @@ namespace RageLib.Animation
 
     /// <summary>Which facial animation plays (the hash of its name, "yawn").</summary>
     FacialAnimation = 134,
+
+    // A cutscene's camera (camera_0 in cuts.img's dictionaries), named as OpenIV's export names them: its
+    // place and turn (looking along its y, z up), field of view in degrees, depth of field (3 numbers), and
+    // two whose meaning isn't known (the control one -1 or 1).
+    CameraPosition = 7,
+    CameraRotation = 8,
+    CameraFov = 136,
+    CameraDof = 137,
+    CameraMatrixRotateFactor = 138,
+    CameraControl = 144,
   }
 
   /// <summary>
