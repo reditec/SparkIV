@@ -405,6 +405,7 @@ namespace SparkIV.WinUI.Viewers
         log.Step("location: models", location.Models.Count + " models, " + location.Objects.Count + " objects (with the textures below)");
         log.Add("  of which: textures", shared.TextureSeconds, shared.TexturesMade + " made");
         log.Add("  of which: texture dictionaries", shared.DictionarySeconds, shared.Opened.Count + " opened");
+        log.Add("  of which: model dictionaries", shared.ModelDictionarySeconds, shared.ModelDictionariesRead + " read (each once)");
       }
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
       if (location.Outdoors)

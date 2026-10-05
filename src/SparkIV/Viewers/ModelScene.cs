@@ -221,11 +221,18 @@ namespace SparkIV.WinUI.Viewers
     {
       internal Dictionary<string, TextureFile> Opened { get; } = new Dictionary<string, TextureFile>(StringComparer.OrdinalIgnoreCase);
       internal Dictionary<string, byte[]> Pngs { get; } = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+      /// <summary>
+      /// Model dictionaries (.wdd) read once for all the models taken from them (a district's far versions:
+      /// lod_bxe2_01_grp holds dozens), by the very bytes they were read from.
+      /// </summary>
+      internal Dictionary<byte[], ModelDictionaryFile> ModelDictionaries { get; } = new Dictionary<byte[], ModelDictionaryFile>(ReferenceEqualityComparer.Instance);
 
-      /// <summary>For the load log: seconds spent making textures (and how many), and opening texture dictionaries.</summary>
+      /// <summary>For the load log: seconds spent making textures (and how many), opening texture dictionaries and reading model dictionaries.</summary>
       public double TextureSeconds { get; internal set; }
       public int TexturesMade { get; internal set; }
       public double DictionarySeconds { get; internal set; }
+      public double ModelDictionarySeconds { get; internal set; }
+      public int ModelDictionariesRead => ModelDictionaries.Count;
 
       public void Dispose()
       {
@@ -234,6 +241,11 @@ namespace SparkIV.WinUI.Viewers
           textures.Dispose();
         }
         Opened.Clear();
+        foreach (var models in ModelDictionaries.Values)
+        {
+          models.Dispose();
+        }
+        ModelDictionaries.Clear();
       }
     }
 
@@ -460,8 +472,37 @@ namespace SparkIV.WinUI.Viewers
           }
           case ".wdd":
           {
-            using var dictionary = new ModelDictionaryFile();
-            dictionary.Open(new MemoryStream(data));
+            // Kept for the next model of the same dictionary where shared, else closed after this one.
+            ModelDictionaryFile? own = null;
+            if (shared == null || !shared.ModelDictionaries.TryGetValue(data, out var dictionary))
+            {
+              var reading = System.Diagnostics.Stopwatch.StartNew();
+              dictionary = new ModelDictionaryFile();
+              dictionary.Open(new MemoryStream(data));
+              if (shared != null)
+              {
+                shared.ModelDictionaries[data] = dictionary;
+                shared.ModelDictionarySeconds += reading.Elapsed.TotalSeconds;
+              }
+              else
+              {
+                own = dictionary;
+              }
+            }
+            using var closing = own;
+            // One model of it: only that entry looked at.
+            if (onlyModel is uint wanted)
+            {
+              for (int i = 0; i < dictionary.ModelsInDictionary; i++)
+              {
+                if (dictionary.GetNameHash(i) == wanted)
+                {
+                  string name = Services.GameTextures.ModelName(wanted) ?? KnownModelNames.Find(wanted) ?? "0x" + wanted.ToString("x8");
+                  scene.AddDrawable(scene.Root, name, dictionary.GetDataModel(i), true);
+                }
+              }
+              break;
+            }
             // A ped's dictionary holds its parts (head_000_r, uppr_000_u, lowr_001_u ...), some in several
             // variations. One variation of each part is shown, the lowest number; entries whose name isn't
             // known are all shown.
