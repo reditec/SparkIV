@@ -57,9 +57,23 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A texture's key for the page: "m" and the model's number, then its key in the model's scene.</summary>
     public static string TextureKey(int model, string key) => "m" + model + "/" + key;
 
+    /// <summary>The water's surface texture's key (see <see cref="WaterSurface"/>).</summary>
+    public const string WaterKey = "mwater/surface";
+
+    /// <summary>
+    /// The water's surface (pc\textures\water.wtd's waterclear, as ModelScene.Raw makes it): its blue and alpha
+    /// are the slope of the little waves the game's water shader lays over it, three times in different
+    /// sizes; null without it.
+    /// </summary>
+    public byte[]? WaterSurface { get; private set; }
+
     /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
     public byte[]? Texture(string key)
     {
+      if (key == WaterKey)
+      {
+        return WaterSurface;
+      }
       int slash = key.IndexOf('/');
       if (slash < 2 || key[0] != 'm' || !int.TryParse(key.AsSpan(1, slash - 1), out int model) || model < 0 || model >= Models.Count)
       {
@@ -369,6 +383,26 @@ namespace SparkIV.WinUI.Viewers
         }
       }
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
+      if (location.Water.Count > 0)
+      {
+        try
+        {
+          string surface = Path.Combine(folder, "pc", "textures", "water.wtd");
+          if (System.IO.File.Exists(surface))
+          {
+            using var textures = new RageLib.Textures.TextureFile();
+            textures.Open(surface);
+            if (textures.Textures.FirstOrDefault(x => x.Name.Contains("waterclear", StringComparison.OrdinalIgnoreCase)) is RageLib.Textures.Texture clear)
+            {
+              location.WaterSurface = ModelScene.Raw(clear);
+            }
+          }
+        }
+        catch (Exception)
+        {
+          // Then the water is smooth.
+        }
+      }
       return location;
     }
 
@@ -711,6 +745,7 @@ namespace SparkIV.WinUI.Viewers
         {
           ["id"] = water, ["glass"] = true, ["water"] = true, ["cutout"] = false, ["blend"] = false, ["decal"] = false, ["hidden"] = false,
           ["texture"] = null, ["color"] = new JsonArray(0.18f, 0.38f, 0.42f),
+          ["normal"] = WaterSurface != null ? url(WaterKey) : null,
         });
         var positions = Water.SelectMany(p => new[] { p.X, p.Y, p.Z }).ToArray();
         var indices = new List<ushort>();
