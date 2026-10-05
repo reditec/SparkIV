@@ -145,6 +145,8 @@
     // How bright the sky the water mirrors is against the sky shown (the game's reflection is of the scene
     // in its light, brighter than the picture's sky after exposure; matched by eye to the game's bc_3).
     const float WaterSky = 2.2;
+    // How steep the running waves on the water are (1: their slopes as listed with them).
+    const float WaveStrength = 1.0;
     out vec4 outColor;
     void main() {
       if (vPosition.z < clipBelow) discard;
@@ -244,6 +246,21 @@
                         + texture(normalTex, (p + t * vec2(-0.4, -0.55)) * 0.01 + 0.61).zw - 1.0) * 0.181
                        + (texture(normalTex, (p + t * vec2(0.3, 0.45)) * 0.0454).zw
                         + texture(normalTex, (p + t * vec2(-0.45, 0.2)) * 0.0454 + 0.23).zw - 1.0) * 0.085;
+            // The texture is only the fine ripple; the waves seen in the game (a few metres long, running
+            // over the water all the time) are its simulation's. Here a few running waves of their own, each
+            // its slope (height a, length L: a x 2pi / L), at the speed deep water has (sqrt(g L / 2pi)).
+            const vec4 waveDir[5] = vec4[5](vec4(0.83, 0.56, 7.0, 0.11), vec4(0.31, 0.95, 4.3, 0.09),
+                                            vec4(0.97, -0.24, 11.0, 0.13), vec4(-0.42, 0.91, 2.6, 0.06),
+                                            vec4(0.64, -0.77, 3.4, 0.07));
+            // Fading out far off, where a wave would be smaller than a pixel (it would flicker).
+            float away = length(eyeAt - vPosition);
+            for (int i = 0; i < 5; i++) {
+              vec2 d = waveDir[i].xy;
+              float k = 6.2832 / waveDir[i].z;
+              float phase = k * dot(d, p) - sqrt(9.81 * k) * t;
+              float fade = clamp(1.0 - away / (waveDir[i].z * 40.0), 0.0, 1.0);
+              slope += d * cos(phase) * waveDir[i].w * WaveStrength * fade;
+            }
             wn = normalize(vec3(slope, 1.0));
           }
           vec3 view = normalize(vPosition - eyeAt);
@@ -252,8 +269,11 @@
           vec3 bounce = reflect(view, wn);
           vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
           if (reflectOn) {
-            // The mirrored scene where it is, shifted a little by the waves; the sky where nothing was drawn.
-            vec4 scene = texture(reflectTex, gl_FragCoord.xy / screenSize + wn.xy * 0.08);
+            // The mirrored scene where it is, shifted by the waves as water.fxc does: by the slope x 0.5 /
+            // (0.03 x the distance), much near the camera, little far off - a fifth of it, the slope here being
+            // that of the running waves too, much steeper than the game's ripple; the sky where nothing was drawn.
+            float shift = min(0.2 * 0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 0.3);
+            vec4 scene = texture(reflectTex, clamp(gl_FragCoord.xy / screenSize + wn.xy * shift, 0.001, 0.999));
             mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
           mirrored *= WaterSky;
@@ -527,8 +547,9 @@
 
   function loadTexture(url, done) {
     texturesLoading++;
-    fetch(url)
-      .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+    const inPack = packed.get(url);
+    packed.delete(url);
+    (inPack || fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject()))
       .then(async buffer => {
         const head = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
         const t = gl.createTexture();
@@ -628,8 +649,9 @@
   // Textures still on their way; when the last has come (or failed), SparkIV hears "loaded" (it shows a
   // spinner until then).
   let texturesLoading = 0;
+  let sceneSeconds = 0;   // how long the last scene's meshes and materials took to make here (for SparkIV's load log)
   function textureDone() {
-    if (--texturesLoading === 0) post({ type: "loaded" });
+    if (--texturesLoading === 0) post({ type: "loaded", sceneSeconds });
   }
 
   function hsl(h, s, l) {
@@ -817,10 +839,33 @@
   }
 
   function setScene(scene) {
+    const started = performance.now();
+    if (scene.packs) for (const pack of scene.packs) addPack(pack);
     for (const m of scene.materials) addMaterial(m);
     for (const m of scene.meshes) addMesh(m);
+    sceneSeconds = (performance.now() - started) / 1000;
     message.textContent = scene.meshes.length ? "" : "This model has no meshes.";
-    if (texturesLoading === 0) post({ type: "loaded" });
+    if (texturesLoading === 0) post({ type: "loaded", sceneSeconds });
+  }
+
+  // Textures sent together (a cutscene's location: two thousand one by one took SparkIV and the page
+  // longer than the textures themselves): one request for many, "SXP1", then each texture's length and bytes
+  // in the order of the pack's list of their urls; a url in it is taken from there, not asked for.
+  const packed = new Map();
+  function addPack(pack) {
+    const parts = fetch(pack.url)
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+      .then(buffer => {
+        const v = new DataView(buffer), list = [];
+        let at = 4;
+        while (at + 4 <= buffer.byteLength && list.length < pack.textures.length) {
+          const length = v.getUint32(at, true);
+          list.push(buffer.slice(at + 4, at + 4 + length));
+          at += 4 + length;
+        }
+        return list;
+      });
+    pack.textures.forEach((url, i) => packed.set(url, parts.then(list => list[i] || Promise.reject())));
   }
 
   // --- Skeleton and animation (peds) ---

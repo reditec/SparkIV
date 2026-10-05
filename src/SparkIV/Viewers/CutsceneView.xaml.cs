@@ -268,6 +268,10 @@ namespace SparkIV.WinUI.Viewers
           if (_document.Log is Services.LoadLog log && _pageWait != null)
           {
             log.Add(_pageWaitFor!, _pageWait.Elapsed.TotalSeconds);
+            if (root.TryGetProperty("sceneSeconds", out var made) && made.TryGetDouble(out double seconds))
+            {
+              log.Add("  of which: meshes and materials made on the page", seconds);
+            }
             _pageWait = null;
             if (_pageWaitFor!.Contains("location") || !s_location || _document.Cut.Offset == null || _document.GameFolder == null)
             {

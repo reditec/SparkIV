@@ -78,6 +78,31 @@ namespace SparkIV.WinUI.Viewers
     public byte[]? Clouds { get; private set; }
     public byte[]? CloudDetail { get; private set; }
 
+    /// <summary>
+    /// The models' textures in packs of about <see cref="PackBytes"/> each (keys "mpack/0" ...), as the scene
+    /// message lists them: the page asks for a few dozen instead of two thousand, one by one (bc_3: 10 s
+    /// waiting on the requests alone).
+    /// </summary>
+    private const string PackKey = "mpack/";
+    private const int PackBytes = 16 << 20;
+    private readonly List<List<string>> _packs = new List<List<string>>();
+
+    /// <summary>A pack: "SXP1", then each texture's length (uint32) and bytes, in the list's order.</summary>
+    private byte[] Pack(List<string> keys)
+    {
+      using var stream = new MemoryStream();
+      using var writer = new BinaryWriter(stream);
+      writer.Write("SXP1"u8);
+      foreach (string key in keys)
+      {
+        byte[] texture = Texture(key) ?? Array.Empty<byte>();
+        writer.Write((uint)texture.Length);
+        writer.Write(texture);
+      }
+      writer.Flush();
+      return stream.ToArray();
+    }
+
     /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
     public byte[]? Texture(string key)
     {
@@ -88,6 +113,10 @@ namespace SparkIV.WinUI.Viewers
       if (key == CloudKey || key == CloudDetailKey)
       {
         return key == CloudKey ? Clouds : CloudDetail;
+      }
+      if (key.StartsWith(PackKey, StringComparison.Ordinal))
+      {
+        return int.TryParse(key.AsSpan(PackKey.Length), out int pack) && pack >= 0 && pack < _packs.Count ? Pack(_packs[pack]) : null;
       }
       int slash = key.IndexOf('/');
       if (slash < 2 || key[0] != 'm' || !int.TryParse(key.AsSpan(1, slash - 1), out int model) || model < 0 || model >= Models.Count)
@@ -742,13 +771,24 @@ namespace SparkIV.WinUI.Viewers
       var visible = new List<int>();
       var materialStart = new int[Models.Count];
       int nextMaterial = firstMaterial;
+      // The textures the materials name, each once, for the packs.
+      var named = new List<string>();
+      var namedOnce = new HashSet<string>(StringComparer.Ordinal);
+      string Named(string key)
+      {
+        if (namedOnce.Add(key))
+        {
+          named.Add(key);
+        }
+        return url(key);
+      }
       for (int m = 0; m < Models.Count; m++)
       {
         materialStart[m] = nextMaterial;
         foreach (var material in Models[m].Materials)
         {
           int model = m;
-          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => url(TextureKey(model, key))))!.AsObject();
+          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => Named(TextureKey(model, key))))!.AsObject();
           node["id"] = materialStart[m] + material.Id;
           materials.Add(node);
           nextMaterial = Math.Max(nextMaterial, materialStart[m] + material.Id + 1);
@@ -809,7 +849,28 @@ namespace SparkIV.WinUI.Viewers
         });
         visible.Add(id);
       }
-      return (new JsonObject { ["type"] = "scene", ["materials"] = materials, ["meshes"] = meshes }, visible);
+      _packs.Clear();
+      long filled = 0;
+      foreach (string key in named)
+      {
+        if (Texture(key) is not byte[] texture)
+        {
+          continue;
+        }
+        if (_packs.Count == 0 || (filled > 0 && filled + texture.Length > PackBytes))
+        {
+          _packs.Add(new List<string>());
+          filled = 0;
+        }
+        _packs[^1].Add(key);
+        filled += texture.Length;
+      }
+      var packs = new JsonArray();
+      for (int i = 0; i < _packs.Count; i++)
+      {
+        packs.Add(new JsonObject { ["url"] = url(PackKey + i), ["textures"] = new JsonArray(_packs[i].Select(k => (JsonNode)JsonValue.Create(url(k))!).ToArray()) });
+      }
+      return (new JsonObject { ["type"] = "scene", ["packs"] = packs, ["materials"] = materials, ["meshes"] = meshes }, visible);
     }
 
     /// <summary>
