@@ -265,6 +265,23 @@
       outColor = vec4(rgb * a, a);
     }`;
 
+  // A uniform set to the value it already has isn't sent again: each mesh sets some forty, most the same
+  // as the mesh before, and with thousands of meshes (a cutscene outside, mirrored in the water) the calls
+  // themselves were what made the picture stutter. Per location (each program has its own).
+  if (gl) {
+    const sent = new Map();
+    const same = (a, b) => { if (a === b) return true; if (!a || !b || a.length !== b.length || typeof a === "number") return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
+    for (const name of ["uniform1i", "uniform1f", "uniform2f", "uniform3fv"]) {
+      const call = gl[name].bind(gl);
+      gl[name] = (where, ...value) => {
+        if (where === null) return;
+        const v = value.length === 1 ? (typeof value[0] === "number" || typeof value[0] === "boolean" ? value[0] : Array.from(value[0])) : value;
+        if (sent.has(where) && same(sent.get(where), v)) return;
+        sent.set(where, v);
+        call(where, ...value);
+      };
+    }
+  }
   let program, loc;
   if (gl) {
     program = createProgram(VERTEX, FRAGMENT);
@@ -1129,6 +1146,18 @@
     return new Float32Array(inv.map(v => v / (det || 1)));
   }
 
+  // The six planes (a, b, c, d: inside where ax + by + cz + d >= 0, normalised) of a column-major
+  // view-projection matrix (Gribb and Hartmann).
+  function frustumPlanes(m) {
+    const row = i => [m[i], m[4 + i], m[8 + i], m[12 + i]];
+    const r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    return [[1, r0], [-1, r0], [1, r1], [-1, r1], [1, r2], [-1, r2]].map(([s, r]) => {
+      const p = r3.map((v, k) => v + s * r[k]);
+      const l = Math.hypot(p[0], p[1], p[2]) || 1;
+      return p.map(v => v / l);
+    });
+  }
+
   // Column-major 4x4 matrices: a times b.
   function multiply4(a, b) {
     const out = new Float32Array(16);
@@ -1687,7 +1716,25 @@
       gl.activeTexture(gl.TEXTURE0);
 
       // The meshes, solid first, then glass see-through on top; mirrored (reflecting): not the water itself.
-      const drawMeshes = reflecting => {
+      const drawMeshes = (reflecting, matrix, eyeNow) => {
+      // Only what can be in the picture: a map object (it stands still) whose bounding sphere is inside the
+      // view (the six planes of the view-projection); actors move, they are always drawn. Mirrored, not what
+      // lies under the water nor what would come out smaller than a few pixels (each frame draws the scene twice).
+      const planes = frustumPlanes(matrix);
+      const seen = m => {
+        if (m.actor) return true;
+        if (m.radius === undefined) {
+          m.center = [0, 1, 2].map(k => (m.min[k] + m.max[k]) / 2);
+          m.radius = Math.hypot(m.max[0] - m.min[0], m.max[1] - m.min[1], m.max[2] - m.min[2]) / 2;
+        }
+        for (const p of planes) if (p[0] * m.center[0] + p[1] * m.center[1] + p[2] * m.center[2] + p[3] < -m.radius) return false;
+        if (reflecting) {
+          if (m.max[2] < level) return false;
+          const d = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]);
+          if (m.radius / Math.max(d, 1e-3) < 0.01) return false;
+        }
+        return true;
+      };
       for (const pass of ["solid", "glass"]) {
         const glassPass = pass === "glass";
         if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
@@ -1698,6 +1745,7 @@
           const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
           if (mat.hidden) continue;
           if (reflecting && mat.water) continue;
+          if (!seen(m)) continue;
           // A cutscene's actor not in this section (of another part of the file): not there.
           if (m.actor && cast.size && !cast.has(m.actor)) continue;
           // Glass and what is see-through by its texture after everything solid, without writing depth.
@@ -1768,10 +1816,10 @@
       };
       // Outside with water: the scene mirrored in the water's level first, into a texture the water shows
       // (as the game's water.fxc its ReflectTextureSampler), what is under the water left out.
-      const level = outside ? waterLevel() : null;
+      var level = outside ? waterLevel() : null;
       gl.uniform1i(loc.reflectOn, level !== null);
       if (level !== null) {
-        const target = reflectionTarget(Math.max(1, w >> 1), Math.max(1, h >> 1));
+        const target = reflectionTarget(Math.max(1, w >> 2), Math.max(1, h >> 2));
         // Not bound for reading while it is drawn into (WebGL refuses a feedback loop).
         gl.activeTexture(gl.TEXTURE7);
         gl.bindTexture(gl.TEXTURE_2D, null);
@@ -1787,7 +1835,7 @@
         gl.uniformMatrix4fv(loc.viewProjection, false, mirrored);
         gl.uniform3fv(loc.eyeAt, mirroredEye);
         gl.uniform1f(loc.clipBelow, level - 0.05);
-        drawMeshes(true);
+        drawMeshes(true, mirrored, mirroredEye);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, w, h);
         gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
@@ -1800,7 +1848,7 @@
         gl.uniform2f(loc.screenSize, w, h);
       }
       gl.uniform1f(loc.clipBelow, -1e9);
-      drawMeshes(false);
+      drawMeshes(false, vp.matrix, vp.eye);
       gl.depthMask(true);
 
       // A grid on the ground while the ped moves through the world, so the movement can be seen.
