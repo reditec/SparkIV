@@ -156,9 +156,11 @@ namespace SparkIV.WinUI.Viewers
     /// at their hours: at <paramref name="hour"/> (the scene's time isn't in the .cut; noon for now).
     /// </summary>
     public static CutsceneLocation Load(string folder, float[] offset, IReadOnlyList<CutRemoval> removals, float radius, float farRadius = 0,
-                                        int hour = 12)
+                                        int hour = 12, SparkIV.WinUI.Services.LoadLog? log = null)
     {
+      log?.Restart();
       var index = IndexOf(folder);
+      log?.Step("location: the maps' index", "read once per game while SparkIV runs");
       var origin = new Vector3(offset[0], offset[1], offset[2]);
       var location = new CutsceneLocation();
       // An interior placed: its objects, each placed in it as the interior is in the world (the interior's
@@ -315,6 +317,7 @@ namespace SparkIV.WinUI.Viewers
           }
         }
       }
+      log?.Step("location: choose its objects", (location.Outdoors ? "outside" : "inside") + ", " + near.Count + " placements");
       // Hidden by the scene: the same model within a metre of the place [REMOVE] gives (to a tenth of a metre there).
       var shown = near.Where(p => !removals.Any(r => r.Model.Equals(p.Name, StringComparison.OrdinalIgnoreCase) &&
                                                      Vector3.Distance(new Vector3(r.X, r.Y, r.Z), p.Position) < 1f)).ToList();
@@ -397,6 +400,12 @@ namespace SparkIV.WinUI.Viewers
           img.Close();
         }
       }
+      if (log != null)
+      {
+        log.Step("location: models", location.Models.Count + " models, " + location.Objects.Count + " objects (with the textures below)");
+        log.Add("  of which: textures", shared.TextureSeconds, shared.TexturesMade + " made");
+        log.Add("  of which: texture dictionaries", shared.DictionarySeconds, shared.Opened.Count + " opened");
+      }
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
       if (location.Outdoors)
       {
@@ -437,6 +446,7 @@ namespace SparkIV.WinUI.Viewers
           // Then the water is smooth.
         }
       }
+      log?.Step("location: water and sky", location.Water.Count / 4 + " water quads");
       return location;
     }
 

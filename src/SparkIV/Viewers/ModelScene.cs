@@ -166,7 +166,13 @@ namespace SparkIV.WinUI.Viewers
       {
         return cached;
       }
+      long started = System.Diagnostics.Stopwatch.GetTimestamp();
       var bytes = _rawTextures ? Raw(texture) : EncodePng(texture);
+      if (_shared != null)
+      {
+        _shared.TextureSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
+        _shared.TexturesMade++;
+      }
       if (_shared != null && source != EmbeddedSource)
       {
         _shared.Pngs[cacheKey] = bytes;
@@ -215,6 +221,11 @@ namespace SparkIV.WinUI.Viewers
     {
       internal Dictionary<string, TextureFile> Opened { get; } = new Dictionary<string, TextureFile>(StringComparer.OrdinalIgnoreCase);
       internal Dictionary<string, byte[]> Pngs { get; } = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+
+      /// <summary>For the load log: seconds spent making textures (and how many), and opening texture dictionaries.</summary>
+      public double TextureSeconds { get; internal set; }
+      public int TexturesMade { get; internal set; }
+      public double DictionarySeconds { get; internal set; }
 
       public void Dispose()
       {
@@ -289,6 +300,7 @@ namespace SparkIV.WinUI.Viewers
           _dictionaryNames.Add(name);
           return known;
         }
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
         var textures = new TextureFile();
         textures.Open(new MemoryStream(data));
         _dictionaries.Add(textures);
@@ -296,6 +308,7 @@ namespace SparkIV.WinUI.Viewers
         if (_shared != null)
         {
           _shared.Opened[name] = textures;
+          _shared.DictionarySeconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
         }
         return textures;
       }

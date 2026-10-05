@@ -1185,11 +1185,27 @@
     return null;
   }
 
-  // The texture the mirrored scene is drawn into (and its depth), made again at another size.
+  // The mirrored scene is drawn smoothed (4 samples a pixel, as the picture itself; without, its edges
+  // in the water were jagged) into a frame of its own, then resolved into the texture the water reads;
+  // made again at another size.
   let reflection = null;
   function reflectionTarget(w, h) {
     if (reflection && reflection.w === w && reflection.h === h) return reflection;
-    if (reflection) { gl.deleteFramebuffer(reflection.frame); gl.deleteTexture(reflection.texture); gl.deleteRenderbuffer(reflection.depth); }
+    if (reflection) {
+      gl.deleteFramebuffer(reflection.frame); gl.deleteTexture(reflection.texture); gl.deleteRenderbuffer(reflection.depth);
+      gl.deleteFramebuffer(reflection.drawFrame); gl.deleteRenderbuffer(reflection.drawColor); gl.deleteRenderbuffer(reflection.drawDepth);
+    }
+    const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
+    const drawColor = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, drawColor);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
+    const drawDepth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, drawDepth);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, w, h);
+    const drawFrame = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, drawFrame);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, drawColor);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, drawDepth);
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -1204,7 +1220,7 @@
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return reflection = { w, h, texture, depth, frame };
+    return reflection = { w, h, texture, depth, frame, drawFrame, drawColor, drawDepth };
   }
 
   function setMapLights(list, roomList) {
@@ -1824,7 +1840,7 @@
         gl.activeTexture(gl.TEXTURE7);
         gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, target.frame);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.drawFrame);
         gl.viewport(0, 0, target.w, target.h);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -1836,6 +1852,10 @@
         gl.uniform3fv(loc.eyeAt, mirroredEye);
         gl.uniform1f(loc.clipBelow, level - 0.05);
         drawMeshes(true, mirrored, mirroredEye);
+        // The samples resolved into the texture.
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.drawFrame);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.frame);
+        gl.blitFramebuffer(0, 0, target.w, target.h, 0, 0, target.w, target.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, w, h);
         gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);

@@ -254,6 +254,7 @@ namespace SparkIV.WinUI.Viewers
       {
         case "ready":
           _pageReady = true;
+          _document.Log?.Step("open the view, start the page (WebView2)");
           if (!root.GetProperty("webgl").GetBoolean())
           {
             Working.IsActive = false;
@@ -263,6 +264,16 @@ namespace SparkIV.WinUI.Viewers
           ShowSection(Math.Max(0, _section), _frame, play: false);
           break;
         case "loaded":
+          // For the load log: the page's textures of the cast, then (later) the location's, are there.
+          if (_document.Log is Services.LoadLog log && _pageWait != null)
+          {
+            log.Add(_pageWaitFor!, _pageWait.Elapsed.TotalSeconds);
+            _pageWait = null;
+            if (_pageWaitFor!.Contains("location") || !s_location || _document.Cut.Offset == null || _document.GameFolder == null)
+            {
+              log.Write();
+            }
+          }
           // The cast's textures are there; the spinner goes on while the location still loads (its scene
           // says "loaded" again when its textures are there).
           Working.IsActive = _locationLoading;
@@ -307,6 +318,11 @@ namespace SparkIV.WinUI.Viewers
         Working.IsActive = false;
       }
       _castVisible = visible;
+      if (_document.Log != null && _document.Location == null)
+      {
+        _pageWait = System.Diagnostics.Stopwatch.StartNew();
+        _pageWaitFor = "page: the cast's textures uploaded";
+      }
       Post(scene);
       Post(new { type = "options", textures = true, wireframe = false });
       PostBackground();
@@ -342,7 +358,8 @@ namespace SparkIV.WinUI.Viewers
       {
         var removals = _document.Cut.Removals;
         float drawDistance = _document.Cut.DrawDistance;
-        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, OutsideHour));
+        var log = _document.Log;
+        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, OutsideHour, log));
       }
       catch (Exception ex)
       {
@@ -373,6 +390,10 @@ namespace SparkIV.WinUI.Viewers
     // How far round the scene's origin the map is shown, in metres.
     private const float LocationRadius = 60;
 
+    // The load log: how long the page has been loading textures, and what for.
+    private System.Diagnostics.Stopwatch? _pageWait;
+    private string? _pageWaitFor;
+
     // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too).
     private const string OutsideWeather = "SUNNY";
     private const int OutsideHour = 12;
@@ -385,6 +406,12 @@ namespace SparkIV.WinUI.Viewers
       }
       // After the cast's ids (meshes and materials), well clear of them.
       var (scene, visible) = _document.Location.Message(key => Host + key, 100000, 100000);
+      if (_document.Log != null)
+      {
+        _document.Log.Step("location: made into the page's scene");
+        _pageWait = System.Diagnostics.Stopwatch.StartNew();
+        _pageWaitFor = "page: the location's textures uploaded";
+      }
       Post(scene);
       Post(_document.Location.LightsMessage());
       // Outside: the sun and sky of the game's time cycle (the .cut gives no time or weather: noon, sunny).

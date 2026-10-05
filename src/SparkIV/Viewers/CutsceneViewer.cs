@@ -33,6 +33,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>The map around the scene, once loaded (the view loads it after showing the cast).</summary>
     public CutsceneLocation? Location { get; set; }
 
+    /// <summary>How long the opening takes, step by step (SparkIV-load.log beside the exe); the view adds its own steps.</summary>
+    public LoadLog? Log { get; init; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
@@ -50,9 +53,11 @@ namespace SparkIV.WinUI.Viewers
   {
     public object Load(File file, byte[] data)
     {
+      var log = new LoadLog("cutscene " + file.Name);
       var cut = CutFile.Parse(System.Text.Encoding.ASCII.GetString(data));
       var sections = cut.Sections.Select(s => LoadWad(file, s.Anim)).ToList();
       var actors = CutsceneMessages.Actors(cut);
+      log.Step("read the .cut and its clips", cut.Sections.Count + " sections");
 
       // The game the cutscene is from: the one whose cuts.img has a file of this name and size (GTA IV's and
       // the episodes' names differ); the current game first.
@@ -61,7 +66,7 @@ namespace SparkIV.WinUI.Viewers
       {
         return new CutsceneDocument
         {
-          Cut = cut, Actors = actors, Sections = sections,
+          Cut = cut, Actors = actors, Sections = sections, Log = log,
           Error = "This cutscene isn't in the cuts.img of a game set in Settings, so there are no models to play it with.",
         };
       }
@@ -72,15 +77,21 @@ namespace SparkIV.WinUI.Viewers
         var keyUtil = install.KeyUtil;
         KeyStore.SetKeyLoader(() => keyUtil.FindKey(install.Folder));
       }
+      log.Step("find the game it is from", game.Name);
       CutsceneMessages.LoadActors(actors, CutsceneMessages.ModelArchives(game.Folder, Games.InstallFolder(Games.GtaIV, "Windows")),
                                   Path.Combine(game.Folder, "pc", "models", "cdimages", "playerped.rpf"), game.Player);
+      log.Step("cast: models and their textures", actors.Count + " models");
       CutsceneMessages.ApplyVariations(cut, actors, AppSettings.CutsceneSeeThroughLikeGame);
       CutsceneMessages.LoadProps(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
+      log.Step("cast: variations and props");
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
+      log.Step("sound", audioNote);
+      var texts = LoadTexts(game.Folder, cut);
+      log.Step("subtitles");
       return new CutsceneDocument
       {
-        Cut = cut, Actors = actors, Sections = sections, Texts = LoadTexts(game.Folder, cut), Game = game.Name, GameFolder = game.Folder,
-        AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote,
+        Cut = cut, Actors = actors, Sections = sections, Texts = texts, Game = game.Name, GameFolder = game.Folder,
+        AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote, Log = log,
       };
     }
 
