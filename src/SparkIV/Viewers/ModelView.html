@@ -1033,7 +1033,100 @@
     const horizon = mix(m.skyBottom, [0.85, 0.9, 0.91], 0.8);
     const zenith = mix(m.skyBottom, [0.72, 0.82, 0.88], 0.75);
     sky = { ...m, horizon, zenith };
+    if (m.clouds && !cloudTex) loadTexture(m.clouds, t => cloudTex = t);
+    if (m.cloudDetail && !cloudDetailTex) loadTexture(m.cloudDetail, t => cloudDetailTex = t);
     showSky();
+  }
+
+  // The sky outside, drawn behind everything: from the horizon's colour up to the top's, the sun, and the
+  // clouds as the game's gta_atmoscatt_clouds.fxc makes them: their noise (red: the shape) and its fine
+  // detail around 0.5 - density = noise + (detail - 0.5) x strength, amount = saturate(threshold x density -
+  // bias), cover = amount ^ thickness x saturate(amount x edge), fading out towards the horizon. The game sets
+  // its numbers while it runs (not in a file we read): these are guessed, matched to its picture of bc_3.
+  const SKY_VERTEX = `#version 300 es
+    in vec2 corner; out vec2 ndc;
+    void main() { ndc = corner; gl_Position = vec4(corner, 0.9999, 1.0); }`;
+  const SKY_FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec2 ndc; out vec4 outColor;
+    uniform mat4 inverseViewProjection; uniform vec3 eye;
+    uniform vec3 horizon; uniform vec3 zenith; uniform vec3 sunDir;
+    uniform bool hasClouds; uniform sampler2D clouds; uniform sampler2D detail;
+    const float CloudThreshold = 2.2, CloudBias = 0.6, CloudThickness = 1.4, CloudEdge = 3.0, DetailStrength = 0.45, CloudScale = 0.035;
+    void main() {
+      vec4 far = inverseViewProjection * vec4(ndc, 1.0, 1.0);
+      vec3 dir = normalize(far.xyz / far.w - eye);
+      float up = clamp(dir.z, 0.0, 1.0);
+      vec3 rgb = mix(horizon, zenith, sqrt(up));
+      // The sun: a small bright disc and a glow round it.
+      float toSun = max(dot(dir, sunDir), 0.0);
+      rgb += vec3(1.0, 0.97, 0.9) * (pow(toSun, 2000.0) * 2.0 + pow(toSun, 60.0) * 0.12);
+      if (hasClouds && dir.z > 0.005) {
+        vec2 uv = dir.xy / (dir.z + 0.05) * CloudScale;
+        float density = texture(clouds, uv).r + (texture(detail, uv * 4.0).r - 0.5) * DetailStrength;
+        float amount = clamp(CloudThreshold * density - CloudBias, 0.0, 1.0);
+        float cover = pow(amount, CloudThickness) * clamp(amount * CloudEdge, 0.0, 1.0);
+        float fade = clamp(dir.z * 4.0 - 0.05, 0.0, 1.0);
+        // Thin cloud greyish, thick cloud lit white; lighter towards the sun.
+        vec3 cloud = mix(vec3(0.72, 0.75, 0.8), vec3(0.96, 0.96, 0.95), amount) + vec3(0.08) * pow(toSun, 8.0);
+        rgb = mix(rgb, cloud, cover * fade);
+      }
+      outColor = vec4(rgb, 1.0);
+    }`;
+  let skyProgram = null, skyLoc = null, skyQuad = null, cloudTex = null, cloudDetailTex = null;
+  function drawSky(matrix, eyeAt) {
+    if (!skyProgram) {
+      skyProgram = createProgram(SKY_VERTEX, SKY_FRAGMENT);
+      skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "hasClouds", "clouds", "detail"]
+        .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
+      skyQuad = gl.createVertexArray();
+      gl.bindVertexArray(skyQuad);
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(skyLoc.corner);
+      gl.vertexAttribPointer(skyLoc.corner, 2, gl.FLOAT, false, 0, 0);
+    }
+    gl.useProgram(skyProgram);
+    gl.uniformMatrix4fv(skyLoc.inverseViewProjection, false, invert4(matrix));
+    gl.uniform3fv(skyLoc.eye, eyeAt);
+    gl.uniform3fv(skyLoc.horizon, sky.horizon);
+    gl.uniform3fv(skyLoc.zenith, sky.zenith);
+    gl.uniform3fv(skyLoc.sunDir, sky.sunDirection);
+    gl.uniform1i(skyLoc.hasClouds, !!cloudTex && !!cloudDetailTex);
+    // Units 8 and 9: not the meshes' (1 holds the bone matrices).
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, cloudDetailTex);
+    gl.uniform1i(skyLoc.clouds, 8); gl.uniform1i(skyLoc.detail, 9);
+    gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+    gl.bindVertexArray(skyQuad);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.useProgram(program);
+  }
+
+  // A column-major 4x4 matrix's inverse.
+  function invert4(m) {
+    const a = Array.from(m), inv = new Array(16);
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    const det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    return new Float32Array(inv.map(v => v / (det || 1)));
   }
 
   // Column-major 4x4 matrices: a times b.
@@ -1563,6 +1656,7 @@
       gl.useProgram(program);
       const lightsNow = sceneLightsNow();
       const vp = viewProjection();
+      if (sky && skyOn && backgroundReach > 0) drawSky(vp.matrix, vp.eye);
       gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
       gl.uniform3fv(loc.light, vp.light);
       gl.uniform3fv(loc.toEye, vp.toEye);
@@ -1688,8 +1782,10 @@
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         // p' = (x, y, 2 level - z): the view-projection times that mirror.
         const mirror = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 2 * level, 1]);
-        gl.uniformMatrix4fv(loc.viewProjection, false, multiply4(vp.matrix, mirror));
-        gl.uniform3fv(loc.eyeAt, [vp.eye[0], vp.eye[1], 2 * level - vp.eye[2]]);
+        const mirrored = multiply4(vp.matrix, mirror), mirroredEye = [vp.eye[0], vp.eye[1], 2 * level - vp.eye[2]];
+        drawSky(mirrored, mirroredEye);
+        gl.uniformMatrix4fv(loc.viewProjection, false, mirrored);
+        gl.uniform3fv(loc.eyeAt, mirroredEye);
         gl.uniform1f(loc.clipBelow, level - 0.05);
         drawMeshes(true);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);

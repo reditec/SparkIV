@@ -101,9 +101,10 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>
     /// The "sky" message for the page: the sun (where it is at the hour: rising in the east, at noon high in
     /// the south, setting in the west; the game's exact path isn't known), the light from around above and
-    /// below, the sky's colours, the haze (from where the fog starts to how far is drawn) and the water's colour.
+    /// below, the sky's colours, the haze (from where the fog starts to how far is drawn) and the water's colour;
+    /// the clouds' noise textures' addresses where there are clouds.
     /// </summary>
-    public object Message(float hour)
+    public object Message(float hour, string? clouds = null, string? cloudDetail = null)
     {
       double t = (hour - 6) / 12.0 * Math.PI;
       var sunDirection = Vector3.Normalize(new Vector3((float)-Math.Cos(t), -0.35f, (float)Math.Max(Math.Sin(t), 0.05)));
@@ -120,6 +121,8 @@ namespace SparkIV.WinUI.Viewers
         fogStart = FogStart,
         fogEnd = FarClip,
         water = new[] { Water.X, Water.Y, Water.Z, Water.W },
+        clouds,
+        cloudDetail,
       };
     }
   }

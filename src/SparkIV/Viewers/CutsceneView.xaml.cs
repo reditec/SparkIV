@@ -391,7 +391,8 @@ namespace SparkIV.WinUI.Viewers
       if (_document.Location.Outdoors && _document.GameFolder is string folder &&
           TimeCycle.Load(folder, OutsideWeather, OutsideHour) is TimeCycle cycle)
       {
-        Post(cycle.Message(OutsideHour));
+        Post(cycle.Message(OutsideHour, _document.Location.Clouds != null ? Host + CutsceneLocation.CloudKey : null,
+                           _document.Location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null));
       }
       _locationVisible = visible;
       PostVisible();

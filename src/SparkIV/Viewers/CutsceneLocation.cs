@@ -67,12 +67,27 @@ namespace SparkIV.WinUI.Viewers
     /// </summary>
     public byte[]? WaterSurface { get; private set; }
 
+    /// <summary>The clouds' noise textures' keys (see <see cref="Clouds"/>).</summary>
+    public const string CloudKey = "msky/clouds", CloudDetailKey = "msky/detail";
+
+    /// <summary>
+    /// Outside: the clouds' noise (pc\textures\skydome.wtd's baseperlinnoise3channel; the game's sky shader
+    /// gta_atmoscatt_clouds takes its red for the clouds' shape, its green for the higher ones') and their
+    /// fine detail (detailbump2), as ModelScene.Raw makes them; null without them.
+    /// </summary>
+    public byte[]? Clouds { get; private set; }
+    public byte[]? CloudDetail { get; private set; }
+
     /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
     public byte[]? Texture(string key)
     {
       if (key == WaterKey)
       {
         return WaterSurface;
+      }
+      if (key == CloudKey || key == CloudDetailKey)
+      {
+        return key == CloudKey ? Clouds : CloudDetail;
       }
       int slash = key.IndexOf('/');
       if (slash < 2 || key[0] != 'm' || !int.TryParse(key.AsSpan(1, slash - 1), out int model) || model < 0 || model >= Models.Count)
@@ -383,6 +398,25 @@ namespace SparkIV.WinUI.Viewers
         }
       }
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
+      if (location.Outdoors)
+      {
+        try
+        {
+          string sky = Path.Combine(folder, "pc", "textures", "skydome.wtd");
+          if (System.IO.File.Exists(sky))
+          {
+            using var textures = new RageLib.Textures.TextureFile();
+            textures.Open(sky);
+            RageLib.Textures.Texture? Named(string part) => textures.Textures.FirstOrDefault(x => x.Name.Contains(part, StringComparison.OrdinalIgnoreCase));
+            location.Clouds = Named("baseperlinnoise") is RageLib.Textures.Texture noise ? ModelScene.Raw(noise) : null;
+            location.CloudDetail = Named("detailbump2") is RageLib.Textures.Texture detail ? ModelScene.Raw(detail) : null;
+          }
+        }
+        catch (Exception)
+        {
+          // Then the sky has no clouds.
+        }
+      }
       if (location.Water.Count > 0)
       {
         try
