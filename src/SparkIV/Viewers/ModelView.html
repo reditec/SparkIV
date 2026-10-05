@@ -61,6 +61,15 @@
     // size on screen however near).
     uniform bool marker; uniform vec3 markerAt; uniform float markerScale;
     out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
+    // The sea near the camera (waterGrid): a grid of points 2 m apart over the window of the game's sea
+    // (dynamicMin, 200 m), lifted to the water's level and its height there (dynamicWater), faded out over
+    // the window's last 10 m as the game does (none at its edge, a tenth more for each metre in). maskPass:
+    // the water's quads drawn from above into the window (where the grid shows; see drawWaterMask).
+    uniform bool waterGrid; uniform bool maskPass; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform float gridLevel;
+    float seaEdge(vec2 inWindow) {
+      float metres = floor(min(min(inWindow.x, 200.0 - inWindow.x), min(inWindow.y, 200.0 - inWindow.y)) + 0.001);
+      return metres < 1.0 ? 0.0 : metres < 10.0 ? (metres + 1.0) * 0.1 : 1.0;
+    }
     mat4 bone(float i) {
       int b = int(i);
       return mat4(texelFetch(boneMatrices, ivec2(0, b), 0), texelFetch(boneMatrices, ivec2(1, b), 0),
@@ -75,7 +84,12 @@
         p = m * p;
         n = mat3(m) * n;
       }
+      if (waterGrid) {
+        vec2 at = dynamicMin + position.xy;
+        p = vec4(at, gridLevel + textureLod(dynamicWater, at / 200.0 + 0.005, 0.0).r * seaEdge(position.xy), 1.0);
+      }
       vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
+      if (maskPass) gl_Position = vec4((p.xy - dynamicMin) / 100.0 - 1.0, 0.0, 1.0);
       vUv = uvAnim ? vec2(dot(uvRow0, vec3(uv, 1.0)), dot(uvRow1, vec3(uv, 1.0))) : uv;
       vUv1 = layerUvA.xy; vUv2 = layerUvA.zw; vUv3 = layerUvB; vWeights = layerWeights; vColor = vertexColor; vAlpha = vertexAlpha;
     }`;
@@ -141,16 +155,24 @@
     uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
     // The scene mirrored in the water (drawn first into reflectTex, what lies below clipBelow left out).
     uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
-    uniform bool water; uniform bool waterWaves; uniform float waterTime; uniform vec3 waterColor; uniform vec3 skyColor; uniform vec3 skyTopColor;
-    // How bright the sky the water mirrors is against the sky shown (the game's reflection is of the scene
-    // in its light, brighter than the picture's sky after exposure; matched by eye to the game's bc_3).
-    const float WaterSky = 2.2;
-    // How steep the running waves on the water are (1: their slopes as listed with them).
-    const float WaveStrength = 1.0;
+    uniform bool water; uniform bool waterWaves; uniform sampler2D waterSim; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform vec3 waterColor;
+    // The game's sea round the camera (see the vertex shader): drawn as its grid where the water's quads are
+    // (waterMask), the flat quads left out there.
+    uniform bool waterGrid; uniform bool maskPass; uniform bool seaOn; uniform sampler2D waterMask; uniform vec3 skyColor; uniform vec3 skyTopColor;
+    // How bright the water's reflection is (water.fxc's waterReflectionScale, which the game sets while it
+    // runs; matched to its picture of bc_3).
+    const float WaterReflect = 2.6;
     out vec4 outColor;
     void main() {
+      if (maskPass) { outColor = vec4(1.0); return; }
       if (vPosition.z < clipBelow) discard;
       if (lines) { outColor = vec4(color, 1.0); return; }
+      if (water && seaOn) {
+        vec2 q = (vPosition.xy - dynamicMin) / 200.0;
+        bool inside = q.x > 0.0 && q.y > 0.0 && q.x < 1.0 && q.y < 1.0;
+        float isWater = inside ? texture(waterMask, q).r : 0.0;
+        if (waterGrid ? isWater < 0.5 : isWater >= 0.5) discard;
+      }
       vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
       if (layers > 1) {
         // Each layer over the ones below as far as it covers, masked by its own alpha (scrub in tufts over
@@ -229,61 +251,70 @@
         // As bright as the game's picture: the light's values (up to about 3) brought down softly.
         rgb = 1.0 - exp(-rgb);
         if (water) {
-          // As the game's water.fxc: little waves from its surface texture (blue and alpha: the slope), laid
-          // three times in different sizes over the world; its own colour (water.w x 0.5) and, by Fresnel
-          // ((1 - cos)^5 x 0.6 + 0.2), half the reflection - the sky's here (the game's mirrors the scene) -
-          // and the sun's glint.
-          vec3 wn = vec3(0.0, 0.0, 1.0);
-          if (waterWaves) {
-            // The game moves them by its water simulation (a height map round the camera, worked out each
-            // frame); here each size twice, drifting different ways with time (in metres a second), so the
-            // pattern changes as it goes instead of sliding as one.
-            vec2 p = vPosition.xy;
-            float t = waterTime;
-            vec2 slope = (texture(normalTex, (p + t * vec2(0.9, 0.4)) * 0.002).zw
-                        + texture(normalTex, (p + t * vec2(-0.5, 0.8)) * 0.002 + 0.37).zw - 1.0) * 0.0362
-                       + (texture(normalTex, (p + t * vec2(0.6, -0.35)) * 0.01).zw
-                        + texture(normalTex, (p + t * vec2(-0.4, -0.55)) * 0.01 + 0.61).zw - 1.0) * 0.181
-                       + (texture(normalTex, (p + t * vec2(0.3, 0.45)) * 0.0454).zw
-                        + texture(normalTex, (p + t * vec2(-0.45, 0.2)) * 0.0454 + 0.23).zw - 1.0) * 0.085;
-            // The texture is only the fine ripple; the waves seen in the game (a few metres long, running
-            // over the water all the time) are its simulation's. Here a few running waves of their own, each
-            // its slope (height a, length L: a x 2pi / L), at the speed deep water has (sqrt(g L / 2pi)).
-            const vec4 waveDir[5] = vec4[5](vec4(0.83, 0.56, 7.0, 0.11), vec4(0.31, 0.95, 4.3, 0.09),
-                                            vec4(0.97, -0.24, 11.0, 0.13), vec4(-0.42, 0.91, 2.6, 0.06),
-                                            vec4(0.64, -0.77, 3.4, 0.07));
-            // Fading out far off, where a wave would be smaller than a pixel (it would flicker).
-            float away = length(eyeAt - vPosition);
-            for (int i = 0; i < 5; i++) {
-              vec2 d = waveDir[i].xy;
-              float k = 6.2832 / waveDir[i].z;
-              float phase = k * dot(d, p) - sqrt(9.81 * k) * t;
-              float fade = clamp(1.0 - away / (waveDir[i].z * 40.0), 0.0, 1.0);
-              slope += d * cos(phase) * waveDir[i].w * WaveStrength * fade;
-            }
-            wn = normalize(vec3(slope, 1.0));
-          }
+          // As the game's water.fxc (its main pixel shader): the waves are its water simulation's (waterTex.fxc,
+          // run each frame - see waterSimStep), whose texture holds their slopes in blue and alpha, laid over
+          // the world three times: every 500 m beyond 50 m off, every 100 m everywhere, every 22 m within 50 m.
+          // The light takes their slopes as they are, the mirror four times steeper (the game's x and y of
+          // its slopes and its z and w).
           vec3 view = normalize(vPosition - eyeAt);
-          float cosine = abs(dot(view, wn));
+          vec3 lightNormal = vec3(0.0, 0.0, 1.0);
+          vec3 mirrorNormal = lightNormal;
+          if (waterWaves) {
+            vec2 p = vPosition.xy;
+            float distance2 = dot(eyeAt - vPosition, eyeAt - vPosition);
+            float near = max(1.0 - distance2 * 0.0004, 0.0);
+            vec2 big = texture(waterSim, p * 0.002).zw - 0.5;
+            vec2 middle = texture(waterSim, p * 0.01).zw - 0.5;
+            vec2 small = (texture(waterSim, p * 0.0454545).zw - 0.5) * near;
+            vec2 lightSlope = big * 0.0512 * (1.0 - near) + middle * 0.256 + small * 0.116363637;
+            vec2 mirrorSlope = big * 0.2048 * (1.0 - near) + middle * 1.024 + small * 0.465454549;
+            // The sea's swell (dynamicWaterStep) within 50 m, to both: the slope of its heights 2 m to either
+            // side (as the game's vertex normals), faded over its window's last 10 m as the heights are.
+            vec2 inWindow = p - dynamicMin;
+            float metres = floor(min(min(inWindow.x, 200.0 - inWindow.x), min(inWindow.y, 200.0 - inWindow.y)));
+            if (metres >= 1.0) {
+              float edge = metres < 10.0 ? (metres + 1.0) * 0.1 : 1.0;
+              vec2 at = p / 200.0 + 0.005;
+              vec2 swell = vec2(texture(dynamicWater, at - vec2(0.01, 0.0)).r - texture(dynamicWater, at + vec2(0.01, 0.0)).r,
+                                texture(dynamicWater, at - vec2(0.0, 0.01)).r - texture(dynamicWater, at + vec2(0.0, 0.01)).r) * edge * near;
+              lightSlope += swell;
+              mirrorSlope += swell;
+            }
+            lightNormal = normalize(vec3(lightSlope, 1.00001));
+            mirrorNormal = normalize(vec3(mirrorSlope, 1.00001));
+          }
+          float cosine = abs(dot(view, mirrorNormal));
           float fresnel = pow(1.0 - cosine, 5.0) * 0.6 + 0.2;
-          vec3 bounce = reflect(view, wn);
+          vec3 bounce = reflect(view, mirrorNormal);
           vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
           if (reflectOn) {
-            // The mirrored scene where it is, shifted by the waves as water.fxc does: by the slope x 0.5 /
-            // (0.03 x the distance), much near the camera, little far off - a fifth of it, the slope here being
-            // that of the running waves too, much steeper than the game's ripple; the sky where nothing was drawn.
-            float shift = min(0.2 * 0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 0.3);
-            vec4 scene = texture(reflectTex, clamp(gl_FragCoord.xy / screenSize + wn.xy * shift, 0.001, 0.999));
+            // The mirrored scene where it is, shifted by the waves as water.fxc does: their slope turned to the
+            // picture (across, up) times 0.5 / (0.03 x the distance), at most twice; the sky where nothing was drawn.
+            vec3 across = normalize(cross(view, vec3(0.0, 0.0, 1.0)) + 1e-5);
+            vec2 ahead = normalize(view.xy + 1e-5);
+            float shift = min(0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 2.0);
+            vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(mirrorNormal.xy, across.xy), dot(mirrorNormal.xy, ahead)) * shift;
+            vec4 scene = texture(reflectTex, clamp(at, 0.001, 0.999));
             mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
-          mirrored *= WaterSky;
           vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
-          rgb = waterColor * 0.5 + fresnel * 0.5 * (mirrored + glint);
+          // From the water's own grey-blue (looking down at it) to what it mirrors (the further off, the
+          // flatter the look, the more): the game's open sea far off nearly the sky's colour (bc_3: 159 201 222
+          // under a sky of 169 217 240), near a quiet grey-blue (100 112 115). (water.fxc adds waterColour x 0.5
+          // and half the reflection by Fresnel; its reflection's brightness unknown, the timecyc's water colour
+          // black here - matched to the game's picture instead.)
+          // As water.fxc: its own colour (timecyc's, sunny at noon black) x 0.5 and half the reflection by
+          // Fresnel, the reflection times waterReflectionScale (set at run time: WaterReflect, from the game's
+          // picture of bc_3: near and middle water, flat and steep looks); far off the haze makes it bright.
+          rgb = waterColor * 0.5 + 0.5 * fresnel * (mirrored * WaterReflect + glint);
+          // The sun on the waves (water.fxc: a twentieth of the sun's light by the light's slope).
+          rgb += sunColor * max(dot(lightNormal, sunDir), 0.0) * 0.05;
           a = 1.0;
         }
-        // The haze: from where the fog starts to how far is drawn, towards the sky's colour at the horizon.
+        // The haze: from where the fog starts to the end of what is drawn, wholly the haze's colour there
+        // (what lies beyond isn't drawn: see the meshes' culling).
         float far = clamp((length(eyeAt - vPosition) - hazeStart) / max(hazeEnd - hazeStart, 1.0), 0.0, 1.0);
-        rgb = mix(rgb, hazeColor, pow(far, 0.6) * 0.9);
+        rgb = mix(rgb, hazeColor, pow(far, 0.6));
       }
       else if (grade) {
         float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
@@ -356,7 +387,14 @@
       skyColor: gl.getUniformLocation(program, "skyColor"),
       skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
       waterWaves: gl.getUniformLocation(program, "waterWaves"),
-      waterTime: gl.getUniformLocation(program, "waterTime"),
+      waterSim: gl.getUniformLocation(program, "waterSim"),
+      dynamicWater: gl.getUniformLocation(program, "dynamicWater"),
+      dynamicMin: gl.getUniformLocation(program, "dynamicMin"),
+      waterGrid: gl.getUniformLocation(program, "waterGrid"),
+      maskPass: gl.getUniformLocation(program, "maskPass"),
+      seaOn: gl.getUniformLocation(program, "seaOn"),
+      waterMask: gl.getUniformLocation(program, "waterMask"),
+      gridLevel: gl.getUniformLocation(program, "gridLevel"),
       reflectOn: gl.getUniformLocation(program, "reflectOn"),
       reflectTex: gl.getUniformLocation(program, "reflectTex"),
       screenSize: gl.getUniformLocation(program, "screenSize"),
@@ -1120,7 +1158,7 @@
     precision highp float;
     in vec2 ndc; out vec4 outColor;
     uniform mat4 inverseViewProjection; uniform vec3 eye;
-    uniform vec3 horizon; uniform vec3 zenith; uniform vec3 sunDir;
+    uniform vec3 horizon; uniform vec3 zenith; uniform vec3 sunDir; uniform vec3 haze;
     uniform bool hasClouds; uniform sampler2D clouds; uniform sampler2D detail;
     const float CloudThreshold = 2.2, CloudBias = 0.6, CloudThickness = 1.4, CloudEdge = 3.0, DetailStrength = 0.45, CloudScale = 0.035;
     void main() {
@@ -1141,13 +1179,15 @@
         vec3 cloud = mix(vec3(0.72, 0.75, 0.8), vec3(0.96, 0.96, 0.95), amount) + vec3(0.08) * pow(toSun, 8.0);
         rgb = mix(rgb, cloud, cover * fade);
       }
+      // The haze low over the horizon (all of it there and below, as the far world and sea fade into it).
+      rgb = mix(rgb, haze, exp(-max(dir.z, 0.0) * 18.0));
       outColor = vec4(rgb, 1.0);
     }`;
   let skyProgram = null, skyLoc = null, skyQuad = null, cloudTex = null, cloudDetailTex = null;
   function drawSky(matrix, eyeAt) {
     if (!skyProgram) {
       skyProgram = createProgram(SKY_VERTEX, SKY_FRAGMENT);
-      skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "hasClouds", "clouds", "detail"]
+      skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "haze", "hasClouds", "clouds", "detail"]
         .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
       skyQuad = gl.createVertexArray();
       gl.bindVertexArray(skyQuad);
@@ -1163,6 +1203,7 @@
     gl.uniform3fv(skyLoc.horizon, sky.horizon);
     gl.uniform3fv(skyLoc.zenith, sky.zenith);
     gl.uniform3fv(skyLoc.sunDir, sky.sunDirection);
+    gl.uniform3fv(skyLoc.haze, hazeColour());
     gl.uniform1i(skyLoc.hasClouds, !!cloudTex && !!cloudDetailTex);
     // Units 8 and 9: not the meshes' (1 holds the bone matrices).
     gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
@@ -1174,6 +1215,280 @@
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
     gl.activeTexture(gl.TEXTURE0);
     gl.useProgram(program);
+  }
+
+  // The game's water simulation (GTAIV.exe sets it up at 0xAD61C0 and runs it each frame at 0xADC280; the
+  // step is waterTex.fxc's pixel shader): a 256 x 256 texture tiled over the world, its red the water's height,
+  // green its speed (both 0.5 at rest), blue and alpha its slope across and along (0.5 flat), stepped on each
+  // frame into a second one and back. Each point is pulled towards its eight neighbours (the corners by
+  // 0.707), a little back to rest, and kicked where a noise texture (random bytes, shifted at random each
+  // frame) is below 0.2 in blue, by its red; then speed and height on by Verlet. The game's numbers:
+  // waterSimParam = 1, 0.1, 0.01, 0.5, 0.5, 0.5, 1, the time step (the frame's milliseconds x 0.02); the kick
+  // (wind x 0.75 + 0.25) x 0.1, the wind the weather's (not known here: WaterWind). 8 bits a channel, as the
+  // game's render targets.
+  const SIM_VERTEX = `#version 300 es
+    in vec2 corner; out vec2 uv;
+    void main() { uv = corner * 0.5 + 0.5; gl_Position = vec4(corner, 0.0, 1.0); }`;
+  const SIM_FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec2 uv; out vec4 outColor;
+    uniform sampler2D state; uniform sampler2D noise;
+    uniform vec2 noiseShift; uniform float kick; uniform float step;
+    const float Texel = 1.0 / 256.0, Threshold = 0.2;
+    const float Pull = 1.0, Rest = 0.1, Accel = 0.5, Speed = 0.5, Kick = 0.5;
+    float h(vec2 at) { return texture(state, at).x; }
+    void main() {
+      vec4 n = texture(noise, uv + noiseShift);
+      float disturb = n.z - Threshold >= 0.0 ? 0.0 : (n.x * 2.0 - 1.0) * kick * Kick;
+      float left = h(uv + vec2(-Texel, 0.0)), right = h(uv + vec2(Texel, 0.0));
+      float down = h(uv + vec2(0.0, -Texel)), up = h(uv + vec2(0.0, Texel));
+      float corners = h(uv + vec2(-Texel, -Texel)) + h(uv + vec2(Texel, -Texel)) + h(uv + vec2(-Texel, Texel)) + h(uv + vec2(Texel, Texel));
+      float around = (left + right + down + up + corners * 0.707106769) * 0.146446615;
+      vec4 c = texture(state, uv);
+      float a = ((around - c.x) * Pull + (0.5 - c.x) * Rest + disturb) * Accel;
+      float speed = c.y + a * step;
+      float height = c.x + (c.y - 0.5) * Speed * step + a * step * step * 0.5;
+      outColor = vec4(height, speed, (right - left) * 0.5 + 0.5, (up - down) * 0.5 + 0.5);
+    }`;
+  // How windy (0 to 1) the water's simulation takes it (the game's comes from its weather; a light breeze).
+  const WaterWind = 0.25;
+  let waterSim = null;
+  function waterSimStep() {
+    const Size = 256;
+    if (!waterSim) {
+      const simProgram = createProgram(SIM_VERTEX, SIM_FRAGMENT);
+      const where = ["state", "noise", "noiseShift", "kick", "step"].reduce((o, n) => (o[n] = gl.getUniformLocation(simProgram, n), o), {});
+      const quad = gl.createVertexArray();
+      gl.bindVertexArray(quad);
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const corner = gl.getAttribLocation(simProgram, "corner");
+      gl.enableVertexAttribArray(corner);
+      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+      const rest = new Uint8Array(Size * Size * 4).fill(128);
+      const textures = [0, 1].map(() => {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, Size, Size, 0, gl.RGBA, gl.UNSIGNED_BYTE, rest);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        return t;
+      });
+      const frames = textures.map(t => {
+        const f = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        return f;
+      });
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      const noise = gl.createTexture();
+      const bytes = new Uint8Array(Size * Size * 4);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      gl.bindTexture(gl.TEXTURE_2D, noise);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, Size, Size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      // The step reads its texture point by point, the water's drawing smoothly (a sampler object for the step).
+      const points = gl.createSampler();
+      gl.samplerParameteri(points, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.samplerParameteri(points, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.samplerParameteri(points, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.samplerParameteri(points, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      waterSim = { simProgram, where, quad, textures, frames, noise, points, current: 0, last: 0 };
+    }
+    const now = performance.now();
+    // The frame's milliseconds x 0.02 (the first frame, and after a pause, as at 30 a second).
+    const ms = waterSim.last && now - waterSim.last < 200 ? now - waterSim.last : 33;
+    waterSim.last = now;
+    const next = 1 - waterSim.current;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, waterSim.frames[next]);
+    gl.viewport(0, 0, Size, Size);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+    gl.useProgram(waterSim.simProgram);
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[waterSim.current]); gl.bindSampler(10, waterSim.points);
+    gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, waterSim.noise);
+    gl.uniform1i(waterSim.where.state, 10); gl.uniform1i(waterSim.where.noise, 11);
+    gl.uniform2f(waterSim.where.noiseShift, Math.random(), Math.random());
+    gl.uniform1f(waterSim.where.kick, (WaterWind * 0.75 + 0.25) * 0.1);
+    gl.uniform1f(waterSim.where.step, Math.round(ms) * 0.02);
+    gl.bindVertexArray(waterSim.quad);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindSampler(10, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[next]);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.enable(gl.DEPTH_TEST);
+    waterSim.current = next;
+  }
+
+  // The game's sea (CWater::UpdateDynamicWaterTask, GTAIV.exe 0xADBA40, set up at 0xADB770; heights read at
+  // 0xAD5560): a grid of 100 x 100 points 2 m apart round the camera (its window snapped to even metres,
+  // following it; the points stay where they are in the world, those coming into the window start flat),
+  // each with a height and a speed. Each frame (dt its seconds, at most 0.13): 2000 kicks at random points,
+  // (random -1..1) x (wind x 0.7 + 0.23) x 10 x 0.5 x dt; a long swell pushed through it row by row,
+  // sin(y x 0.15 + (time in ms % 4000) x 2pi / 4000) x (wind x 0.55 + 0.18) x dt (42 m long, one every 4 s);
+  // every point pulled towards its neighbours (0.17 each side, 0.08 each corner) by 40 x dt and back to
+  // rest by 0.5 x dt, damped by 0.7 ^ dt; then heights on by speed x dt. The water's slope near the camera
+  // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
+  // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
+  const DynamicSize = 100, DynamicSpacing = 2;
+  let dynamicWater = null;
+  function dynamicWaterStep(eyeAt) {
+    const n = DynamicSize;
+    if (!dynamicWater) {
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, n, n, 0, gl.RED, gl.FLOAT, new Float32Array(n * n));
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      dynamicWater = { height: new Float32Array(n * n), speed: new Float32Array(n * n), texture, x0: null, y0: null, last: 0 };
+    }
+    const d = dynamicWater, h = d.height, v = d.speed;
+    const now = performance.now();
+    const dt = Math.min(d.last ? (now - d.last) / 1000 : 1 / 30, 0.13);
+    d.last = now;
+    // Index of a point by its world metres (even): (x / 2 + 100000) % 100, as the game.
+    const index = c => ((Math.trunc(c / 2) % n) + n) % n;
+    const evenDown = c => { const t = Math.trunc(c) - 100; return t - (t % 2); };
+    const x0 = evenDown(eyeAt[0]), y0 = evenDown(eyeAt[1]);
+    if (d.x0 === null || Math.abs(x0 - d.x0) > 200 || Math.abs(y0 - d.y0) > 200) {
+      h.fill(0); v.fill(0);
+    } else {
+      // The columns and rows that left the window (and come in at its other side) start flat.
+      for (let x = Math.min(d.x0, x0); x < Math.max(d.x0, x0); x += 2) { const i = index(x); for (let j = 0; j < n; j++) { h[i * n + j] = 0; v[i * n + j] = 0; } }
+      for (let y = Math.min(d.y0, y0); y < Math.max(d.y0, y0); y += 2) { const j = index(y); for (let i = 0; i < n; i++) { h[i * n + j] = 0; v[i * n + j] = 0; } }
+    }
+    d.x0 = x0; d.y0 = y0;
+    const ci = index(x0), cj = index(y0);
+    const kick = (WaterWind * 0.7 + 0.23) * 10, swell = (WaterWind * 0.55 + 0.18) * 1.0;
+    for (let k = 0; k < 2000; k++) {
+      const at = Math.floor(Math.random() * n) * n + Math.floor(Math.random() * n);
+      v[at] += (Math.random() * 2 - 1) * kick * 0.5 * dt;
+    }
+    const phase = (now % 4000) * (2 * Math.PI / 4000);
+    for (let r = 0; r < n; r++) {
+      const push = Math.sin((y0 + r * DynamicSpacing) * 0.15 + phase) * swell * dt;
+      const j = (cj + r) % n;
+      for (let i = 0; i < n; i++) v[i * n + j] += push;
+    }
+    const pull = 40 * dt, rest = 0.5 * dt, damp = Math.pow(0.7, dt);
+    for (let a = 0; a < n; a++) {
+      const i = (ci + a) % n, iBack = a === 0 ? i : (i + n - 1) % n, iOn = a === n - 1 ? i : (i + 1) % n;
+      for (let b = 0; b < n; b++) {
+        const j = (cj + b) % n, jBack = b === 0 ? j : (j + n - 1) % n, jOn = b === n - 1 ? j : (j + 1) % n;
+        const here = i * n + j;
+        const sides = h[iBack * n + j] + h[iOn * n + j] + h[i * n + jBack] + h[i * n + jOn];
+        const corners = h[iOn * n + jBack] + h[iOn * n + jOn] + h[iBack * n + jBack] + h[iBack * n + jOn];
+        v[here] = ((v[here] - (h[here] - (sides * 0.17 + corners * 0.08)) * pull) - h[here] * rest) * damp;
+      }
+    }
+    for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
+    // Into the texture: its column i, row j (x along, y up), so x / 200 and y / 200 find them.
+    const rows = new Float32Array(n * n);
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rows[j * n + i] = h[i * n + j];
+    gl.activeTexture(gl.TEXTURE12);
+    gl.bindTexture(gl.TEXTURE_2D, d.texture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, n, n, gl.RED, gl.FLOAT, rows);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  // The grid the sea near the camera is drawn as (the game's, 0xAD9130: its water quads cut into points 2 m
+  // apart within the window round the camera, each lifted by the sea's height there): 101 x 101 points over
+  // the 200 m window, made once (moved and lifted in the vertex shader).
+  let seaGrid = null;
+  function seaGridVao() {
+    if (seaGrid) return seaGrid;
+    const n = DynamicSize, points = new Float32Array((n + 1) * (n + 1) * 3), indices = new Uint16Array(n * n * 6);
+    for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) points.set([i * DynamicSpacing, j * DynamicSpacing, 0], (j * (n + 1) + i) * 3);
+    let k = 0;
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const a = j * (n + 1) + i, b = a + 1, c = a + n + 1, d = c + 1;
+      indices.set([a, b, c, b, d, c], k); k += 6;
+    }
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, points, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    const elements = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elements);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    seaGrid = { vao, count: indices.length };
+    return seaGrid;
+  }
+
+  // Where the water is within the sea's window: the water's quads drawn from above into a texture
+  // (512 x 512 over the 200 m), again whenever the window moves. The grid shows there, the quads don't.
+  let waterMask = null;
+  function drawWaterMask() {
+    const Size = 512;
+    if (!waterMask) {
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, Size, Size, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const frame = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      waterMask = { texture, frame, x0: null, y0: null };
+    }
+    if (waterMask.x0 === dynamicWater.x0 && waterMask.y0 === dynamicWater.y0) return;
+    waterMask.x0 = dynamicWater.x0; waterMask.y0 = dynamicWater.y0;
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, waterMask.frame);
+    gl.viewport(0, 0, Size, Size);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.BLEND);
+    gl.uniform1i(loc.maskPass, true);
+    gl.uniform1i(loc.skinned, false);
+    gl.uniform1i(loc.waterGrid, false);
+    for (const id of visible) {
+      const m = meshes.get(id);
+      const mat = m && materials.get(m.material);
+      if (!mat || !mat.water) continue;
+      gl.bindVertexArray(m.vao);
+      gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+    }
+    gl.uniform1i(loc.maskPass, false);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
+  // The haze outside: the sky's colour at the horizon (the game's at noon: no paler band), thick by
+  // the end of what the location has (its far objects, as far as the cutscene's draw distance) or the time
+  // cycle's far clip if nearer, so the world doesn't stop at an edge but fades into it.
+  let hazeReach = null;
+  function hazeEnd() {
+    if (hazeReach === null || hazeReach.meshes !== meshes.size) {
+      let farthest = 0;
+      for (const m of meshes.values()) {
+        if (!m.background || !m.min) continue;
+        const cx = (m.min[0] + m.max[0]) / 2, cy = (m.min[1] + m.max[1]) / 2;
+        farthest = Math.max(farthest, Math.hypot(cx, cy));
+      }
+      hazeReach = { meshes: meshes.size, end: farthest > 0 ? farthest : Infinity };
+    }
+    return Math.min(sky.fogEnd, hazeReach.end);
+  }
+  function hazeColour() {
+    return sky.horizon;
   }
 
   // A column-major 4x4 matrix's inverse.
@@ -1769,13 +2084,38 @@
         gl.uniform3fv(loc.sunColor, sky.sun);
         gl.uniform3fv(loc.ambientAbove, sky.ambientAbove);
         gl.uniform3fv(loc.ambientBelow, sky.ambientBelow);
-        gl.uniform3fv(loc.hazeColor, sky.horizon);
-        gl.uniform1f(loc.hazeStart, sky.fogStart);
-        gl.uniform1f(loc.hazeEnd, sky.fogEnd);
+        gl.uniform3fv(loc.hazeColor, hazeColour());
+        gl.uniform1f(loc.hazeStart, Math.min(sky.fogStart, hazeEnd() * 0.5));
+        gl.uniform1f(loc.hazeEnd, hazeEnd());
         gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3));
         gl.uniform3fv(loc.skyColor, sky.horizon);
         gl.uniform3fv(loc.skyTopColor, sky.zenith);
-        gl.uniform1f(loc.waterTime, (performance.now() / 1000) % 100000);
+        // The water's simulation one step on (its texture on unit 10, for the water's waves).
+        if (waterLevel() !== null) {
+          waterSimStep();
+          gl.viewport(0, 0, w, h);
+          gl.useProgram(program);
+          gl.activeTexture(gl.TEXTURE10);
+          gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[waterSim.current]);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.waterSim, 10);
+          // The sea's swell round the camera (its heights on unit 12).
+          dynamicWaterStep(vp.eye);
+          gl.activeTexture(gl.TEXTURE12);
+          gl.bindTexture(gl.TEXTURE_2D, dynamicWater.texture);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.dynamicWater, 12);
+          gl.uniform2f(loc.dynamicMin, dynamicWater.x0, dynamicWater.y0);
+          // Where the water is in its window (unit 13), the grid at the water's level.
+          drawWaterMask();
+          gl.viewport(0, 0, w, h);
+          gl.activeTexture(gl.TEXTURE13);
+          gl.bindTexture(gl.TEXTURE_2D, waterMask.texture);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.waterMask, 13);
+          gl.uniform1f(loc.gridLevel, waterLevel());
+        }
+        gl.uniform1i(loc.seaOn, waterLevel() !== null);
       }
       gl.uniform1i(loc.sceneLights, lightsNow.length);
       if (lightsNow.length) {
@@ -1805,6 +2145,8 @@
           const d = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]);
           if (m.radius / Math.max(d, 1e-3) < 0.01) return false;
         }
+        // Outside, nothing wholly in the haze (beyond its end it is all haze).
+        if (outside && Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]) - m.radius > hazeEnd()) return false;
         return true;
       };
       for (const pass of ["solid", "glass"]) {
@@ -1882,6 +2224,15 @@
           if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
           gl.bindVertexArray(m.vao);
           gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+          // The water near the camera: the sea's grid too, with the same material (the quads leave it out).
+          if (mat.water && outside && !reflecting && dynamicWater && waterMask) {
+            const grid = seaGridVao();
+            gl.uniform1i(loc.waterGrid, true);
+            gl.uniform1i(loc.hasNormal, false);
+            gl.bindVertexArray(grid.vao);
+            gl.drawElements(gl.TRIANGLES, grid.count, gl.UNSIGNED_SHORT, 0);
+            gl.uniform1i(loc.waterGrid, false);
+          }
         }
       }
       gl.disable(gl.BLEND);
