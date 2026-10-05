@@ -139,12 +139,15 @@
     // water the sky's colour the flatter it is seen.
     uniform bool outdoor; uniform vec3 sunDir; uniform vec3 sunColor; uniform vec3 ambientAbove; uniform vec3 ambientBelow;
     uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
+    // The scene mirrored in the water (drawn first into reflectTex, what lies below clipBelow left out).
+    uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
     uniform bool water; uniform bool waterWaves; uniform vec3 waterColor; uniform vec3 skyColor; uniform vec3 skyTopColor;
     // How bright the sky the water mirrors is against the sky shown (the game's reflection is of the scene
     // in its light, brighter than the picture's sky after exposure; matched by eye to the game's bc_3).
     const float WaterSky = 2.2;
     out vec4 outColor;
     void main() {
+      if (vPosition.z < clipBelow) discard;
       if (lines) { outColor = vec4(color, 1.0); return; }
       vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
       if (layers > 1) {
@@ -240,7 +243,13 @@
           float cosine = abs(dot(view, wn));
           float fresnel = pow(1.0 - cosine, 5.0) * 0.6 + 0.2;
           vec3 bounce = reflect(view, wn);
-          vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0)) * WaterSky;
+          vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
+          if (reflectOn) {
+            // The mirrored scene where it is, shifted a little by the waves; the sky where nothing was drawn.
+            vec4 scene = texture(reflectTex, gl_FragCoord.xy / screenSize + wn.xy * 0.08);
+            mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
+          }
+          mirrored *= WaterSky;
           vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
           rgb = waterColor * 0.5 + fresnel * 0.5 * (mirrored + glint);
           a = 1.0;
@@ -303,6 +312,10 @@
       skyColor: gl.getUniformLocation(program, "skyColor"),
       skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
       waterWaves: gl.getUniformLocation(program, "waterWaves"),
+      reflectOn: gl.getUniformLocation(program, "reflectOn"),
+      reflectTex: gl.getUniformLocation(program, "reflectTex"),
+      screenSize: gl.getUniformLocation(program, "screenSize"),
+      clipBelow: gl.getUniformLocation(program, "clipBelow"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
       dirtDecal: gl.getUniformLocation(program, "dirtDecal"),
       baked: gl.getUniformLocation(program, "baked"),
@@ -1007,14 +1020,69 @@
   // colours are its shader's, not the picture's (SUNNY: the top almost black, the bottom deep blue), so the
   // colours shown are taken from them lighter (a guess, matched by eye to the game's picture of bc_3).
   let sky = null;
+  // Whether the sky is shown (SparkIV: the location on); off, the background chosen is the view's and the
+  // actors are lit as without a location.
+  let skyOn = true;
+  function showSky() {
+    const css = c => "rgb(" + c.map(v => Math.round(Math.min(1, Math.max(0, v)) * 255)).join(",") + ")";
+    document.body.style.background = sky && skyOn ? "linear-gradient(" + css(sky.zenith) + ", " + css(sky.horizon) + " 55%, " + css(sky.horizon) + ")" : "";
+    draw();
+  }
   function setSky(m) {
     const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
     const horizon = mix(m.skyBottom, [0.85, 0.9, 0.91], 0.8);
     const zenith = mix(m.skyBottom, [0.72, 0.82, 0.88], 0.75);
     sky = { ...m, horizon, zenith };
-    const css = c => "rgb(" + c.map(v => Math.round(Math.min(1, Math.max(0, v)) * 255)).join(",") + ")";
-    document.body.style.background = "linear-gradient(" + css(zenith) + ", " + css(horizon) + " 55%, " + css(horizon) + ")";
-    draw();
+    showSky();
+  }
+
+  // Column-major 4x4 matrices: a times b.
+  function multiply4(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = s;
+    }
+    return out;
+  }
+
+  // The water's level: the height most of its quads lie at (the sea's, not a pond's up in a park); null without water.
+  let waterLevelCache;
+  function waterLevel() {
+    if (waterLevelCache !== undefined) return waterLevelCache;
+    for (const id of visible) {
+      const m = meshes.get(id), mat = m && materials.get(m.material);
+      if (!mat || !mat.water || !m.positions) continue;
+      const count = new Map();
+      for (let i = 2; i < m.positions.length; i += 3) { const z = Math.round(m.positions[i] * 10) / 10; count.set(z, (count.get(z) || 0) + 1); }
+      let best = null, most = 0;
+      for (const [z, n] of count) if (n > most) { most = n; best = z; }
+      return waterLevelCache = best;
+    }
+    return null;
+  }
+
+  // The texture the mirrored scene is drawn into (and its depth), made again at another size.
+  let reflection = null;
+  function reflectionTarget(w, h) {
+    if (reflection && reflection.w === w && reflection.h === h) return reflection;
+    if (reflection) { gl.deleteFramebuffer(reflection.frame); gl.deleteTexture(reflection.texture); gl.deleteRenderbuffer(reflection.depth); }
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const depth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    const frame = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return reflection = { w, h, texture, depth, frame };
   }
 
   function setMapLights(list, roomList) {
@@ -1499,7 +1567,7 @@
       gl.uniform3fv(loc.light, vp.light);
       gl.uniform3fv(loc.toEye, vp.toEye);
       gl.uniform3fv(loc.eyeAt, vp.eye);
-      const outside = !!sky && backgroundReach > 0;
+      const outside = !!sky && skyOn && backgroundReach > 0;
       gl.uniform1i(loc.grade, backgroundReach > 0 && !outside);
       gl.uniform1i(loc.outdoor, outside);
       if (outside) {
@@ -1524,7 +1592,8 @@
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
 
-      // Solid first, then glass see-through on top.
+      // The meshes, solid first, then glass see-through on top; mirrored (reflecting): not the water itself.
+      const drawMeshes = reflecting => {
       for (const pass of ["solid", "glass"]) {
         const glassPass = pass === "glass";
         if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
@@ -1534,6 +1603,7 @@
           if (!m) continue;
           const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
           if (mat.hidden) continue;
+          if (reflecting && mat.water) continue;
           // A cutscene's actor not in this section (of another part of the file): not there.
           if (m.actor && cast.size && !cast.has(m.actor)) continue;
           // Glass and what is see-through by its texture after everything solid, without writing depth.
@@ -1601,6 +1671,40 @@
       }
       gl.disable(gl.BLEND);
       gl.disable(gl.POLYGON_OFFSET_FILL);
+      };
+      // Outside with water: the scene mirrored in the water's level first, into a texture the water shows
+      // (as the game's water.fxc its ReflectTextureSampler), what is under the water left out.
+      const level = outside ? waterLevel() : null;
+      gl.uniform1i(loc.reflectOn, level !== null);
+      if (level !== null) {
+        const target = reflectionTarget(Math.max(1, w >> 1), Math.max(1, h >> 1));
+        // Not bound for reading while it is drawn into (WebGL refuses a feedback loop).
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.frame);
+        gl.viewport(0, 0, target.w, target.h);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        // p' = (x, y, 2 level - z): the view-projection times that mirror.
+        const mirror = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 2 * level, 1]);
+        gl.uniformMatrix4fv(loc.viewProjection, false, multiply4(vp.matrix, mirror));
+        gl.uniform3fv(loc.eyeAt, [vp.eye[0], vp.eye[1], 2 * level - vp.eye[2]]);
+        gl.uniform1f(loc.clipBelow, level - 0.05);
+        drawMeshes(true);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, w, h);
+        gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
+        gl.uniform3fv(loc.eyeAt, vp.eye);
+        gl.uniform1f(loc.clipBelow, -1e9);
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, target.texture);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(loc.reflectTex, 7);
+        gl.uniform2f(loc.screenSize, w, h);
+      }
+      gl.uniform1f(loc.clipBelow, -1e9);
+      drawMeshes(false);
       gl.depthMask(true);
 
       // A grid on the ground while the ped moves through the world, so the movement can be seen.
@@ -1787,6 +1891,7 @@
       else if (m.type === "sceneLights") { showSceneLights = m.on; draw(); }
       else if (m.type === "mapLights") { setMapLights(m.lights, m.rooms); }
       else if (m.type === "sky") { setSky(m); }
+      else if (m.type === "useSky") { skyOn = m.on; showSky(); }
       else if (m.type === "camera") { setFilmCamera(m.camera); }
       else if (m.type === "useCamera") { if (!m.on) leaveFilmCamera(); useFilmCamera = m.on; showFade(); draw(); }
       else if (m.type === "fade") { fade = { inEnd: m.inEnd, outStart: m.outStart, outEnd: m.outEnd }; showFade(); }

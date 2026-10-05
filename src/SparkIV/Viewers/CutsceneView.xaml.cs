@@ -309,7 +309,7 @@ namespace SparkIV.WinUI.Viewers
       _castVisible = visible;
       Post(scene);
       Post(new { type = "options", textures = true, wireframe = false });
-      Post(new { type = "background", name = BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
+      PostBackground();
       Post(new { type = "visible", ids = visible, fit = true });
       Post(new { type = "sceneLights", on = s_lights });
       // The sections play one after the other (here), not each over again.
@@ -395,6 +395,21 @@ namespace SparkIV.WinUI.Viewers
       }
       _locationVisible = visible;
       PostVisible();
+      PostBackground();
+    }
+
+    /// <summary>
+    /// The view's background: with the location shown the scene's own (outside the time cycle's sky, inside
+    /// black, as the game's world beyond the windows would be dark against the room), the choice greyed;
+    /// without it the one chosen.
+    /// </summary>
+    private void PostBackground()
+    {
+      bool own = s_location && _document.Location != null;
+      bool outside = own && _document.Location!.Outdoors;
+      BackgroundBox.IsEnabled = !own;
+      Post(new { type = "useSky", on = outside });
+      Post(new { type = "background", name = own ? (outside ? "" : "black") : BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
     }
 
     private void PostVisible() =>
@@ -489,6 +504,7 @@ namespace SparkIV.WinUI.Viewers
         LoadLocation();
       }
       PostVisible();
+      PostBackground();
     }
 
     #endregion
@@ -745,7 +761,7 @@ namespace SparkIV.WinUI.Viewers
         return;
       }
       s_background = Math.Max(0, BackgroundBox.SelectedIndex);
-      Post(new { type = "background", name = BackgroundNames[s_background] });
+      PostBackground();
     }
 
     private void Fit_Click(object sender, RoutedEventArgs e)
