@@ -28,6 +28,9 @@
             <SelectorBarItem Text="Backups" Tag="BackupsPage">
                 <SelectorBarItem.Icon><FontIcon Glyph="&#xE81C;" /></SelectorBarItem.Icon>
             </SelectorBarItem>
+            <SelectorBarItem Text="Cutscenes" Tag="CutscenesPage">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE714;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
         </SelectorBar>
 
         <InfoBar x:Name="Info" Grid.Row="2" Margin="16,0,16,8" IsOpen="False" Severity="Error" />
@@ -65,6 +68,31 @@
                                 <Button x:Name="ResetBackupButton" Content="Reset" Click="ResetBackupFolder_Click"
                                         ToolTipService.ToolTip="Use the default folder in Documents again" />
                             </StackPanel>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="CutscenesPage" Padding="24,8,24,24" Visibility="Collapsed">
+                <StackPanel Spacing="4">
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="How the cutscene player shows what a cutscene file asks for. Changes apply to cutscenes opened afterwards." />
+                    <Border Padding="16,12,16,12" CornerRadius="4" BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="See-through parts as in the game" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="The game decides once, from a person's first parts, whether it has see-through parts, and doesn't draw see-through parts a cutscene adds later (Bernie's headband in bc_1). Off: show every part the cutscene asks for." />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="SeeThroughSwitch" Grid.Column="1" VerticalAlignment="Center"
+                                          OnContent="" OffContent="" MinWidth="0" Toggled="SeeThroughSwitch_Toggled" />
                         </Grid>
                     </Border>
                 </StackPanel>

@@ -74,7 +74,8 @@ namespace SparkIV.WinUI.Viewers
       }
       CutsceneMessages.LoadActors(actors, CutsceneMessages.ModelArchives(game.Folder, Games.InstallFolder(Games.GtaIV, "Windows")),
                                   Path.Combine(game.Folder, "pc", "models", "cdimages", "playerped.rpf"), game.Player);
-      CutsceneMessages.ApplyVariations(cut, actors);
+      CutsceneMessages.ApplyVariations(cut, actors, AppSettings.CutsceneSeeThroughLikeGame);
+      CutsceneMessages.LoadProps(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
       return new CutsceneDocument
       {

@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using RageLib.Animation;
+using SparkIV.WinUI.Model;
 
 namespace SparkIV.WinUI.Viewers
 {
@@ -25,21 +26,48 @@ namespace SparkIV.WinUI.Viewers
 
     public List<string> Flags { get; } = new List<string>();
 
+    /// <summary>
+    /// Seconds the game fades in from black at the start: none with FLAG_DONT_FADE_IN. How long isn't in the
+    /// file (the game's own); assumed.
+    /// </summary>
+    public float FadeIn => HasFlag("DONT_FADE_IN") ? 0f : 0.5f;
+
+    /// <summary>
+    /// Seconds the game fades out to black at the end: LONG_FADE_OUT, SHORT_FADE_OUT, none with
+    /// FLAG_DONT_FADE_OUT, else its usual one. How long isn't in the file; assumed.
+    /// </summary>
+    public float FadeOut => HasFlag("DONT_FADE_OUT") ? 0f : HasFlag("LONG_FADE_OUT") ? 2f : HasFlag("SHORT_FADE_OUT") ? 0.5f : 1f;
+
+    // Flags come with and without FLAG_ (FLAG_USE_ONE_AUDIO, USE_ONE_AUDIO).
+    private bool HasFlag(string name) => Flags.Any(f => f.EndsWith(name, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The map objects hidden while the scene plays (the real door where the scene's own one moves).</summary>
     public List<CutRemoval> Removals { get; } = new List<CutRemoval>();
 
     /// <summary>Which variation of a ped's parts is worn (CS_Bernie_CraneT: uppr_001, its uppr_000 an empty stand-in).</summary>
     public List<CutVariation> Variations { get; } = new List<CutVariation>();
 
+    /// <summary>The props the peds wear (bc_3: Bernie's hat and glasses).</summary>
+    public List<CutProp> Props { get; } = new List<CutProp>();
+
     /// <summary>Where the scene is in the world (its origin), and its turn about Z in degrees.</summary>
     public float[]? Offset { get; private set; }
     public float Orient { get; private set; }
+
+    /// <summary>
+    /// How far the game draws the world during the scene, in metres: the largest of its [DRAW_DISTANCE] lines
+    /// ("time section metres": bc_3 800, later 200); 0 without any.
+    /// </summary>
+    public float DrawDistance { get; private set; }
 
     public static CutFile Parse(string text)
     {
       var cut = new CutFile();
       CutSection? section = null;
       string? block = null;
+      // The file's part: a .cut can be several scenes one after the other (gt06_ba: its own three sections,
+      // then gt6bap2's), each from its [CUTSCENE_HEADER] with its own variations, props and model numbers.
+      int part = -1;
       foreach (string raw in text.Split('\n'))
       {
         string line = raw.Trim();
@@ -49,7 +77,7 @@ namespace SparkIV.WinUI.Viewers
         }
         if (line == "[SECTION_START]")
         {
-          section = new CutSection();
+          section = new CutSection { Part = Math.Max(0, part) };
           cut.Sections.Add(section);
           continue;
         }
@@ -66,6 +94,10 @@ namespace SparkIV.WinUI.Viewers
         if (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal))
         {
           block = line.Substring(1, line.Length - 2);
+          if (block == "CUTSCENE_HEADER")
+          {
+            part++;
+          }
           continue;
         }
         var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
@@ -85,7 +117,11 @@ namespace SparkIV.WinUI.Viewers
             cut.Variations.Add(new CutVariation(int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture),
                                                 int.Parse(parts[2], CultureInfo.InvariantCulture),
                                                 parts.Length > 3 ? int.Parse(parts[3], CultureInfo.InvariantCulture) : 0,
-                                                parts.Length > 4 ? int.Parse(parts[4], CultureInfo.InvariantCulture) : 0));
+                                                parts.Length > 4 ? int.Parse(parts[4], CultureInfo.InvariantCulture) : 0, Math.Max(0, part)));
+            break;
+          case "PROPS" when parts.Length >= 3:
+            cut.Props.Add(new CutProp(int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture),
+                                      int.Parse(parts[2], CultureInfo.InvariantCulture), Math.Max(0, part)));
             break;
           case "MODELS" when section != null && parts.Length >= 3:
             section.Models.Add(new CutModel(int.Parse(parts[0], CultureInfo.InvariantCulture), parts[1], parts[2], parts.Length > 3 ? parts[3] : null));
@@ -114,6 +150,9 @@ namespace SparkIV.WinUI.Viewers
           case "LIGHTS" when section != null:
             section.Lights.Add(line);
             break;
+          case "DRAW_DISTANCE" when parts.Length >= 3:
+            cut.DrawDistance = Math.Max(cut.DrawDistance, F(parts[2]));
+            break;
           case "REMOVE" when parts.Length >= 4:
             var removal = new CutRemoval(F(parts[0]), F(parts[1]), F(parts[2]), parts[3]);
             if (!cut.Removals.Contains(removal)) cut.Removals.Add(removal);
@@ -126,6 +165,9 @@ namespace SparkIV.WinUI.Viewers
 
   public sealed class CutSection
   {
+    /// <summary>The part of the file it is in (0 for most; see <see cref="CutFile.Parse"/>).</summary>
+    public int Part { get; set; }
+
     public List<CutModel> Models { get; } = new List<CutModel>();
 
     /// <summary>The scene's own lights: their clips in the section's dictionary (spt_dr_0, fil_red_0).</summary>
@@ -152,12 +194,25 @@ namespace SparkIV.WinUI.Viewers
   /// 8 sus2, 9 teef, 10 face; the game's order of ped components), the variation of its model (uppr_001)
   /// and of its texture (a, b, c ...), from when (milliseconds; mostly 0, some change during the scene).
   /// </summary>
-  public sealed record CutVariation(int Model, int Component, int Drawable, int Texture, int Time)
+  public sealed record CutVariation(int Model, int Component, int Drawable, int Texture, int Time, int Part = 0)
   {
-    private static readonly string[] Components = { "head", "uppr", "lowr", "suse", "hand", "feet", "jack", "hair", "sus2", "teef", "face" };
+    internal static readonly string[] Components = { "head", "uppr", "lowr", "suse", "hand", "feet", "jack", "hair", "sus2", "teef", "face" };
 
     /// <summary>The part's name ("uppr"), or null for a number not known.</summary>
     public string? ComponentName => Component >= 0 && Component < Components.Length ? Components[Component] : null;
+  }
+
+  /// <summary>
+  /// A line of [PROPS]: a model wears a prop of its ped's prop dictionary (peds.ide's second column, in
+  /// pedprops.img): its number and where (the anchor: 0 head, 1 eyes ... <see cref="PedComponentNames.PropAnchors"/>);
+  /// bc_3's "2 0 0" and "2 0 1" are Bernie's p_head_000 (his hat) and p_eyes_000 (his glasses).
+  /// </summary>
+  public sealed record CutProp(int Model, int Index, int Anchor, int Part = 0)
+  {
+    /// <summary>The prop's part in the dictionary (p_head_000), or null for an anchor not known.</summary>
+    public string? PartName => Anchor >= 0 && Anchor < PedComponentNames.PropAnchors.Length
+      ? "p_" + PedComponentNames.PropAnchors[Anchor] + "_" + Index.ToString("000", CultureInfo.InvariantCulture)
+      : null;
   }
 
   /// <summary>A map object hidden during the scene: where it is in the world (to a tenth of a metre), its model.</summary>
@@ -175,9 +230,13 @@ namespace SparkIV.WinUI.Viewers
       Model = model;
     }
 
-    /// <summary>The model's number in the .cut, plus 1 (0 is no actor on the page).</summary>
+    /// <summary>Its number on the page, from 1 (0 is no actor there).</summary>
     public int Id { get; }
     public string Model { get; }
+
+    /// <summary>The part of the .cut it is in and its model number there (what its sections, variations and props name it by).</summary>
+    public int Part { get; init; }
+    public int Number { get; init; }
     public ModelScene? Scene { get; set; }
     public string? Source { get; set; }
     public string? Error { get; set; }
@@ -205,6 +264,12 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>A ped (placed in the scene by its clip's model tracks) rather than a prop (by its root bone).</summary>
     public bool IsPed => Scene != null && Scene.Bones.Count > 40;
+
+    /// <summary>The ped's prop dictionary (CS_Bernie_Crane_p), loaded when the cutscene has it wear some, or null.</summary>
+    public ModelScene? PropScene { get; set; }
+
+    /// <summary>The props worn: the part in <see cref="PropScene"/> and the skeleton's bone it is fixed to.</summary>
+    public List<(ModelPart Part, int Bone)> Props { get; } = new List<(ModelPart, int)>();
   }
 
   /// <summary>
@@ -219,6 +284,8 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A texture's key for the page: the actor's number, then its key in the actor's scene.</summary>
     public static string TextureKey(int actor, string key) => "a" + actor + "/" + key;
 
+    private const string PropKey = "p/";
+
     /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
     public static byte[]? Texture(IEnumerable<CutActor> actors, string key)
     {
@@ -228,7 +295,15 @@ namespace SparkIV.WinUI.Viewers
         return null;
       }
       var actor = actors.FirstOrDefault(a => a.Id == id);
-      return actor?.Scene != null && actor.Scene.Textures.TryGetValue(key.Substring(slash + 1), out var png) ? png : null;
+      string rest = key.Substring(slash + 1);
+      var scene = actor?.Scene;
+      // The props' textures under "p/".
+      if (rest.StartsWith(PropKey, StringComparison.Ordinal))
+      {
+        scene = actor?.PropScene;
+        rest = rest.Substring(PropKey.Length);
+      }
+      return scene != null && scene.Textures.TryGetValue(rest, out var png) ? png : null;
     }
 
     /// <summary>The "scene" message (all actors) and the meshes shown.</summary>
@@ -261,6 +336,8 @@ namespace SparkIV.WinUI.Viewers
           node["id"] = id;
           node["material"] = firstMaterial + mesh.Material;
           node["actor"] = actor.Id;
+          // Peds are lit as they are; props (a door) as the location is (no light of the camera).
+          node["ped"] = actor.IsPed;
           meshes.Add(node);
           if (shown.Contains(mesh.Id))
           {
@@ -268,8 +345,96 @@ namespace SparkIV.WinUI.Viewers
           }
         }
       }
+      // The props worn, after everyone's own meshes (their numbers stay as they were): each fixed to its
+      // bone, made where that bone is at rest (the dictionary's meshes are in the bone's own space: Bernie's
+      // glasses 3 to 8 cm before his head bone), so the page moves it with the bone as it moves the skin.
+      foreach (var actor in actors)
+      {
+        if (actor.Scene == null || actor.PropScene == null || actor.Props.Count == 0)
+        {
+          continue;
+        }
+        int firstMaterial = nextMaterial;
+        foreach (var material in actor.PropScene.Materials)
+        {
+          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => url(TextureKey(actor.Id, PropKey + key))))!.AsObject();
+          node["id"] = firstMaterial + material.Id;
+          materials.Add(node);
+          nextMaterial = Math.Max(nextMaterial, firstMaterial + material.Id + 1);
+        }
+        var rest = RestOf(actor.Scene.Bones);
+        foreach (var (part, bone) in actor.Props)
+        {
+          var ids = part.CheckedMeshes().ToHashSet();
+          foreach (var mesh in actor.PropScene.Meshes.Where(m => ids.Contains(m.Id)))
+          {
+            var node = JsonSerializer.SerializeToNode(mesh.ToMessage())!.AsObject();
+            int id = nextMesh++;
+            node["id"] = id;
+            node["material"] = firstMaterial + mesh.Material;
+            node["actor"] = actor.Id;
+            node["ped"] = true;
+            var place = rest[bone];
+            node["positions"] = Floats(Moved(mesh.Positions, place, true));
+            if (mesh.Normals != null)
+            {
+              node["normals"] = Floats(Moved(mesh.Normals, place, false));
+            }
+            int count = mesh.Positions.Length / 3;
+            var bones = new float[count * 4];
+            var weights = new float[count * 4];
+            for (int i = 0; i < count; i++)
+            {
+              bones[i * 4] = bone;
+              weights[i * 4] = 1;
+            }
+            node["skinBones"] = Floats(bones);
+            node["skinWeights"] = Floats(weights);
+            meshes.Add(node);
+            visible.Add(id);
+          }
+        }
+      }
       return (new JsonObject { ["type"] = "scene", ["materials"] = materials, ["meshes"] = meshes }, visible);
     }
+
+    // Where each bone of a skeleton is at rest, in the model: its place and turn on its parent's, as the page
+    // makes them (world = local × parent's world).
+    private static System.Numerics.Matrix4x4[] RestOf(IReadOnlyList<SceneBone> bones)
+    {
+      var byIndex = bones.ToDictionary(b => b.Index);
+      var world = new System.Numerics.Matrix4x4?[bones.Count == 0 ? 0 : bones.Max(b => b.Index) + 1];
+      System.Numerics.Matrix4x4 Of(int i)
+      {
+        if (world[i] is System.Numerics.Matrix4x4 known)
+        {
+          return known;
+        }
+        var b = byIndex[i];
+        var q = new System.Numerics.Quaternion(b.Quaternion[0], b.Quaternion[1], b.Quaternion[2], b.Quaternion[3]);
+        var local = System.Numerics.Matrix4x4.CreateFromQuaternion(q) * System.Numerics.Matrix4x4.CreateTranslation(b.X, b.Y, b.Z);
+        var m = b.Parent >= 0 && b.Parent != i && byIndex.ContainsKey(b.Parent) ? local * Of(b.Parent) : local;
+        world[i] = m;
+        return m;
+      }
+      return Enumerable.Range(0, world.Length).Select(i => byIndex.ContainsKey(i) ? Of(i) : System.Numerics.Matrix4x4.Identity).ToArray();
+    }
+
+    private static float[] Moved(float[] values, System.Numerics.Matrix4x4 place, bool isPoint)
+    {
+      var result = new float[values.Length];
+      for (int i = 0; i + 2 < values.Length; i += 3)
+      {
+        var v = new System.Numerics.Vector3(values[i], values[i + 1], values[i + 2]);
+        var t = isPoint ? System.Numerics.Vector3.Transform(v, place) : System.Numerics.Vector3.Normalize(System.Numerics.Vector3.TransformNormal(v, place));
+        result[i] = t.X;
+        result[i + 1] = t.Y;
+        result[i + 2] = t.Z;
+      }
+      return result;
+    }
+
+    private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
 
     /// <summary>A track's values at every frame (3 or 4 a frame).</summary>
     private static float[] SampledValues(Animation clip, AnimationTrack track, int components)
@@ -414,7 +579,7 @@ namespace SparkIV.WinUI.Viewers
       var cast = new List<object>();
       foreach (var model in section.Models)
       {
-        var actor = actors.FirstOrDefault(a => a.Id == model.Id + 1);
+        var actor = ActorOf(actors, section, model);
         var scene = actor?.Scene;
         if (actor == null || scene == null)
         {
@@ -716,11 +881,104 @@ namespace SparkIV.WinUI.Viewers
     }
 
     /// <summary>
+    /// Loads the props the cutscene's peds wear ([PROPS]): each ped's prop dictionary as peds.ide names it
+    /// (CS_Bernie_CraneC → CS_Bernie_Crane_p), from pedprops.img of the game's folder or GTA IV's, its
+    /// parts fixed to the bone of their anchor (a hat and glasses to the head).
+    /// </summary>
+    public static void LoadProps(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV)
+    {
+      if (cut.Props.Count == 0)
+      {
+        return;
+      }
+      var folders = new[] { folder, gtaIV }.Where(f => f != null).Select(f => f!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+      var dictionaryOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+      foreach (var f in folders)
+      {
+        string ide = Path.Combine(f, "common", "data", "peds.ide");
+        if (!System.IO.File.Exists(ide))
+        {
+          continue;
+        }
+        foreach (string raw in System.IO.File.ReadLines(ide))
+        {
+          var fields = raw.Split(',').Select(s => s.Trim()).ToArray();
+          if (fields.Length > 1 && fields[0].Length > 0 && !fields[0].StartsWith("#", StringComparison.Ordinal) && !fields[1].Equals("null", StringComparison.OrdinalIgnoreCase))
+          {
+            dictionaryOf.TryAdd(fields[0], fields[1]);
+          }
+        }
+      }
+      foreach (var actor in actors)
+      {
+        var worn = cut.Props.Where(p => p.Part == actor.Part && p.Model == actor.Number && p.PartName != null).ToList();
+        if (worn.Count == 0 || actor.Scene == null || !dictionaryOf.TryGetValue(actor.Model, out var dictionary))
+        {
+          continue;
+        }
+        foreach (var f in folders)
+        {
+          string path = Path.Combine(f, "pc", "models", "cdimages", "pedprops.img");
+          if (!System.IO.File.Exists(path))
+          {
+            continue;
+          }
+          var img = new RageLib.FileSystem.IMGFileSystem();
+          try
+          {
+            img.Open(path);
+            if (img.RootDirectory.FindByName(dictionary + ".wdd") is not RageLib.FileSystem.Common.File file)
+            {
+              continue;
+            }
+            // Loaded while the archive is open: its textures (CS_Bernie_Crane_p.wtd) are beside it.
+            actor.PropScene = ModelScene.Load(file, file.GetData());
+          }
+          catch (Exception)
+          {
+            continue;
+          }
+          finally
+          {
+            img.Close();
+          }
+          break;
+        }
+        if (actor.PropScene == null)
+        {
+          continue;
+        }
+        foreach (var prop in worn)
+        {
+          var part = actor.PropScene.Root.Children.FirstOrDefault(p => p.Name.Equals(prop.PartName, StringComparison.OrdinalIgnoreCase));
+          var bone = actor.Scene.Bones.FirstOrDefault(b => b.Name.Equals(BoneOfAnchor(prop.Anchor), StringComparison.OrdinalIgnoreCase));
+          if (part != null && bone != null)
+          {
+            actor.Props.Add((part, bone.Index));
+          }
+        }
+      }
+    }
+
+    // The bone a prop's anchor is on: the head (hats, glasses, earrings), a hand (and its wrist: watches),
+    // the pelvis, a foot.
+    private static string BoneOfAnchor(int anchor) => anchor switch
+    {
+      4 or 6 => "Char_L_Hand",
+      5 or 7 => "Char_R_Hand",
+      8 => "Char_Pelvis",
+      9 => "Char_L_Foot",
+      10 => "Char_R_Foot",
+      _ => "Char_Head",
+    };
+
+    /// <summary>
     /// Shows the variation of each ped's parts the cutscene asks for (the first one, where a part changes
     /// during the scene): of the parts of that kind (uppr_000_u, uppr_001_u) only the one of that number.
     /// The texture variations are applied when the models load (<see cref="CutActor.TextureVariations"/>).
     /// </summary>
-    public static void ApplyVariations(CutFile cut, IEnumerable<CutActor> actors)
+    /// <param name="likeGame">Leave out the see-through parts the game doesn't draw (<see cref="HideUnflaggedSeeThrough"/>).</param>
+    public static void ApplyVariations(CutFile cut, IEnumerable<CutActor> actors, bool likeGame = true)
     {
       foreach (var actor in actors)
       {
@@ -729,7 +987,7 @@ namespace SparkIV.WinUI.Viewers
         {
           continue;
         }
-        var wanted = cut.Variations.Where(v => v.Model == actor.Id - 1 && v.ComponentName != null)
+        var wanted = cut.Variations.Where(v => v.Part == actor.Part && v.Model == actor.Number && v.ComponentName != null)
                                    .GroupBy(v => v.Component)
                                    .Select(g => g.OrderBy(v => v.Time).First());
         foreach (var variation in wanted)
@@ -746,24 +1004,72 @@ namespace SparkIV.WinUI.Viewers
             part.IsChecked = ReferenceEquals(part, chosen);
           }
         }
+        if (likeGame && !actor.Model.Equals("player", StringComparison.OrdinalIgnoreCase))
+        {
+          HideUnflaggedSeeThrough(actor.Scene!, root);
+        }
       }
     }
 
-    /// <summary>The actors of all sections: one per model number, in the order of the first section.</summary>
+    /// <summary>
+    /// What the game leaves out of a cutscene ped: whether a ped has see-through parts (draw buckets 1 and 3,
+    /// its flags 0x1000 and 0x4000) is worked out once, from the parts it is made with: number 000 of each
+    /// (CPed_InitVariations, PedVariation_UpdateFlags). The cutscene's variations change the parts without
+    /// working it out again (PedVariation_Set), and the game doesn't draw a ped's see-through geometry
+    /// without the flag. So a part a variation adds shows nothing of those buckets unless a part 000 had
+    /// them too: Bernie's headband in bc_1 (hair_001, all bucket 3, where his hair_000 is opaque). Found in
+    /// GTAIV.exe and checked in the game (setting the flag by hand brings the headband).
+    /// </summary>
+    private static void HideUnflaggedSeeThrough(ModelScene scene, ModelPart root)
+    {
+      IEnumerable<int> Buckets(ModelPart part) =>
+        AllMeshes(part).Select(id => scene.Meshes[id].Material)
+                       .Where(m => m >= 0 && m < scene.Materials.Count)
+                       .Select(m => scene.Materials[m].DrawBucket);
+      // The ped's flags: the buckets of its parts 000 (the high level of detail, as the game asks).
+      var start = root.Children.Where(p => CutVariation.Components.Any(c => p.Name.StartsWith(c + "_000_", StringComparison.OrdinalIgnoreCase)))
+                               .SelectMany(p => Buckets(HighDetail(p)))
+                               .ToHashSet();
+      foreach (int bucket in new[] { 1, 3 }.Where(b => !start.Contains(b)))
+      {
+        foreach (var part in root.Children.Where(p => p.IsChecked != false && !p.Name.Contains("_000_") &&
+                                                      CutVariation.Components.Any(c => p.Name.StartsWith(c + "_", StringComparison.OrdinalIgnoreCase))))
+        {
+          foreach (var mesh in MeshParts(part).Where(m => scene.Materials.ElementAtOrDefault(scene.Meshes[m.MeshId].Material)?.DrawBucket == bucket))
+          {
+            mesh.IsChecked = false;
+          }
+        }
+      }
+
+      static ModelPart HighDetail(ModelPart part) => part.Children.FirstOrDefault(c => c.Lod == 0) ?? part;
+      static IEnumerable<ModelPart> MeshParts(ModelPart part) =>
+        part.MeshId >= 0 ? new[] { part } : part.Children.SelectMany(MeshParts);
+      static IEnumerable<int> AllMeshes(ModelPart part) => MeshParts(part).Select(m => m.MeshId);
+    }
+
+    /// <summary>
+    /// The actors of all sections: one per model number of each part of the file (a part numbers its models
+    /// itself: gt06_ba's first part has CS_VicGirl as 2 and CS_Vic as 3, its second the other way round), in
+    /// the order they come.
+    /// </summary>
     public static List<CutActor> Actors(CutFile cut)
     {
       var actors = new List<CutActor>();
-      foreach (var model in cut.Sections.SelectMany(s => s.Models))
+      foreach (var section in cut.Sections)
       {
-        if (!actors.Any(a => a.Id == model.Id + 1))
+        foreach (var model in section.Models)
         {
-          actors.Add(new CutActor(model.Id + 1, model.Model));
+          if (!actors.Any(a => a.Part == section.Part && a.Number == model.Id))
+          {
+            actors.Add(new CutActor(actors.Count + 1, model.Model) { Part = section.Part, Number = model.Id });
+          }
         }
       }
       // The texture variations asked for (the first of a part, where it changes during the scene).
       foreach (var actor in actors)
       {
-        foreach (var variation in cut.Variations.Where(v => v.Model == actor.Id - 1 && v.ComponentName != null).GroupBy(v => v.Component).Select(g => g.OrderBy(v => v.Time).First()))
+        foreach (var variation in cut.Variations.Where(v => v.Part == actor.Part && v.Model == actor.Number && v.ComponentName != null).GroupBy(v => v.Component).Select(g => g.OrderBy(v => v.Time).First()))
         {
           if (variation.Texture > 0)
           {
@@ -773,5 +1079,9 @@ namespace SparkIV.WinUI.Viewers
       }
       return actors;
     }
+
+    /// <summary>The actor a section's model is (by the section's part and the model's number there), or null.</summary>
+    public static CutActor? ActorOf(IEnumerable<CutActor> actors, CutSection section, CutModel model) =>
+      actors.FirstOrDefault(a => a.Part == section.Part && a.Number == model.Id);
   }
 }

@@ -72,6 +72,7 @@ namespace SparkIV.WinUI.Viewers
     private static bool s_subtitles = true;
     private static bool s_lights = true;
     private static bool s_location = true;
+    private static double s_volume = 100;
 
     private readonly ViewerContext _context;
     private readonly CutsceneDocument _document;
@@ -137,6 +138,10 @@ namespace SparkIV.WinUI.Viewers
       SubtitlesButton.IsChecked = s_subtitles;
       LightsButton.IsChecked = s_lights;
       LocationButton.IsChecked = s_location;
+      VolumeSlider.Value = s_volume;
+      // Without the scene's sound there is nothing to set.
+      VolumePanel.Visibility = _audio != null ? Visibility.Visible : Visibility.Collapsed;
+      ShowVolume();
       LocationButton.IsEnabled = document.GameFolder != null && document.Cut.Offset != null;
       Message.Text = document.Error ?? "";
       Message.Visibility = document.Error != null ? Visibility.Visible : Visibility.Collapsed;
@@ -336,7 +341,8 @@ namespace SparkIV.WinUI.Viewers
       try
       {
         var removals = _document.Cut.Removals;
-        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius));
+        float drawDistance = _document.Cut.DrawDistance;
+        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, OutsideHour));
       }
       catch (Exception ex)
       {
@@ -356,6 +362,8 @@ namespace SparkIV.WinUI.Viewers
       }
       var location = _document.Location;
       _locationNote = "location: " + location.Objects.Count + " objects within " + LocationRadius + " m"
+                      + (location.Far > 0 ? ", " + location.Far + " far ones up to " + _document.Cut.DrawDistance.ToString("0") + " m" : "")
+                      + (location.Outdoors ? "" : ", inside")
                       + (location.Hidden > 0 ? ", " + location.Hidden + " hidden by the scene" : "")
                       + (location.Missing > 0 ? ", " + location.Missing + " not found" : "");
       ShowStatus();
@@ -364,6 +372,10 @@ namespace SparkIV.WinUI.Viewers
 
     // How far round the scene's origin the map is shown, in metres.
     private const float LocationRadius = 60;
+
+    // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too).
+    private const string OutsideWeather = "SUNNY";
+    private const int OutsideHour = 12;
 
     private void SendLocation()
     {
@@ -374,6 +386,13 @@ namespace SparkIV.WinUI.Viewers
       // After the cast's ids (meshes and materials), well clear of them.
       var (scene, visible) = _document.Location.Message(key => Host + key, 100000, 100000);
       Post(scene);
+      Post(_document.Location.LightsMessage());
+      // Outside: the sun and sky of the game's time cycle (the .cut gives no time or weather: noon, sunny).
+      if (_document.Location.Outdoors && _document.GameFolder is string folder &&
+          TimeCycle.Load(folder, OutsideWeather, OutsideHour) is TimeCycle cycle)
+      {
+        Post(cycle.Message(OutsideHour));
+      }
       _locationVisible = visible;
       PostVisible();
     }
@@ -404,18 +423,32 @@ namespace SparkIV.WinUI.Viewers
         _settingSection = false;
       }
 
-      Post(timeline);
-      Post(cast);
-      Post(camera ?? new { type = "camera", camera = (object?)null });
-      Post(new { type = "useCamera", on = s_camera && camera != null });
+      // All in one message: the page draws once, the section complete (one by one, a picture came between
+      // them: the new clip with the old cast and camera, a frame that tore the cutscene).
+      var messages = new List<object>
+      {
+        timeline,
+        cast,
+        camera ?? new { type = "camera", camera = (object?)null },
+        new { type = "useCamera", on = s_camera && camera != null },
+        // The fade in at the start of the first section, out at the end of the last (in the section's frames).
+        new
+        {
+          type = "fade",
+          inEnd = index == 0 ? cut.FadeIn * _fps : 0,
+          outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, _frames - 1 - cut.FadeOut * _fps) : -1,
+          outEnd = _frames - 1,
+        },
+      };
       if (_frame > 0)
       {
-        Post(new { type = "seek", frame = _frame });
+        messages.Add(new { type = "seek", frame = _frame });
       }
       if (play)
       {
-        Post(new { type = "play", on = true });
+        messages.Add(new { type = "play", on = true });
       }
+      Post(new { type = "batch", messages });
       ShowFrame();
 
       var parts = new List<string>
@@ -667,18 +700,36 @@ namespace SparkIV.WinUI.Viewers
 
     private void Camera_Click(object sender, RoutedEventArgs e)
     {
+      // Off: the free view goes on from where the cutscene's camera is (the page does that).
       s_camera = CameraButton.IsChecked == true;
       Post(new { type = "useCamera", on = s_camera });
-      if (!s_camera)
-      {
-        Post(new { type = "fit" });
-      }
     }
 
     private void Lights_Click(object sender, RoutedEventArgs e)
     {
       s_lights = LightsButton.IsChecked == true;
       Post(new { type = "sceneLights", on = s_lights });
+    }
+
+    private void VolumeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+      if (!_ready)
+      {
+        return;
+      }
+      s_volume = e.NewValue;
+      ShowVolume();
+    }
+
+    /// <summary>The sound at the volume set (0 to 100 %), and the speaker's glyph and tooltip to match.</summary>
+    private void ShowVolume()
+    {
+      if (_audio != null)
+      {
+        _audio.Volume = (float)(s_volume / 100);
+      }
+      VolumeGlyph.Glyph = s_volume <= 0 ? "\uE74F" : s_volume < 34 ? "\uE993" : s_volume < 67 ? "\uE994" : "\uE995";
+      ToolTipService.SetToolTip(VolumeSlider, "Volume: " + (int)s_volume + " %");
     }
 
     private void Subtitles_Click(object sender, RoutedEventArgs e)

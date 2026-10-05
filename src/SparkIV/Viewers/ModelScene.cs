@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -156,6 +156,76 @@ namespace SparkIV.WinUI.Viewers
       return null;
     }
 
+    /// <summary>
+    /// A texture as PNG; one from a dictionary (not the model's own) made once per <see cref="SharedTextures"/>.
+    /// </summary>
+    private byte[] Png(Texture texture, string source)
+    {
+      string cacheKey = source + "|" + texture.Name + (_rawTextures ? "|raw" : "");
+      if (_shared != null && source != EmbeddedSource && _shared.Pngs.TryGetValue(cacheKey, out var cached))
+      {
+        return cached;
+      }
+      var bytes = _rawTextures ? Raw(texture) : EncodePng(texture);
+      if (_shared != null && source != EmbeddedSource)
+      {
+        _shared.Pngs[cacheKey] = bytes;
+      }
+      return bytes;
+    }
+
+    private SharedTextures? _shared;
+
+    // The textures as the game has them (Raw), not as PNG: see Load's rawTextures.
+    private bool _rawTextures;
+
+    private static byte[] EncodePng(Texture texture)
+    {
+      using var image = texture.Decode();
+      using var png = new MemoryStream();
+      image.Save(png, ImageFormat.Png);
+      return png.ToArray();
+    }
+
+    /// <summary>
+    /// A texture as the game has it, for the page to give the graphics card as it is (DXT1, 3, 5 compressed,
+    /// with its smaller levels; A8R8G8B8 and L8 as they are): "SXT1", then as 32-bit numbers its format
+    /// (0 DXT1, 1 DXT3, 2 DXT5, 3 A8R8G8B8, 4 L8), width, height and levels, then the data of all levels.
+    /// No decoding and PNG making (about half of a cutscene's location's loading, bc_3: 5 of 10 s).
+    /// </summary>
+    public static byte[] Raw(Texture texture)
+    {
+      var data = texture.TextureData;
+      var bytes = new byte[20 + data.Length];
+      bytes[0] = (byte)'S'; bytes[1] = (byte)'X'; bytes[2] = (byte)'T'; bytes[3] = (byte)'1';
+      BitConverter.GetBytes((uint)texture.TextureType).CopyTo(bytes, 4);
+      BitConverter.GetBytes(texture.Width).CopyTo(bytes, 8);
+      BitConverter.GetBytes(texture.Height).CopyTo(bytes, 12);
+      BitConverter.GetBytes((uint)Math.Max(1, texture.Levels)).CopyTo(bytes, 16);
+      data.CopyTo(bytes, 20);
+      return bytes;
+    }
+
+    /// <summary>
+    /// What the models loaded with it share (a location's: its far versions use their district's few
+    /// dictionaries): the texture dictionaries opened, by name, and the textures made into PNG, by
+    /// dictionary and name. Disposed when the last model is loaded.
+    /// </summary>
+    public sealed class SharedTextures : IDisposable
+    {
+      internal Dictionary<string, TextureFile> Opened { get; } = new Dictionary<string, TextureFile>(StringComparer.OrdinalIgnoreCase);
+      internal Dictionary<string, byte[]> Pngs { get; } = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+
+      public void Dispose()
+      {
+        foreach (var textures in Opened.Values)
+        {
+          textures.Dispose();
+        }
+        Opened.Clear();
+      }
+    }
+
     private Texture? FindInDictionaries(string name, out string source)
     {
       for (int i = 0; i < _dictionaries.Count; i++)
@@ -178,6 +248,14 @@ namespace SparkIV.WinUI.Viewers
       if (_opened.Contains(file.Name))
       {
         return null;  // Already among the dictionaries.
+      }
+      if (_shared != null && _shared.Opened.TryGetValue(file.Name, out var known))
+      {
+        _opened.Add(file.Name);
+        _dictionaries.Add(known);
+        _dictionaryNames.Add(file.Name);
+        SourceFiles.Add(file);
+        return known;
       }
       byte[] data;
       try
@@ -205,10 +283,20 @@ namespace SparkIV.WinUI.Viewers
       }
       try
       {
+        if (_shared != null && _shared.Opened.TryGetValue(name, out var known))
+        {
+          _dictionaries.Add(known);
+          _dictionaryNames.Add(name);
+          return known;
+        }
         var textures = new TextureFile();
         textures.Open(new MemoryStream(data));
         _dictionaries.Add(textures);
         _dictionaryNames.Add(name);
+        if (_shared != null)
+        {
+          _shared.Opened[name] = textures;
+        }
         return textures;
       }
       catch (Exception)
@@ -283,13 +371,18 @@ namespace SparkIV.WinUI.Viewers
     /// <paramref name="preferTexture"/>: the name of a texture to use in place of one a material names, when
     /// it is there (a ped's texture variation), or null. <paramref name="vertexColors"/>: every mesh keeps
     /// its vertex colours (map objects: the light baked into them), not only terrain and dirt decals.
+    /// <paramref name="onlyModel"/>: of a dictionary (.wdd), only the model of that name hash (a map object's far
+    /// version among its district's, lod_bxe2_01_grp). <paramref name="shared"/>: the dictionaries and textures
+    /// shared with the other models loaded with it (a location's), kept open by it. <paramref name="rawTextures"/>:
+    /// the textures for the page as the game has them (<see cref="Raw"/>), not PNG (the cutscenes' locations).
     /// </summary>
     public static ModelScene Load(File file, byte[] data, Func<string, byte[]?>? moreDictionaries = null, Func<string, string?>? preferTexture = null,
-                                  bool vertexColors = false)
+                                  bool vertexColors = false, uint? onlyModel = null, SharedTextures? shared = null,
+                                  bool rawTextures = false)
     {
       string extension = Path.GetExtension(file.Name).ToLowerInvariant();
       var dictionaries = new List<TextureFile>();
-      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory, _preferTexture = preferTexture, _vertexColors = vertexColors };
+      var scene = new ModelScene(file.Name, dictionaries) { _folder = file.ParentDirectory, _preferTexture = preferTexture, _vertexColors = vertexColors, _shared = shared, _rawTextures = rawTextures };
       scene.SourceFiles.Add(file);
       // A ped part on its own (feet_000_u.wdr): its texture by the game's naming rule where the material's isn't there.
       if (file.ParentDirectory != null && extension == ".wdr")
@@ -322,16 +415,22 @@ namespace SparkIV.WinUI.Viewers
         }
 
         // The dictionaries the game's .ide files give the model (map objects: bronx_e.ide gives
-        // l_bxe_cm_treelod tree_lods) and their parents, next to the model or shared in gtxd.img.
-        foreach (string name in Services.GameTextures.DictionariesFor(baseName))
+        // l_bxe_cm_treelod tree_lods) and their parents, next to the model or shared in gtxd.img; for one
+        // model of a dictionary, the model's (the .ide names it, not its dictionary).
+        string modelName = onlyModel is uint only && Services.GameTextures.ModelName(only) is string named ? named : baseName;
+        foreach (string name in Services.GameTextures.DictionariesFor(modelName))
         {
           if (file.ParentDirectory?.FindByName(name + ".wtd") is File wtd)
           {
             scene.OpenDictionary(wtd);
           }
-          else if (Services.GameTextures.ReadShared(name) is byte[] shared)
+          else if (shared?.Opened.ContainsKey(name + ".wtd") == true)
           {
-            scene.OpenDictionary(name + ".wtd", shared);
+            scene.OpenDictionary(name + ".wtd", Array.Empty<byte>());
+          }
+          else if (Services.GameTextures.ReadShared(name) is byte[] inGtxd)
+          {
+            scene.OpenDictionary(name + ".wtd", inGtxd);
           }
         }
 
@@ -360,11 +459,13 @@ namespace SparkIV.WinUI.Viewers
                                                     ? Services.GameTextures.ModelName(dictionary.GetNameHash(i)) ?? KnownModelNames.Find(dictionary.GetNameHash(i))
                                                     : null)
                                      .ToList();
+            // A prop's part is its anchor (p_head_000, p_head_001: one hat; p_eyes_000 beside it).
             var firstOfPart = names.Where(n => n != null)
-                                   .GroupBy(n => n!.Substring(0, n.IndexOf('_')), StringComparer.OrdinalIgnoreCase)
+                                   .GroupBy(n => n!.Substring(0, n.IndexOf('_', n.StartsWith("p_", StringComparison.OrdinalIgnoreCase) ? 2 : 0)), StringComparer.OrdinalIgnoreCase)
                                    .Select(g => g.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).First())
                                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var order = Enumerable.Range(0, names.Count).OrderBy(i => names[i] ?? mapNames[i] ?? "~", StringComparer.OrdinalIgnoreCase);
+            var order = Enumerable.Range(0, names.Count).Where(i => onlyModel == null || dictionary.GetNameHash(i) == onlyModel)
+                                  .OrderBy(i => names[i] ?? mapNames[i] ?? "~", StringComparer.OrdinalIgnoreCase);
             foreach (int i in order)
             {
               string name = names[i] ?? mapNames[i] ?? "0x" + dictionary.GetNameHash(i).ToString("x8");
@@ -383,7 +484,8 @@ namespace SparkIV.WinUI.Viewers
       }
       finally
       {
-        foreach (var textures in dictionaries)
+        // The shared ones are kept for the next model.
+        foreach (var textures in dictionaries.Where(d => shared == null || !shared.Opened.ContainsValue(d)))
         {
           textures.Dispose();
         }
@@ -598,7 +700,7 @@ namespace SparkIV.WinUI.Viewers
           var position = System.Numerics.Vector3.Transform(new System.Numerics.Vector3(light.Position.X, light.Position.Y, light.Position.Z), at);
           var direction = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(light.Direction.X, light.Direction.Y, light.Direction.Z), at);
           Lights.Add(new SceneLight(position, direction, light.Color[0] / 255f, light.Color[1] / 255f, light.Color[2] / 255f,
-                                    light.IsSpot, light.Range, light.Falloff, meshIds));
+                                    light.IsSpot, light.Range, light.Falloff, meshIds, light.Distance, light.HotSpot, light.Intensity));
         }
       }
     }
@@ -833,6 +935,13 @@ namespace SparkIV.WinUI.Viewers
       {
         textureName = null;
       }
+      // A render target ("script_rt": a TV's screen, which a script draws its picture on while it is on) isn't
+      // a texture in any file: not looked for (see RenderTarget).
+      bool renderTarget = textureName != null && textureName.StartsWith("script_rt", StringComparison.OrdinalIgnoreCase);
+      if (renderTarget)
+      {
+        textureName = null;
+      }
 
       string? key = null;
       if (!string.IsNullOrEmpty(textureName))
@@ -863,10 +972,7 @@ namespace SparkIV.WinUI.Viewers
           key = Materials.Count + ".png";
           try
           {
-            using var image = texture.Decode();
-            using var png = new MemoryStream();
-            image.Save(png, ImageFormat.Png);
-            Textures[key] = png.ToArray();
+            Textures[key] = Png(texture, source);
           }
           catch (Exception)
           {
@@ -912,6 +1018,7 @@ namespace SparkIV.WinUI.Viewers
       {
         LayerKeys = layerKeys,
         DrawBucket = material.DrawBucket,
+        RenderTarget = renderTarget,
         NormalKey = normalKey,
         SpecularKey = specularKey,
         Bumpiness = VectorParameter(material, Bumpiness)?.X ?? 1,
@@ -964,10 +1071,7 @@ namespace SparkIV.WinUI.Viewers
       }
       try
       {
-        using var image = texture.Decode();
-        using var png = new MemoryStream();
-        image.Save(png, ImageFormat.Png);
-        Textures[key] = png.ToArray();
+        Textures[key] = Png(texture, source);
         return key;
       }
       catch (Exception)
@@ -1035,9 +1139,9 @@ namespace SparkIV.WinUI.Viewers
     private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
   }
 
-  /// <summary>A light of the model: where, which way, its colour (0 to 1), a spot's outer angle (degrees), the meshes of its drawable.</summary>
+  /// <summary>A light of the model: where, which way, its colour (0 to 1), a spot's outer angle (degrees from its axis), the meshes of its drawable.</summary>
   public sealed record SceneLight(System.Numerics.Vector3 Position, System.Numerics.Vector3 Direction, float Red, float Green, float Blue,
-                                  bool Spot, float Range, float Falloff, int[] Meshes)
+                                  bool Spot, float Range, float Falloff, int[] Meshes, float Distance = 0, float HotSpot = 0, float Intensity = 1)
   {
     /// <summary>For the page.</summary>
     public object ToMessage() => new
@@ -1153,7 +1257,9 @@ namespace SparkIV.WinUI.Viewers
       blend = Blend,
       decal = Decal,
       hidden = Hidden,
+      emissive = Emissive,
       texture = TextureKey == null ? null : url(TextureKey),
+      color = RenderTarget ? new[] { 0f, 0f, 0f } : null,
       layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
       normal = NormalKey == null ? null : url(NormalKey),
       specular = SpecularKey == null ? null : url(SpecularKey),
@@ -1182,7 +1288,17 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Whether it lies on another surface (a puddle, dirt, a poster): drawn a little in front of it.</summary>
     public bool Decal => DrawBucket == 2;
 
+    /// <summary>
+    /// A layer showing a render target (script_rt: a TV's picture), which no file holds: black, as the game's
+    /// while no script draws on it (a TV switched off; under it GB_tv07 has its cracked screen, for when it
+    /// is shot).
+    /// </summary>
+    public bool RenderTarget { get; init; }
+
     /// <summary>Planes the game doesn't draw (a vehicle's no-splash and no-water planes, keeping water out).</summary>
     public bool Hidden => DrawBucket is 29 or 30;
+
+    /// <summary>Glowing (draw buckets 4 and 5: lamp shades, signs, windows at night): shown at full brightness, not lit.</summary>
+    public bool Emissive => DrawBucket is 4 or 5;
   }
 }

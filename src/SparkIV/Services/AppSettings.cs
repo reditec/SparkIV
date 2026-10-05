@@ -7,7 +7,7 @@ namespace SparkIV.WinUI.Services
 {
   /// <summary>
   /// What SparkIV remembers between runs, in %LocalAppData%\SparkIV\settings.json: the folders of the
-  /// games and of the backups.
+  /// games and of the backups, how cutscenes are shown.
   /// </summary>
   internal static class AppSettings
   {
@@ -16,6 +16,22 @@ namespace SparkIV.WinUI.Services
       public Dictionary<string, string> GamePaths { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
       public string? BackupFolder { get; set; }
+
+      public bool CutsceneSeeThroughLikeGame { get; set; } = true;
+    }
+
+    /// <summary>
+    /// Cutscenes: leave out the see-through parts the game doesn't draw (a part a variation adds, see
+    /// CutsceneMessages.HideUnflaggedSeeThrough) rather than show everything the .cut asks for.
+    /// </summary>
+    public static bool CutsceneSeeThroughLikeGame
+    {
+      get => Load().CutsceneSeeThroughLikeGame;
+      set
+      {
+        Load().CutsceneSeeThroughLikeGame = value;
+        Save();
+      }
     }
 
     /// <summary>Where the originals of changed files are kept; null for the default (Documents\SparkIV\Backups).</summary>

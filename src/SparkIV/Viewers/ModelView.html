@@ -12,10 +12,13 @@
   canvas.moving { cursor: grabbing; }
   #message { position: absolute; left: 0; right: 0; top: 45%; text-align: center; color: rgba(255, 255, 255, 0.8);
              font: 14px "Segoe UI", sans-serif; }
+  /* A cutscene's fade to and from black. */
+  #fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
+<div id="fade"></div>
 <div id="message"></div>
 <script>
   "use strict";
@@ -83,6 +86,8 @@
     in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
     uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout;
+    // Where the camera is (the side of a surface it sees is the one toward it, point by point).
+    uniform vec3 eyeAt;
     // See-through by the texture's alpha (the see-through and decal buckets).
     uniform bool textureAlpha;
     // A dirt decal (gta_decal_dirt): the texture's channels in dirtMask say how much shows, the colour is the vertices'.
@@ -93,11 +98,22 @@
     // How bright the baked light is: the game's light round about indoors is dim (Bernie's flat, whose
     // vertices hold 0.45 on average: the game's picture of bc_1's hall is 48 of 255 bright on average, at
     // 0.55 the view's comes out alike), the lamps and the scene's lights do the rest.
-    const float BakedLight = 0.55;
-    // A cutscene's own lights (up to 8): place, the way it shines (none: all round), colour times strength,
-    // range, the cosine of half its cone (-1: all round).
-    uniform int sceneLights; uniform vec3 sceneLightAt[8]; uniform vec3 sceneLightDir[8]; uniform vec3 sceneLightColor[8];
-    uniform float sceneLightRange[8]; uniform float sceneLightCone[8];
+    const float BakedLight = 0.44;
+    // The actors' light round about while a location is shown (the rest is the cutscene's lights).
+    const float ActorAround = 0.3;
+    // A cutscene with its location: graded a little like the game's picture indoors (warmer, less saturated).
+    uniform bool grade;
+    // A cutscene's own lights and its location's lamps (up to 40), three vec4s each (few uniform slots, so
+    // all the lamps of a flat fit): place and range; the way it shines and the cosine of half its cone (-1:
+    // all round); colour times strength and a lamp's cone scale (for a cutscene's own light, no inner angle
+    // known: -(its room + 2), so -1 outside any room).
+    uniform int sceneLights; uniform vec4 sceneLightAt[40]; uniform vec4 sceneLightDir[40]; uniform vec4 sceneLightColor[40];
+    // The interior room of what is drawn (-1: none). A cutscene's light lights only what is in its own room,
+    // as the game's do (bc_1: the fill light in Bernie's living room lit the hall outside his door through the
+    // wall; the walls of the flat, in none of its rooms, aren't lit by them at all).
+    uniform int meshRoom;
+    // Glowing materials (lamp shades, signs): at full brightness.
+    uniform bool emissive;
     // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
     uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
@@ -118,6 +134,12 @@
     }
     // Terrain: how many layers (1 for anything else), their textures, and which of them are there.
     uniform int layers; uniform sampler2D tex1; uniform sampler2D tex2; uniform sampler2D tex3; uniform vec3 layerOn;
+    // A cutscene outside (its location in no room): lit by the sun and the sky as the game's timecyc.dat has
+    // them at the time and weather, hazy with distance from where its fog starts to how far it draws, the
+    // water the sky's colour the flatter it is seen.
+    uniform bool outdoor; uniform vec3 sunDir; uniform vec3 sunColor; uniform vec3 ambientAbove; uniform vec3 ambientBelow;
+    uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
+    uniform bool water; uniform vec3 waterColor; uniform vec3 skyColor;
     out vec4 outColor;
     void main() {
       if (lines) { outColor = vec4(color, 1.0); return; }
@@ -136,35 +158,55 @@
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
       // Both sides lit: the normal turned to the camera, then bent by the normal map.
-      if (dot(n, toEye) < 0.0) n = -n;
+      if (dot(n, eyeAt - vPosition) < 0.0) n = -n;
       if (useNormalMap && useTexture) n = bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
       float around = layers > 1 ? vColor.r : 1.0;
-      float shade = baked ? vColor.r * BakedLight + 0.06 * max(dot(n, light), 0.0)
-                          : 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      // With a cutscene's location there is no light from the camera: the map by its baked light and its
+      // lamps, the actors by a little light round about and the cutscene's lights.
+      float shade = baked ? vColor.r * BakedLight
+                  : grade ? ActorAround
+                  : 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      // Outside: the light from around (from above on what faces up, from below on what faces down) and the
+      // sun, on the map dimmed by the light baked into it (its red: how open to the sky a point is).
+      vec3 outside = mix(ambientBelow, ambientAbove, n.z * 0.5 + 0.5) + sunColor * max(dot(n, sunDir), 0.0);
+      if (outdoor) outside *= baked ? vColor.r : 1.0;
       // A cutscene's lights on top: fading to nothing at their range, inside a spot's cone (soft at its edge).
       // The view's own light dimmed while they are on, so they show (in the game they are much of the light).
-      vec3 lit = vec3(sceneLights > 0 && !baked ? shade * 0.6 : shade);
-      for (int i = 0; i < 8; i++) {
+      vec3 lit = outdoor ? outside : vec3(sceneLights > 0 && !baked && !grade ? shade * 0.6 : shade);
+      for (int i = 0; i < 40; i++) {
         if (i >= sceneLights) break;
-        vec3 l = sceneLightAt[i] - vPosition;
+        // A cutscene's light in another room than this: not here.
+        float marked = sceneLightColor[i].w;
+        if (marked < 0.0 && int(-marked + 0.5) - 2 != meshRoom) continue;
+        vec3 l = sceneLightAt[i].xyz - vPosition;
+        float range = sceneLightAt[i].w;
         float d = length(l);
-        if (d >= sceneLightRange[i] || d < 1e-4) continue;
+        if (d >= range || d < 1e-4) continue;
         l /= d;
-        float fade = 1.0 - d / sceneLightRange[i];
+        // As the game's deferred_lighting.fxc lights a point or spot light: a = saturate(1 - d²/r²),
+        // (a⁴ - 0.1) / 0.9 (bright near it, steeply to nothing towards its radius); a lamp's spot from its
+        // outer angle to its inner one, saturate((cos - cos outer) × scale); a cutscene's spot (no inner
+        // angle known) softly at its edge.
+        float a = clamp(1.0 - (d * d) / (range * range), 0.0, 1.0);
+        float reach = max((a * a * a * a - 0.1) / 0.9, 0.0);
         float spot = 1.0;
-        if (sceneLightCone[i] > -1.0) {
-          float c = dot(-l, sceneLightDir[i]);
-          spot = smoothstep(sceneLightCone[i], mix(sceneLightCone[i], 1.0, 0.25), c);
+        float cone = sceneLightDir[i].w;
+        if (cone > -1.0) {
+          float c = dot(-l, sceneLightDir[i].xyz);
+          float scale = sceneLightColor[i].w;
+          spot = scale < 0.0 ? smoothstep(cone, mix(cone, 1.0, 0.25), c) : clamp((c - cone) * scale, 0.0, 1.0);
         }
-        lit += sceneLightColor[i] * fade * fade * spot * max(dot(n, l), 0.0);
+        lit += sceneLightColor[i].rgb * reach * spot * max(dot(n, l), 0.0);
       }
       // The shine, where the surface faces half way between the light and the camera: how bright from the
       // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
       float shine = 0.0;
-      if (specPower > 0.0 && specIntensity > 0.0) {
+      // Not with a cutscene's location: the shine would be the camera's light's (Bernie's back wall, shiny,
+      // facing the camera, glared at the same brightness whatever lit it).
+      if (specPower > 0.0 && specIntensity > 0.0 && !grade && !outdoor) {
         vec4 spec = useSpecMap && useTexture ? texture(specTex, vUv) : vec4(1.0);
         float where = useSpecMap && useTexture ? dot(spec.rgb, specMask) : 1.0;
         shine = pow(max(dot(n, normalize(light + toEye)), 0.0), max(specPower * spec.a, 1.0)) * specIntensity * where;
@@ -174,7 +216,25 @@
         a = base.a * vAlpha;
         if (a < 0.01) discard;
       }
-      outColor = vec4((base.rgb * lit + shine) * a, a);
+      vec3 rgb = emissive ? base.rgb : base.rgb * lit + shine;
+      if (outdoor) {
+        // As bright as the game's picture: the light's values (up to about 3) brought down softly.
+        rgb = 1.0 - exp(-rgb);
+        if (water) {
+          // The water: its own colour seen from above, the sky's towards the horizon.
+          float facing = abs(dot(normalize(eyeAt - vPosition), n));
+          rgb = mix(waterColor, skyColor, 0.3 + 0.7 * pow(1.0 - facing, 3.0));
+          a = 0.92;
+        }
+        // The haze: from where the fog starts to how far is drawn, towards the sky's colour at the horizon.
+        float far = clamp((length(eyeAt - vPosition) - hazeStart) / max(hazeEnd - hazeStart, 1.0), 0.0, 1.0);
+        rgb = mix(rgb, hazeColor, pow(far, 0.6) * 0.9);
+      }
+      else if (grade) {
+        float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
+        rgb = mix(vec3(grey), rgb, 0.7) * vec3(1.06, 1.0, 0.9);
+      }
+      outColor = vec4(rgb * a, a);
     }`;
 
   let program, loc;
@@ -211,16 +271,28 @@
       tex2: gl.getUniformLocation(program, "tex2"),
       tex3: gl.getUniformLocation(program, "tex3"),
       layerOn: gl.getUniformLocation(program, "layerOn"),
+      outdoor: gl.getUniformLocation(program, "outdoor"),
+      sunDir: gl.getUniformLocation(program, "sunDir"),
+      sunColor: gl.getUniformLocation(program, "sunColor"),
+      ambientAbove: gl.getUniformLocation(program, "ambientAbove"),
+      ambientBelow: gl.getUniformLocation(program, "ambientBelow"),
+      hazeColor: gl.getUniformLocation(program, "hazeColor"),
+      hazeStart: gl.getUniformLocation(program, "hazeStart"),
+      hazeEnd: gl.getUniformLocation(program, "hazeEnd"),
+      water: gl.getUniformLocation(program, "water"),
+      waterColor: gl.getUniformLocation(program, "waterColor"),
+      skyColor: gl.getUniformLocation(program, "skyColor"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
       dirtDecal: gl.getUniformLocation(program, "dirtDecal"),
       baked: gl.getUniformLocation(program, "baked"),
+      grade: gl.getUniformLocation(program, "grade"),
       dirtMask: gl.getUniformLocation(program, "dirtMask"),
       sceneLights: gl.getUniformLocation(program, "sceneLights"),
       sceneLightAt: gl.getUniformLocation(program, "sceneLightAt"),
       sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
       sceneLightColor: gl.getUniformLocation(program, "sceneLightColor"),
-      sceneLightRange: gl.getUniformLocation(program, "sceneLightRange"),
-      sceneLightCone: gl.getUniformLocation(program, "sceneLightCone"),
+      emissive: gl.getUniformLocation(program, "emissive"),
+      eyeAt: gl.getUniformLocation(program, "eyeAt"),
       marker: gl.getUniformLocation(program, "marker"),
       markerAt: gl.getUniformLocation(program, "markerAt"),
       markerScale: gl.getUniformLocation(program, "markerScale"),
@@ -232,6 +304,7 @@
       specMask: gl.getUniformLocation(program, "specMask"),
       specPower: gl.getUniformLocation(program, "specPower"),
       specIntensity: gl.getUniformLocation(program, "specIntensity"),
+      meshRoom: gl.getUniformLocation(program, "meshRoom"),
     };
   }
 
@@ -357,8 +430,10 @@
     // How far a cutscene's location reaches from the scene's origin: the far plane stays beyond it.
     if (m.background) backgroundReach = Math.max(backgroundReach, ...[0, 1, 2].map(k => Math.max(Math.abs(min[k]), Math.abs(max[k]))).map(v => v * 1.8));
     // actor: which of a cutscene's cast it belongs to (0: the one model or ped shown otherwise);
-    // background: around a cutscene (its location), not looked at when fitting.
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true && !!m.colors });
+    // background: around a cutscene (its location), not looked at when fitting. A cutscene's props (a door)
+    // are lit as its location is (baked: no light of the camera, a middling light round about where they have
+    // none of their own).
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1 });
   }
 
   function addMaterial(m) {
@@ -370,12 +445,12 @@
     // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
     // another surface (decal), or not at all (a vehicle's no-water planes).
     const material = {
-      texture: null, glass: m.glass, cutout: m.cutout === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
+      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
       color: m.color || hsl(hue, 0.25, 0.62), layerCount, layers: [null, null, null],
       // Bumps and shine.
       normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
       specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
-      dirtMask: m.dirtMask || null,
+      dirtMask: m.dirtMask || null, emissive: m.emissive === true,
     };
     materials.set(m.id, material);
     if (m.texture) loadTexture(m.texture, t => material.texture = t);
@@ -387,26 +462,108 @@
   const anisotropic = gl && gl.getExtension("EXT_texture_filter_anisotropic");
   const maxAnisotropy = anisotropic ? Math.min(16, gl.getParameter(anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 1;
 
+  // DXT textures as they are (WebGL's S3TC extension, on Windows always there): a cutscene's location
+  // sends its textures as the game has them ("SXT1", see ModelScene.Raw), not as PNG.
+  const s3tc = gl && gl.getExtension("WEBGL_compressed_texture_s3tc");
+
   function loadTexture(url, done) {
-    const image = new Image();
     texturesLoading++;
-    image.onerror = textureDone;
-    image.onload = () => {
-      const t = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-      // Sharp also when seen at a slant (ground, walls towards the horizon), as far as the card allows.
-      if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
-      done(t);
-      draw();
-      textureDone();
-    };
-    image.src = url;
+    fetch(url)
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+      .then(async buffer => {
+        const head = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        let mipmaps = true;
+        if (head.length === 4 && head[0] === 83 && head[1] === 88 && head[2] === 84 && head[3] === 49) {
+          mipmaps = uploadRaw(buffer);
+        } else {
+          const image = await createImageBitmap(new Blob([buffer]), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          image.close();
+        }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        // Sharp also when seen at a slant (ground, walls towards the horizon), as far as the card allows.
+        if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
+        done(t);
+        draw();
+      })
+      .catch(() => {})
+      .finally(textureDone);
+  }
+
+  // A texture as the game has it into the bound texture: its levels as far as the data holds them (each
+  // level's size in 4x4 blocks: 8 bytes each for DXT1, 16 for DXT3 and 5). DXT straight to the card (or,
+  // without the extension, decoded here); A8R8G8B8 (bytes B G R A) and L8 as RGBA. Whether it has mipmaps.
+  function uploadRaw(buffer) {
+    const v = new DataView(buffer);
+    const format = v.getUint32(4, true), width = v.getUint32(8, true), height = v.getUint32(12, true);
+    const levels = Math.max(1, v.getUint32(16, true));
+    const data = new Uint8Array(buffer, 20);
+    const dxt = format <= 2;
+    const blockBytes = format === 0 ? 8 : 16;
+    const glFormat = s3tc && [s3tc.COMPRESSED_RGBA_S3TC_DXT1_EXT, s3tc.COMPRESSED_RGBA_S3TC_DXT3_EXT, s3tc.COMPRESSED_RGBA_S3TC_DXT5_EXT][format];
+    let offset = 0, done = 0;
+    for (let level = 0; level < levels; level++) {
+      const w = Math.max(1, width >> level), h = Math.max(1, height >> level);
+      const size = dxt ? Math.ceil(w / 4) * Math.ceil(h / 4) * blockBytes : w * h * (format === 3 ? 4 : 1);
+      if (offset + size > data.length) break;
+      const bytes = data.subarray(offset, offset + size);
+      offset += size;
+      if (dxt && glFormat) gl.compressedTexImage2D(gl.TEXTURE_2D, level, glFormat, w, h, 0, bytes);
+      else gl.texImage2D(gl.TEXTURE_2D, level, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, dxt ? decodeDxt(bytes, w, h, format) : toRgba(bytes, w * h, format));
+      done++;
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, Math.max(0, done - 1));
+    return done > 1;
+  }
+
+  function toRgba(bytes, pixels, format) {
+    const out = new Uint8Array(pixels * 4);
+    for (let i = 0; i < pixels; i++) {
+      if (format === 3) { out[i * 4] = bytes[i * 4 + 2]; out[i * 4 + 1] = bytes[i * 4 + 1]; out[i * 4 + 2] = bytes[i * 4]; out[i * 4 + 3] = bytes[i * 4 + 3]; }
+      else { out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = bytes[i]; out[i * 4 + 3] = 255; }
+    }
+    return out;
+  }
+
+  // DXT1, 3 and 5 decoded to RGBA (only where the card's extension is missing).
+  function decodeDxt(bytes, w, h, format) {
+    const out = new Uint8Array(w * h * 4);
+    const bw = Math.ceil(w / 4), bh = Math.ceil(h / 4), blockBytes = format === 0 ? 8 : 16;
+    const c = (v, i) => [((v >> 11) & 31) * 255 / 31, ((v >> 5) & 63) * 255 / 63, (v & 31) * 255 / 31][i];
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      const o = (by * bw + bx) * blockBytes, co = format === 0 ? o : o + 8;
+      const c0 = bytes[co] | bytes[co + 1] << 8, c1 = bytes[co + 2] | bytes[co + 3] << 8;
+      const cols = [0, 1, 2, 3].map(k => [0, 1, 2].map(i => {
+        const a = c(c0, i), b = c(c1, i);
+        if (k === 0) return a; if (k === 1) return b;
+        if (c0 > c1 || format !== 0) return k === 2 ? (2 * a + b) / 3 : (a + 2 * b) / 3;
+        return k === 2 ? (a + b) / 2 : 0;
+      }));
+      const alphas = [];
+      if (format === 2) {
+        const a0 = bytes[o], a1 = bytes[o + 1];
+        for (let k = 0; k < 8; k++) alphas[k] = k === 0 ? a0 : k === 1 ? a1 : a0 > a1 ? ((8 - k) * a0 + (k - 1) * a1) / 7 : k === 6 ? 0 : k === 7 ? 255 : ((6 - k) * a0 + (k - 1) * a1) / 5;
+      }
+      for (let p = 0; p < 16; p++) {
+        const x = bx * 4 + (p & 3), y = by * 4 + (p >> 2);
+        if (x >= w || y >= h) continue;
+        const k = (bytes[co + 4 + (p >> 2)] >> ((p & 3) * 2)) & 3;
+        let alpha = 255;
+        if (format === 0) alpha = c0 <= c1 && k === 3 ? 0 : 255;
+        else if (format === 1) alpha = ((bytes[o + (p >> 1)] >> ((p & 1) * 4)) & 15) * 17;
+        else { const bit = p * 3, idx = Number((BigInt(bytes[o + 2] | bytes[o + 3] << 8 | bytes[o + 4] << 16) | BigInt(bytes[o + 5] | bytes[o + 6] << 8 | bytes[o + 7] << 16) << 24n) >> BigInt(bit) & 7n); alpha = alphas[idx]; }
+        const q = (y * w + x) * 4;
+        out[q] = cols[k][0]; out[q + 1] = cols[k][1]; out[q + 2] = cols[k][2]; out[q + 3] = alpha;
+      }
+    }
+    return out;
   }
 
   // Textures still on their way; when the last has come (or failed), SparkIV hears "loaded" (it shows a
@@ -450,7 +607,7 @@
         // Two axes across the direction, for the rim.
         const side = norm(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
         const up = cross(side, d);
-        const half = Math.max(1, Math.min(89, (l.falloff || 60) / 2)) * Math.PI / 180;
+        const half = Math.max(1, Math.min(89, l.falloff || 30)) * Math.PI / 180;
         const r = Math.tan(half) * length;
         const end = [x + d[0] * length, y + d[1] * length, z + d[2] * length];
         const rim = [];
@@ -789,7 +946,7 @@
   let showSceneLights = true;
   // How bright a light of strength 1 is against the view's own light (the game's light units aren't
   // known; a strength of 6 to 10, the most common, comes out about as bright as the view's light).
-  const SceneLightScale = 0.12;
+  const SceneLightScale = 0.06;
 
   function setSceneLights(list) {
     const floats = v => v ? new Float32Array(bytes(v).buffer) : null;
@@ -800,9 +957,83 @@
     }));
   }
 
-  // The lights now (whole frames: their values step as the game's do), at most 8: the strongest.
+  // The lights of a cutscene's location (lamps, wall lights in its models: the light the game puts there),
+  // fixed: place, direction, colour, range, cone (cosine of half, -1 all round).
+  let mapLights = [];
+  // How bright a lamp is: its colour (0 to 1) times its strength as the game adds it to the light.
+  const MapLightScale = 0.6;
+  const MaxLights = 40;
+
+  // The rooms of the location's interiors: the interior's place, the turn from the scene into it, the room's
+  // box there. What is in which: a map object by the interior's list (its mesh's room), an actor and a
+  // cutscene's light by where it is, the first room in the list whose box holds it. The boxes overlap (Bernie's
+  // living room's holds the hall outside his door): bc_1's lights at his door (spt_dr, fil_dr, rim_nko_dr,
+  // all at Niko there) and Niko are in the living room so, the hall's trim and walls not lit by them, as in
+  // the game (by the smallest box the spot was in the hall and lit its door frame).
+  let rooms = [];
+
+  function roomOf(p) {
+    return rooms.findIndex(r => {
+      const d = [p[0] - r.at[0], p[1] - r.at[1], p[2] - r.at[2], 0];
+      const v = qmul(qmul(r.turn, d), qconj(r.turn));
+      for (let k = 0; k < 3; k++) if (v[k] < r.min[k] || v[k] > r.max[k]) return false;
+      return true;
+    });
+  }
+
+  // A cutscene outside: the sun and sky of its time and weather (see the "sky" message); null inside.
+  // The sky as the game shows it at noon is a pale blue, whitish towards the horizon: timecyc.dat's sky
+  // colours are its shader's, not the picture's (SUNNY: the top almost black, the bottom deep blue), so the
+  // colours shown are taken from them lighter (a guess, matched by eye to the game's picture of bc_3).
+  let sky = null;
+  function setSky(m) {
+    const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+    const horizon = mix(m.skyBottom, [1, 1, 1], 0.6);
+    const zenith = mix(mix(m.skyBottom, m.skyTop, 0.25), [1, 1, 1], 0.35);
+    sky = { ...m, horizon, zenith };
+    const css = c => "rgb(" + c.map(v => Math.round(Math.min(1, Math.max(0, v)) * 255)).join(",") + ")";
+    document.body.style.background = "linear-gradient(" + css(zenith) + ", " + css(horizon) + " 55%, " + css(horizon) + ")";
+    draw();
+  }
+
+  function setMapLights(list, roomList) {
+    rooms = roomList || [];
+    mapLights =(list || []).filter(l => l.range > 0).map(l => ({
+      at: l.position, dir: norm(l.direction), range: l.range,
+      // Its colour. Not times _f58 (most likely its strength: 1 for most lamps, 0.4 for Bernie's track
+      // spots): with it the spots stayed far too dark beside the game's pictures of bc_1, without it the
+      // hall, the relief and the rooms come out as bright as there.
+      color: l.color.map(c => c * MapLightScale),
+      // The model's angles are from the spot's axis (bc_1's track spots: 50 outer, 32 inner, so 100° across;
+      // read as the whole cone the grey relief in Bernie's flat stayed dull where the game lights it). The
+      // game fades from the outer to the inner: scale = 1 / (cos inner - cos outer).
+      cone: l.cone > 0 ? Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180) : -1,
+      coneScale: l.cone > 0 ? 1 / Math.max(1e-3, Math.cos(Math.min(l.cone - 0.5, Math.max(0, l.hotSpot || 0)) * Math.PI / 180) - Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180)) : 0,
+    }));
+    draw();
+  }
+
+  // The lights now, at most MaxLights: the cutscene's own (whole frames: their values step as the game's
+  // do; the strongest first, up to 8), then the location's lamps nearest to the camera that reach near it.
   function sceneLightsNow() {
-    if (!showSceneLights || !sceneLights.length || !clip) return [];
+    if (!showSceneLights) return [];
+    const now = cutLightsNow().slice(0, 8);
+    if (mapLights.length && visible.size) {
+      const film = filmView();
+      const e = film ? film.eye : eye();
+      const near = [];
+      for (const l of mapLights) {
+        const d = Math.hypot(l.at[0] - e[0], l.at[1] - e[1], l.at[2] - e[2]);
+        if (d < l.range + 25) near.push({ l, d });
+      }
+      near.sort((a, b) => a.d - b.d);
+      for (const { l } of near) { if (now.length >= MaxLights) break; now.push(l); }
+    }
+    return now;
+  }
+
+  function cutLightsNow() {
+    if (!sceneLights.length || !clip) return [];
     const now = [];
     for (const l of sceneLights) {
       const f = Math.min(Math.floor(currentFrame() / clip.fps * l.fps + 1e-6), l.frames - 1);
@@ -814,13 +1045,15 @@
       const color = v3(l.color, [1, 1, 1]).map(c => c * strength * SceneLightScale);
       const dir = v3(l.direction, null);
       const cone = l.cone && dir ? Math.cos(Math.min(170, Math.max(1, v1(l.cone, 90))) / 2 * Math.PI / 180) : -1;
-      now.push({ at: v3(l.position, [0, 0, 0]), dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, strength });
+      const at = v3(l.position, [0, 0, 0]);
+      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, strength, actors: true, room: roomOf(at) });
     }
     now.sort((a, b) => b.strength - a.strength);
-    return now.slice(0, 8);
+    return now;
   }
 
   function setCast(list) {
+    const first = cast.size === 0;
     for (const a of cast.values()) if (a.skeleton) gl.deleteTexture(a.skeleton.texture);
     cast.clear();
     for (const a of list) {
@@ -834,8 +1067,9 @@
       cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null });
     }
     showFrame();
-    // Where the actors are now (the view fitted before their clips were there looked at the origin).
-    if (list.length) fit();
+    // Where the actors are now (the view fitted before their clips were there looked at the origin); the
+    // next section's cast leaves the view where it is.
+    if (list.length && first) fit();
   }
 
   function poseCast(frame) {
@@ -845,13 +1079,18 @@
       const f = a.clip && clip ? Math.min(frame / clip.fps * a.clip.fps, a.clip.frames - 1) : null;
       const p = sampledPose(a.skeleton, a.clip, f);
       let world = worldMatrices(p.position, p.rotation, a.skeleton);
+      // Its room (for the cutscene's lights): where the actor is, a ped where its clip moves it, a prop where
+      // the game creates it, at the scene's origin (its root bone moves it from there; Bernie's door, at his
+      // door between his flat and the hall, isn't lit by the hall's light on Niko).
+      const at = [0, 0, 0];
       if (a.root && a.clip && f !== null) {
-        const at = [0, 0, 0], q = [0, 0, 0, 1];
+        const q = [0, 0, 0, 1];
         if (a.root.position) sample(a.root.position, f, a.clip.frames, at, 0);
         if (a.root.rotation) sample(a.root.rotation, f, a.clip.frames, q, 0);
         const place = mat4FromQuat(q, at);
         world = world.map(m => mul(place, m));
       }
+      a.room = roomOf(at);
       a.world = world;
       uploadBones(a.skeleton, world);
     }
@@ -871,8 +1110,11 @@
   }
 
   // The camera's eye, forward, up and field of view (radians) now, or null.
-  function filmView() {
-    if (!useFilmCamera || !filmCamera || !filmCamera.position || !filmCamera.rotation) return null;
+  function filmView() { return useFilmCamera ? filmCameraNow() : null; }
+
+  // Where the cutscene's camera is now, whether the view is its or not (or null without one).
+  function filmCameraNow() {
+    if (!filmCamera || !filmCamera.position || !filmCamera.rotation) return null;
     const f = clip ? Math.min(currentFrame() / clip.fps * filmCamera.fps, filmCamera.frames - 1) : 0;
     const e = [0, 0, 0], q = [0, 0, 0, 1];
     // Smoothly between frames, but not across a cut (the camera elsewhere from one frame to the next: more
@@ -891,6 +1133,27 @@
     const turn = v => qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q)).slice(0, 3);
     const fov = filmCamera.fov ? filmCamera.fov[Math.min(whole, filmCamera.fov.length - 1)] : 45;
     return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180 };
+  }
+
+  // Leaving the cutscene's camera: the free view goes on from where it is, looking the same way (fitted to
+  // the cast from the side instead, it stood outside Bernie's building), turning about a point ahead of it,
+  // as far as the nearest actor before it (else 3 m).
+  function leaveFilmCamera() {
+    const film = filmView();
+    if (!film) return;
+    const f = film.forward;
+    let distance = Infinity;
+    for (const a of cast.values()) {
+      if (!a.world || !a.world.length) continue;
+      const w = a.world[0];
+      const along = dot(sub([w[12], w[13], w[14]], film.eye), f);
+      if (along > 0.5) distance = Math.min(distance, along);
+    }
+    camera.distance = Math.min(distance === Infinity ? 3 : distance, 15);
+    camera.target = film.eye.map((v, k) => v + f[k] * camera.distance);
+    camera.yaw = Math.atan2(-f[1], -f[0]);
+    camera.pitch = Math.asin(Math.max(-1, Math.min(1, -f[2])));
+    camera.fov = film.fov;
   }
 
   // A track's value between frames: positions linearly, rotations by normalized linear interpolation.
@@ -994,8 +1257,24 @@
     }
   }
 
+  // A cutscene's fades in this section, in its frames: from black until inEnd (0: none), to black from
+  // outStart to outEnd (outStart -1: none). Only through the cutscene's camera, as the game shows them.
+  let fade = { inEnd: 0, outStart: -1, outEnd: -1 };
+  const fadeCover = document.getElementById("fade");
+
+  function showFade() {
+    const f = currentFrame();
+    let dark = 0;
+    if (useFilmCamera && clip) {
+      if (fade.inEnd > 0 && f < fade.inEnd) dark = 1 - f / fade.inEnd;
+      if (fade.outStart >= 0 && f > fade.outStart) dark = Math.max(dark, Math.min(1, (f - fade.outStart) / Math.max(1, fade.outEnd - fade.outStart)));
+    }
+    fadeCover.style.opacity = dark.toFixed(3);
+  }
+
   function showFrame() {
     const frame = currentFrame();
+    showFade();
     updateUv(frame);
     pose(clip ? frame : null);
     if (!skeleton) draw();
@@ -1138,7 +1417,7 @@
     // The light from a little above and to the left of the camera, so bumps and shapes show (straight from
     // the camera a normal map's bumps hardly change the shade).
     const toEye = f.map(x => -x);
-    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye };
+    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye, eye: e };
   }
 
   // --- Drawing ---
@@ -1193,19 +1472,32 @@
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(program);
+      const lightsNow = sceneLightsNow();
       const vp = viewProjection();
       gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
       gl.uniform3fv(loc.light, vp.light);
       gl.uniform3fv(loc.toEye, vp.toEye);
-      const lightsNow = sceneLightsNow();
+      gl.uniform3fv(loc.eyeAt, vp.eye);
+      const outside = !!sky && backgroundReach > 0;
+      gl.uniform1i(loc.grade, backgroundReach > 0 && !outside);
+      gl.uniform1i(loc.outdoor, outside);
+      if (outside) {
+        gl.uniform3fv(loc.sunDir, sky.sunDirection);
+        gl.uniform3fv(loc.sunColor, sky.sun);
+        gl.uniform3fv(loc.ambientAbove, sky.ambientAbove);
+        gl.uniform3fv(loc.ambientBelow, sky.ambientBelow);
+        gl.uniform3fv(loc.hazeColor, sky.horizon);
+        gl.uniform1f(loc.hazeStart, sky.fogStart);
+        gl.uniform1f(loc.hazeEnd, sky.fogEnd);
+        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3));
+        gl.uniform3fv(loc.skyColor, sky.horizon);
+      }
       gl.uniform1i(loc.sceneLights, lightsNow.length);
       if (lightsNow.length) {
-        const pad = (f, n) => { const a = new Float32Array(8 * n); lightsNow.forEach((l, i) => a.set([].concat(f(l)), i * n)); return a; };
-        gl.uniform3fv(loc.sceneLightAt, pad(l => l.at, 3));
-        gl.uniform3fv(loc.sceneLightDir, pad(l => l.dir, 3));
-        gl.uniform3fv(loc.sceneLightColor, pad(l => l.color, 3));
-        gl.uniform1fv(loc.sceneLightRange, pad(l => l.range, 1));
-        gl.uniform1fv(loc.sceneLightCone, pad(l => l.cone, 1));
+        const pad = f => { const a = new Float32Array(MaxLights * 4); lightsNow.forEach((l, i) => a.set(f(l), i * 4)); return a; };
+        gl.uniform4fv(loc.sceneLightAt, pad(l => [...l.at, l.range]));
+        gl.uniform4fv(loc.sceneLightDir, pad(l => [...l.dir, l.cone]));
+        gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) : (l.coneScale || 0)]));
       }
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
@@ -1220,6 +1512,8 @@
           if (!m) continue;
           const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
           if (mat.hidden) continue;
+          // A cutscene's actor not in this section (of another part of the file): not there.
+          if (m.actor && cast.size && !cast.has(m.actor)) continue;
           // Glass and what is see-through by its texture after everything solid, without writing depth.
           const seeThrough = mat.glass || (mat.blend && showTextures && !!mat.texture);
           if (seeThrough !== glassPass) continue;
@@ -1229,13 +1523,16 @@
           gl.uniform1i(loc.textureAlpha, glassPass && !mat.glass);
           // Decals a little in front of the surface they lie on, so they don't flicker into it.
           // See-through layers over a surface (dirt, wear, posters in the interiors) a little less, so they
-          // don't flicker into it either; glass stays where it is.
-          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4); }
-          else if (mat.blend && !mat.glass) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -2); }
+          // don't flicker into it either; glass stays where it is. Little by the slope: at a steep angle a whole
+          // offset pulled a decal through what stands a few millimetres before it (bc_1: the shell's dark dirt
+          // decal over the hall's wall panels, flickering as the camera moved).
+          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -4); }
+          else if (mat.blend && !mat.glass) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -2); }
           else gl.disable(gl.POLYGON_OFFSET_FILL);
           gl.uniform1i(loc.hasNormal, m.hasNormal);
           gl.uniform3fv(loc.color, mat.color);
           gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
+          gl.uniform1i(loc.water, mat.water === true);
           gl.uniform1i(loc.lines, false);
           // Terrain's layers on texture units 2 to 4 (1 holds the bone matrices).
           const layered = m.layered && textured && mat.layerCount > 1;
@@ -1251,12 +1548,17 @@
           // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
           gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
           gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
-          gl.uniform1f(loc.bumpiness, mat.bumpiness ?? 1);
+          // Map objects in their place show their bumps softer (under their baked light they looked harsh).
           gl.uniform1f(loc.specPower, mat.specularPower || 0);
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
           gl.uniform1i(loc.dirtDecal, !!mat.dirtMask);
           gl.uniform1i(loc.baked, m.baked);
+          const actorNow = m.actor ? cast.get(m.actor) : null;
+          gl.uniform1i(loc.meshRoom, actorNow ? (actorNow.room ?? -1) : m.room);
+          // A map object without baked light (some walls): a middling one, not the view's bright light.
+          if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 0.45, 0.45, 0.45);
+          gl.uniform1i(loc.emissive, mat.emissive === true && textured);
           if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);
           gl.uniform1i(loc.normalTex, 5);
           gl.uniform1i(loc.specTex, 6);
@@ -1292,7 +1594,7 @@
         gl.uniform3fv(loc.color, [0.95, 0.75, 0.25]);
         for (const id of visible) {
           const m = meshes.get(id);
-          if (!m) continue;
+          if (!m || (m.actor && cast.size && !cast.has(m.actor))) continue;
           useSkin(m);
           gl.bindVertexArray(m.lines);
           gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
@@ -1319,8 +1621,54 @@
         gl.depthFunc(gl.LESS);
         gl.uniform1i(loc.marker, false);
       }
+      // The cutscene's camera while the view isn't its: where it is and what it sees.
+      if (!useFilmCamera) drawFilmCamera();
       gl.bindVertexArray(null);
     });
+  }
+
+  // The cutscene's camera as lines: a body behind its eye, the edges of what it sees (its field of view,
+  // 16:9, 60 cm long) and a triangle on the top edge for which way is up. Faint where something hides it.
+  let filmCameraLines = null;
+  function drawFilmCamera() {
+    const c = filmCameraNow();
+    if (!c) return;
+    const f = c.forward, u = c.up, s = norm(cross(f, u));
+    const at = (o, a, b, d) => [0, 1, 2].map(k => c.eye[k] + s[k] * a + u[k] * b + f[k] * d + o[k]);
+    const zero = [0, 0, 0];
+    const L = 0.6, h = L * Math.tan(c.fov / 2), w = h * 16 / 9;
+    const lines = [];
+    const line = (p, q) => lines.push(...p, ...q);
+    // The body: a box 12 by 10 cm, 20 cm deep behind the eye.
+    const box = [];
+    for (const d of [0, -0.2]) for (const [a, b] of [[-0.06, -0.05], [0.06, -0.05], [0.06, 0.05], [-0.06, 0.05]]) box.push(at(zero, a, b, d));
+    for (let i = 0; i < 4; i++) { line(box[i], box[(i + 1) % 4]); line(box[4 + i], box[4 + (i + 1) % 4]); line(box[i], box[4 + i]); }
+    // What it sees.
+    const corners = [[-w, -h], [w, -h], [w, h], [-w, h]].map(([a, b]) => at(zero, a, b, L));
+    for (let i = 0; i < 4; i++) { line(c.eye, corners[i]); line(corners[i], corners[(i + 1) % 4]); }
+    const top = [at(zero, -w * 0.3, h * 1.08, L), at(zero, w * 0.3, h * 1.08, L), at(zero, 0, h * 1.45, L)];
+    line(top[0], top[1]); line(top[1], top[2]); line(top[2], top[0]);
+    if (!filmCameraLines) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      bindSkin(null);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.enableVertexAttribArray(loc.position);
+      gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+      filmCameraLines = { vao, vbo };
+    }
+    gl.bindVertexArray(filmCameraLines.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, filmCameraLines.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
+    gl.uniform1i(loc.lines, true);
+    gl.uniform1i(loc.skinned, false);
+    for (const hidden of [true, false]) {
+      if (hidden) gl.disable(gl.DEPTH_TEST); else { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); }
+      gl.uniform3fv(loc.color, hidden ? [0.45, 0.32, 0.12] : [1.0, 0.62, 0.15]);
+      gl.drawArrays(gl.LINES, 0, lines.length / 3);
+    }
+    gl.depthFunc(gl.LESS);
   }
 
   new ResizeObserver(draw).observe(canvas);
@@ -1331,7 +1679,7 @@
   canvas.addEventListener("pointerdown", e => {
     drag = { x: e.clientX, y: e.clientY, button: e.button };
     // Looking round by hand leaves the cutscene's camera.
-    if (useFilmCamera) { useFilmCamera = false; post({ type: "filmCamera", on: false }); }
+    if (useFilmCamera) { leaveFilmCamera(); useFilmCamera = false; showFade(); post({ type: "filmCamera", on: false }); }
     canvas.setPointerCapture(e.pointerId);
     canvas.classList.add("moving");
     if (e.button === 1) e.preventDefault();
@@ -1372,10 +1720,14 @@
   function post(m) { if (window.chrome && chrome.webview) chrome.webview.postMessage(m); }
 
   if (window.chrome && chrome.webview) {
-    chrome.webview.addEventListener("message", e => {
-      const m = e.data;
-      if (!gl) return;
-      if (m.type === "scene") { setScene(m); }
+    chrome.webview.addEventListener("message", e => { if (gl) handle(e.data); });
+  }
+
+  function handle(m) {
+      // Several at once (a cutscene's next section: its clip, cast, camera, frame), all before the next
+      // picture: one by one, a picture came between them (the new clip with the old cast and camera).
+      if (m.type === "batch") { for (const one of m.messages) handle(one); }
+      else if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
       else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); findSpots(); if (first || m.fit) fit(); else draw(); }
       else if (m.type === "options") {
@@ -1409,9 +1761,11 @@
       else if (m.type === "facials") { showFacials = m.on; showFrame(); }
       else if (m.type === "cast") { setSceneLights(m.lights); setCast(m.actors); }
       else if (m.type === "sceneLights") { showSceneLights = m.on; draw(); }
+      else if (m.type === "mapLights") { setMapLights(m.lights, m.rooms); }
+      else if (m.type === "sky") { setSky(m); }
       else if (m.type === "camera") { setFilmCamera(m.camera); }
-      else if (m.type === "useCamera") { useFilmCamera = m.on; draw(); }
-    });
+      else if (m.type === "useCamera") { if (!m.on) leaveFilmCamera(); useFilmCamera = m.on; showFade(); draw(); }
+      else if (m.type === "fade") { fade = { inEnd: m.inEnd, outStart: m.outStart, outEnd: m.outEnd }; showFade(); }
   }
   post({ type: "ready", webgl: !!gl });
 </script>

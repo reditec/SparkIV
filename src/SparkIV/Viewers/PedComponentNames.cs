@@ -16,6 +16,13 @@ namespace SparkIV.WinUI.Viewers
 
     private static readonly string[] Kinds = { "u", "r", "m", "w", "b", "a", "l", "h", "s", "c", "e", "i", "g", "x" };
 
+    /// <summary>
+    /// The places a ped's props are worn (a pedprops.img dictionary's parts: p_head_000 a hat, p_eyes_000
+    /// glasses), in the game's order of anchors (a .cut's [PROPS] names them by number; GTAIV.exe's own table
+    /// of them at 0x103EDDC: p_head ... p_hip, p_lfoot, p_rfoot).
+    /// </summary>
+    public static readonly string[] PropAnchors = { "head", "eyes", "ears", "mouth", "lhand", "rhand", "lwrist", "rwrist", "hip", "lfoot", "rfoot" };
+
     private static Dictionary<uint, string>? s_names;
 
     /// <summary>The name of a hash, or null if it isn't one of these.</summary>
@@ -33,6 +40,14 @@ namespace SparkIV.WinUI.Viewers
               string name = part + "_" + number.ToString("000") + "_" + kind;
               names[RageLib.Text.GxtFile.Hash(name)] = name;
             }
+          }
+        }
+        foreach (var anchor in PropAnchors)
+        {
+          for (int number = 0; number < 40; number++)
+          {
+            string name = "p_" + anchor + "_" + number.ToString("000");
+            names[RageLib.Text.GxtFile.Hash(name)] = name;
           }
         }
         s_names = names;

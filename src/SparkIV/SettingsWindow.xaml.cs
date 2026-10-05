@@ -7,7 +7,8 @@ using SparkIV.WinUI.Services;
 namespace SparkIV.WinUI
 {
   /// <summary>
-  /// SparkIV's settings: for now where the games are installed, one folder per game and platform.
+  /// SparkIV's settings: where the games are installed (one folder per game and platform), the backups,
+  /// how cutscenes are shown.
   /// </summary>
   public sealed partial class SettingsWindow : Window
   {
@@ -36,7 +37,11 @@ namespace SparkIV.WinUI
         }
       }
       ShowBackupFolder();
+      SeeThroughSwitch.IsOn = AppSettings.CutsceneSeeThroughLikeGame;
     }
+
+    private void SeeThroughSwitch_Toggled(object sender, RoutedEventArgs e) =>
+      AppSettings.CutsceneSeeThroughLikeGame = SeeThroughSwitch.IsOn;
 
     #region Backups
 

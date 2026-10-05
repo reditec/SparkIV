@@ -166,8 +166,14 @@
                 </Button>
             </StackPanel>
 
-            <TextBlock x:Name="SectionText" Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Spacing="16" HorizontalAlignment="Right">
+                <TextBlock x:Name="SectionText" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <StackPanel x:Name="VolumePanel" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon x:Name="VolumeGlyph" Glyph="&#xE767;" FontSize="16" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Slider x:Name="VolumeSlider" Width="110" Minimum="0" Maximum="100" StepFrequency="1" ValueChanged="VolumeSlider_ValueChanged"
+                            AutomationProperties.Name="Volume" ToolTipService.ToolTip="Volume" />
+                </StackPanel>
+            </StackPanel>
         </Grid>
 
         <TextBlock x:Name="Status" Grid.Row="3" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
