@@ -141,7 +141,7 @@
     uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
     // The scene mirrored in the water (drawn first into reflectTex, what lies below clipBelow left out).
     uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
-    uniform bool water; uniform bool waterWaves; uniform vec3 waterColor; uniform vec3 skyColor; uniform vec3 skyTopColor;
+    uniform bool water; uniform bool waterWaves; uniform float waterTime; uniform vec3 waterColor; uniform vec3 skyColor; uniform vec3 skyTopColor;
     // How bright the sky the water mirrors is against the sky shown (the game's reflection is of the scene
     // in its light, brighter than the picture's sky after exposure; matched by eye to the game's bc_3).
     const float WaterSky = 2.2;
@@ -233,10 +233,17 @@
           // and the sun's glint.
           vec3 wn = vec3(0.0, 0.0, 1.0);
           if (waterWaves) {
+            // The game moves them by its water simulation (a height map round the camera, worked out each
+            // frame); here each size twice, drifting different ways with time (in metres a second), so the
+            // pattern changes as it goes instead of sliding as one.
             vec2 p = vPosition.xy;
-            vec2 slope = (texture(normalTex, p * 0.002).zw - 0.5) * 0.0512
-                       + (texture(normalTex, p * 0.01).zw - 0.5) * 0.256
-                       + (texture(normalTex, p * 0.0454).zw - 0.5) * 0.12;
+            float t = waterTime;
+            vec2 slope = (texture(normalTex, (p + t * vec2(0.9, 0.4)) * 0.002).zw
+                        + texture(normalTex, (p + t * vec2(-0.5, 0.8)) * 0.002 + 0.37).zw - 1.0) * 0.0362
+                       + (texture(normalTex, (p + t * vec2(0.6, -0.35)) * 0.01).zw
+                        + texture(normalTex, (p + t * vec2(-0.4, -0.55)) * 0.01 + 0.61).zw - 1.0) * 0.181
+                       + (texture(normalTex, (p + t * vec2(0.3, 0.45)) * 0.0454).zw
+                        + texture(normalTex, (p + t * vec2(-0.45, 0.2)) * 0.0454 + 0.23).zw - 1.0) * 0.085;
             wn = normalize(vec3(slope, 1.0));
           }
           vec3 view = normalize(vPosition - eyeAt);
@@ -329,6 +336,7 @@
       skyColor: gl.getUniformLocation(program, "skyColor"),
       skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
       waterWaves: gl.getUniformLocation(program, "waterWaves"),
+      waterTime: gl.getUniformLocation(program, "waterTime"),
       reflectOn: gl.getUniformLocation(program, "reflectOn"),
       reflectTex: gl.getUniformLocation(program, "reflectTex"),
       screenSize: gl.getUniformLocation(program, "screenSize"),
@@ -1686,6 +1694,7 @@
   }
 
   let pending = false;
+  let waterShown = false;   // the last frame drew water outside (it is drawn again and again, see below)
   function draw() {
     if (!gl || pending) return;
     pending = true;
@@ -1699,6 +1708,7 @@
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(program);
+      waterShown = false;
       const lightsNow = sceneLightsNow();
       const vp = viewProjection();
       if (sky && skyOn && backgroundReach > 0) drawSky(vp.matrix, vp.eye);
@@ -1720,6 +1730,7 @@
         gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3));
         gl.uniform3fv(loc.skyColor, sky.horizon);
         gl.uniform3fv(loc.skyTopColor, sky.zenith);
+        gl.uniform1f(loc.waterTime, (performance.now() / 1000) % 100000);
       }
       gl.uniform1i(loc.sceneLights, lightsNow.length);
       if (lightsNow.length) {
@@ -1785,6 +1796,7 @@
           gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
           gl.uniform1i(loc.water, mat.water === true);
           gl.uniform1i(loc.waterWaves, mat.water === true && !!mat.normal);
+          if (mat.water && outside && !reflecting) waterShown = true;
           gl.uniform1i(loc.lines, false);
           // Terrain's layers on texture units 2 to 4 (1 holds the bone matrices).
           const layered = m.layered && textured && mat.layerCount > 1;
@@ -1916,6 +1928,8 @@
       // The cutscene's camera while the view isn't its: where it is and what it sees.
       if (!useFilmCamera) drawFilmCamera();
       gl.bindVertexArray(null);
+      // Water in the picture moves all the time, also while the cutscene stands still: the next frame then.
+      if (waterShown && !playback.playing) draw();
     });
   }
 
