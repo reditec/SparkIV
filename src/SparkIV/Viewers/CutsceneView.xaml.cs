@@ -478,6 +478,8 @@ namespace SparkIV.WinUI.Viewers
         cast,
         camera ?? new { type = "camera", camera = (object?)null },
         new { type = "useCamera", on = s_camera && camera != null },
+        // How far the game draws, shot by shot (the map beyond isn't drawn).
+        new { type = "drawDistance", steps = cut.DrawDistanceSteps(index, _fps) },
         // The fade in at the start of the first section, out at the end of the last (in the section's frames).
         new
         {

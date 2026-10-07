@@ -60,6 +60,46 @@ namespace SparkIV.WinUI.Viewers
     /// </summary>
     public float DrawDistance { get; private set; }
 
+    /// <summary>
+    /// How far the game draws, shot by shot: from a time (milliseconds into the file's part, its sections one
+    /// after the other) the metres it draws (bc_3: 800 at the start, 89.2 in its last shot from the boat,
+    /// where the city's towers aren't drawn).
+    /// </summary>
+    public List<(int Part, float Ms, float Metres)> DrawDistances { get; } = new List<(int, float, float)>();
+
+    /// <summary>
+    /// [VEHICLE_DETAILS]: a vehicle's colours (four carcols.dat colour numbers) and dirt (0 to 15) by its model number, in the
+    /// order of the file (the game takes the first for a model: a cutscene object is coloured once).
+    /// </summary>
+    public List<(int Part, int Model, int[] Colours, int Dirt)> VehicleDetails { get; } = new List<(int, int, int[], int)>();
+
+    /// <summary>
+    /// A section's draw distances by its frames: [frame, metres] from the one in force at its start on (its
+    /// start the durations of the sections before it in its part); empty without any.
+    /// </summary>
+    public List<float[]> DrawDistanceSteps(int sectionIndex, float fps)
+    {
+      var steps = new List<float[]>();
+      if (sectionIndex < 0 || sectionIndex >= Sections.Count)
+      {
+        return steps;
+      }
+      var section = Sections[sectionIndex];
+      float start = Sections.Take(sectionIndex).Where(s => s.Part == section.Part).Sum(s => s.Duration) * 1000;
+      float end = start + section.Duration * 1000;
+      var mine = DrawDistances.Where(d => d.Part == section.Part).OrderBy(d => d.Ms).ToList();
+      var before = mine.LastOrDefault(d => d.Ms <= start);
+      if (before.Metres > 0)
+      {
+        steps.Add(new[] { 0f, before.Metres });
+      }
+      foreach (var d in mine.Where(d => d.Ms > start && d.Ms < end))
+      {
+        steps.Add(new[] { (d.Ms - start) / 1000 * fps, d.Metres });
+      }
+      return steps;
+    }
+
     public static CutFile Parse(string text)
     {
       var cut = new CutFile();
@@ -152,6 +192,15 @@ namespace SparkIV.WinUI.Viewers
             break;
           case "DRAW_DISTANCE" when parts.Length >= 3:
             cut.DrawDistance = Math.Max(cut.DrawDistance, F(parts[2]));
+            cut.DrawDistances.Add((Math.Max(0, part), F(parts[0]), F(parts[2])));
+            break;
+          case "VEHICLE_DETAILS" when parts.Length >= 5:
+            cut.VehicleDetails.Add((Math.Max(0, part), int.Parse(parts[0], CultureInfo.InvariantCulture),
+                                    parts.Skip(1).Take(4).Select(p => int.Parse(p, CultureInfo.InvariantCulture)).ToArray(),
+                                    parts.Length > 5 ? Math.Clamp(int.Parse(parts[5], CultureInfo.InvariantCulture), 0, 15) : 0));
+            break;
+          case "VEHICLE_REMOVAL" when section != null && parts.Length >= 2:
+            section.VehicleRemovals.Add((int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture)));
             break;
           case "REMOVE" when parts.Length >= 4:
             var removal = new CutRemoval(F(parts[0]), F(parts[1]), F(parts[2]), parts[3]);
@@ -182,6 +231,12 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>Seconds.</summary>
     public float Duration { get; set; }
+
+    /// <summary>
+    /// [VEHICLE_REMOVAL]: parts of a model taken off in this section, by the model's number and a bone's id
+    /// (a vehicle's extras: bc_3 removes four of the boat's five tops).
+    /// </summary>
+    public List<(int Model, int BoneId)> VehicleRemovals { get; } = new List<(int, int)>();
     public float[]? Offset { get; set; }
     public float Orient { get; set; }
   }
@@ -265,6 +320,14 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A ped (placed in the scene by its clip's model tracks) rather than a prop (by its root bone).</summary>
     public bool IsPed => Scene != null && Scene.Bones.Count > 40;
 
+    /// <summary>
+    /// A vehicle's six colours (RGB 0 to 1) its materials' paint slots take (see SceneMaterial.PaintSlot), or null.
+    /// </summary>
+    public float[][]? Paint { get; set; }
+
+    /// <summary>A vehicle's dirt, 0 to 1 (the .cut's [VEHICLE_DETAILS] 0 to 15).</summary>
+    public float Dirt { get; set; }
+
     /// <summary>The ped's prop dictionary (CS_Bernie_Crane_p), loaded when the cutscene has it wear some, or null.</summary>
     public ModelScene? PropScene { get; set; }
 
@@ -325,6 +388,14 @@ namespace SparkIV.WinUI.Viewers
         {
           var node = JsonSerializer.SerializeToNode(material.ToMessage(key => url(TextureKey(actor.Id, key))))!.AsObject();
           node["id"] = firstMaterial + material.Id;
+          if (actor.Paint != null && material.PaintSlot > 0)
+          {
+            node["paint"] = new JsonArray(actor.Paint[material.PaintSlot - 1].Select(c => (JsonNode)c).ToArray());
+          }
+          if (material.Vehicle)
+          {
+            node["dirtLevel"] = actor.Dirt;
+          }
           materials.Add(node);
           nextMaterial = Math.Max(nextMaterial, firstMaterial + material.Id + 1);
         }
@@ -639,12 +710,18 @@ namespace SparkIV.WinUI.Viewers
             };
           }
         }
+        // The bones the section's [VEHICLE_REMOVAL] lines take off this model: the game sets their matrices to
+        // nothing while drawing it (GTAIV.exe 0xC66BE0 / 0xC66F80), so what hangs on them isn't seen (bc_3: of the
+        // boat's five tops, extra_1 to extra_4 removed in its first section, an open boat left).
+        var removed = section.VehicleRemovals.Where(r => r.Model == model.Id && boneOfId.ContainsKey(r.BoneId))
+                                             .Select(r => boneOfId[r.BoneId]).Distinct().ToList();
         cast.Add(new
         {
           id = actor.Id,
           skeleton,
           clip = clip == null ? null : new { frames = Math.Max(1, clip.FrameCount), fps = FramesPerSecond(clip), tracks },
           root,
+          removedBones = removed,
         });
       }
 
@@ -978,6 +1055,68 @@ namespace SparkIV.WinUI.Viewers
     /// The texture variations are applied when the models load (<see cref="CutActor.TextureVariations"/>).
     /// </summary>
     /// <param name="likeGame">Leave out the see-through parts the game doesn't draw (<see cref="HideUnflaggedSeeThrough"/>).</param>
+    /// <summary>
+    /// The vehicles' colours: by the .cut's [VEHICLE_DETAILS] (its first line for the model), else the first
+    /// set carcols.dat gives the model; numbers into carcols.dat's colour table (the game's folder's, else GTA
+    /// IV's). Six colours as the game makes them for a vehicle's shaders (GTAIV.exe 0xD25D80): the four, white,
+    /// the third again.
+    /// </summary>
+    public static void ApplyPaint(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV)
+    {
+      string? file = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.Combine(f!, "common", "data", "carcols.dat")).FirstOrDefault(File.Exists);
+      if (file == null)
+      {
+        return;
+      }
+      var colours = new List<float[]>();
+      var sets = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase);
+      string? block = null;
+      foreach (string raw in File.ReadLines(file))
+      {
+        string line = raw.Split('#')[0].Trim();
+        if (line.Length == 0)
+        {
+          continue;
+        }
+        if (line is "col" or "car" or "car3" or "car4" or "end")
+        {
+          block = line == "end" ? null : line;
+          continue;
+        }
+        var fields = line.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (block == "col" && fields.Length >= 3 && fields.Take(3).All(f => int.TryParse(f, out _)))
+        {
+          colours.Add(fields.Take(3).Select(f => int.Parse(f, CultureInfo.InvariantCulture) / 255f).ToArray());
+        }
+        else if (block is "car" or "car3" or "car4" && fields.Length >= 2)
+        {
+          var numbers = fields.Skip(1).Select(f => int.TryParse(f, out int n) ? n : -1).Where(n => n >= 0).ToArray();
+          sets.TryAdd(fields[0], numbers);
+        }
+      }
+      float[] Colour(int number) => number >= 0 && number < colours.Count ? colours[number] : new[] { 1f, 1f, 1f };
+      foreach (var actor in actors)
+      {
+        if (actor.Scene == null || !actor.Scene.Materials.Any(m => m.PaintSlot > 0))
+        {
+          continue;
+        }
+        var details = cut.VehicleDetails.FirstOrDefault(d => d.Part == actor.Part && d.Model == actor.Number);
+        int[]? numbers = details.Colours;
+        actor.Dirt = details.Colours != null ? details.Dirt / 15f : 0;
+        if (numbers == null && sets.TryGetValue(actor.Model, out var set))
+        {
+          int per = set.Length % 4 == 0 && set.Length % 3 != 0 ? 4 : 3;
+          numbers = set.Take(per).Concat(Enumerable.Repeat(per == 3 ? set.ElementAtOrDefault(2) : 0, 4 - per)).ToArray();
+        }
+        if (numbers == null || numbers.Length < 4)
+        {
+          continue;
+        }
+        actor.Paint = new[] { Colour(numbers[0]), Colour(numbers[1]), Colour(numbers[2]), Colour(numbers[3]), new[] { 1f, 1f, 1f }, Colour(numbers[2]) };
+      }
+    }
+
     public static void ApplyVariations(CutFile cut, IEnumerable<CutActor> actors, bool likeGame = true)
     {
       foreach (var actor in actors)

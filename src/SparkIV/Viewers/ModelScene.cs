@@ -946,7 +946,8 @@ namespace SparkIV.WinUI.Viewers
       }
       // Dirt decals (gta_decal_dirt) take their colour from the vertices, the texture only says where; map
       // objects shown in their place (a cutscene's location) the light baked into them.
-      if (hasColor && colors == null && (_vertexColors || (material >= 0 && material < Materials.Count && Materials[material].DirtMask != null)))
+      // Vehicles' too: their shaders multiply the colour by them (gta_vehicle_paint2: texture x matDiffuseColor x vertex colour).
+      if (hasColor && colors == null && (_vertexColors || (material >= 0 && material < Materials.Count && (Materials[material].DirtMask != null || Materials[material].Vehicle))))
       {
         colors = new float[vertices.Length * 3];
         for (int i = 0; i < vertices.Length; i++)
@@ -1068,6 +1069,7 @@ namespace SparkIV.WinUI.Viewers
 
       // Glass is drawn see-through; it is named so in the shader (gta_vehicle_vehglass, gta_glass ...).
       bool glass = material.ShaderName.Contains("glass", StringComparison.OrdinalIgnoreCase);
+      bool vehicle = material.ShaderName.StartsWith("gta_vehicle", StringComparison.OrdinalIgnoreCase);
       return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass)
       {
         LayerKeys = layerKeys,
@@ -1082,8 +1084,22 @@ namespace SparkIV.WinUI.Viewers
         DirtMask = material.ShaderName.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase)
           ? (VectorParameter(material, DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
           : null,
+        PaintSlot = VectorParameter(material, MatDiffuseColor) is { X: 2 } paint && paint.Y >= 1 && paint.Y <= 6 ? (int)paint.Y : 0,
+        Vehicle = vehicle,
+        DirtKey = vehicle && material.DrawBucket is not (29 or 30) && TextureParameter(material, DirtSampler) is string dirtName
+          ? AddTexture(dirtName, embedded, Materials.Count + "_d.png") : null,
+        DirtColor = VectorParameter(material, DirtColorHash) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
+        ReflectivePower = (VectorParameter(material, ReflectivePowerED) ?? VectorParameter(material, ReflectivePowerHash))?.X ?? 0,
       };
     }
+
+    // A vehicle's shaders (gta_vehicle_paint1 ..., _mesh, _vehglass): their dirt, its colour, how reflective.
+    private static readonly uint DirtSampler = RageLib.Text.GxtFile.Hash("DirtSampler"), DirtColorHash = RageLib.Text.GxtFile.Hash("dirtColor"),
+                                 ReflectivePowerED = RageLib.Text.GxtFile.Hash("reflectivePowerED"), ReflectivePowerHash = RageLib.Text.GxtFile.Hash("reflectivePower");
+
+    // A vehicle's "matdiffusecolor": (2, slot, slot) a placeholder for one of the vehicle's colours (the
+    // game's shader multiplies the texture by it: gta_vehicle_mesh's pixel shader, texture x c66).
+    private static readonly uint MatDiffuseColor = RageLib.Text.GxtFile.Hash("matDiffuseColor");
 
     // "dirtdecalmask": which of a dirt decal's texture channels says where the dirt is (gta_decal_dirt).
     private static readonly uint DirtDecalMask = RageLib.Text.GxtFile.Hash("dirtDecalMask");
@@ -1302,12 +1318,30 @@ namespace SparkIV.WinUI.Viewers
     /// </summary>
     public float[]? DirtMask { get; init; }
 
+    /// <summary>
+    /// A vehicle's material coloured by the vehicle (its matdiffusecolor (2, slot, slot)): which of its six
+    /// colours (GTAIV.exe 0xD25D80: 1 to 4 its carcols colours, 5 white, 6 the third again); 0 for others.
+    /// </summary>
+    public int PaintSlot { get; init; }
+
+    /// <summary>
+    /// A vehicle's shader (gta_vehicle_*): lit as the game's (gta_vehicle_paint2's pixel shader: the texture
+    /// mixed towards <see cref="DirtColor"/> by its dirt texture's red x the vehicle's dirt; the shine
+    /// dot(spec map, mask) x 0.15 x reflectivity, as sharp as its alpha x 190 x reflectivity; glass mirroring
+    /// its surroundings x reflectivity).
+    /// </summary>
+    public bool Vehicle { get; init; }
+    public string? DirtKey { get; init; }
+    public float[] DirtColor { get; init; } = { 0.23f, 0.22f, 0.2f };
+    public float ReflectivePower { get; init; }
+
     /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
     public object ToMessage(Func<string, string> url) => new
     {
       id = Id,
       glass = Glass,
       cutout = Cutout,
+      stipple = Stipple,
       blend = Blend,
       decal = Decal,
       hidden = Hidden,
@@ -1322,6 +1356,10 @@ namespace SparkIV.WinUI.Viewers
       specularIntensity = SpecularIntensity,
       specularMask = SpecularMask,
       dirtMask = DirtMask,
+      vehicle = Vehicle,
+      dirtTexture = DirtKey == null ? null : url(DirtKey),
+      dirtColor = DirtColor,
+      reflectivePower = ReflectivePower,
     };
 
     /// <summary>
@@ -1338,6 +1376,17 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>Whether it is drawn over what is behind it by its texture's alpha (see-through, decals); glass has its own way.</summary>
     public bool Blend => !Glass && DrawBucket is 1 or 2 or 5;
+
+    /// <summary>
+    /// A person's see-through part (gta_ped, bucket 1), drawn as the game draws it: gta_ped.fxc's technique
+    /// "draw" (forward, after the deferred pass) with its own render states AlphaTest on, AlphaRef 100,
+    /// AlphaBlend on (seen live in x32dbg while the game drew peds' props: ALPHAREF 100 then back to 0), and
+    /// its pixel shader keeps only part of the pixels by alpha before blending them (the stipple texture
+    /// platform:/textures/stipple.wtd all_stips, 16 levels of 8 x 8, level = alpha x 3.996). bc_3: Florian's
+    /// glasses (p_eyes_diff_000_a), lenses alpha 124: level 7, 24 of 64 pixels kept, blended at 0.486 -
+    /// about 18 % in all (blended whole they looked like sunglasses).
+    /// </summary>
+    public bool Stipple => DrawBucket == 1 && string.Equals(Shader, "gta_ped", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether it lies on another surface (a puddle, dirt, a poster): drawn a little in front of it.</summary>
     public bool Decal => DrawBucket == 2;

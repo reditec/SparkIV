@@ -99,7 +99,13 @@
     in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
     in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
-    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout;
+    // A vehicle's paint on its texture (its shader: texture x matDiffuseColor, the vehicle's colour); white else.
+    uniform vec3 paint;
+    // A vehicle's shader (as the game's gta_vehicle_*): its dirt (texture's red x the vehicle's dirt mixes the
+    // colour towards dirtColor), its shine (spec map . mask x 0.15 x reflectivity, sharpness its alpha x 190 x
+    // reflectivity, less where dirty) and, on glass, the sky mirrored x reflectivity.
+    uniform bool vehicle; uniform bool useDirt; uniform sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
+    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout; uniform bool stipple;
     // Where the camera is (the side of a surface it sees is the one toward it, point by point).
     uniform vec3 eyeAt;
     // See-through by the texture's alpha (the see-through and decal buckets).
@@ -115,6 +121,10 @@
     const float BakedLight = 0.44;
     // The actors' light round about while a location is shown (the rest is the cutscene's lights).
     const float ActorAround = 0.3;
+    // The actors' light outside, of the map's: the game's peds come out darker against the same wall (bc_3,
+    // 07:40 in the video: Bernie's face 51 where SparkIV's was 79, his trousers 23 to 30, the wall's stone
+    // alike) - not its exposure, which would darken the wall as well.
+    const float ActorOutside = 0.7;
     // A cutscene with its location: graded a little like the game's picture indoors (warmer, less saturated).
     uniform bool grade;
     // A cutscene's own lights and its location's lamps (up to 40), three vec4s each (few uniform slots, so
@@ -173,7 +183,14 @@
         float isWater = inside ? texture(waterMask, q).r : 0.0;
         if (waterGrid ? isWater < 0.5 : isWater >= 0.5) discard;
       }
-      vec4 base = useTexture ? texture(tex, vUv) : vec4(color, 1.0);
+      vec4 base = useTexture ? texture(tex, vUv) * vec4(paint, 1.0) : vec4(color, 1.0);
+      if (vehicle) base.rgb *= vColor;
+      float dirtAmount = 0.0;
+      if (vehicle && useDirt && dirtLevel > 0.0) {
+        float dirt = texture(dirtTex, vUv).r;
+        dirtAmount = dirt * dirtLevel;
+        if (dirt > 0.0) base.rgb = mix(base.rgb, dirtColor, dirtAmount);
+      }
       if (layers > 1) {
         // Each layer over the ones below as far as it covers, masked by its own alpha (scrub in tufts over
         // the sand), as the game's gta_terrain_va_*lyr pixel shader does: lrp(c, layer, layer.a * weight).
@@ -202,7 +219,7 @@
       // Outside: the light from around (from above on what faces up, from below on what faces down) and the
       // sun, on the map dimmed by the light baked into it (its red: how open to the sky a point is).
       vec3 outside = mix(ambientBelow, ambientAbove, n.z * 0.5 + 0.5) + sunColor * max(dot(n, sunDir), 0.0);
-      if (outdoor) outside *= baked ? vColor.r : 1.0;
+      if (outdoor) outside *= baked ? vColor.r : ActorOutside;
       // A cutscene's lights on top: fading to nothing at their range, inside a spot's cone (soft at its edge).
       // The view's own light dimmed while they are on, so they show (in the game they are much of the light).
       vec3 lit = outdoor ? outside : vec3(sceneLights > 0 && !baked && !grade ? shade * 0.6 : shade);
@@ -241,12 +258,40 @@
         float where = useSpecMap && useTexture ? dot(spec.rgb, specMask) : 1.0;
         shine = pow(max(dot(n, normalize(light + toEye)), 0.0), max(specPower * spec.a, 1.0)) * specIntensity * where;
       }
+      // A vehicle's shine in the sun (outside) or the view's light, as the game's vehicle shaders give it to
+      // its lighting.
+      vec3 vehicleShine = vec3(0.0);
+      if (vehicle && useSpecMap && useTexture && reflectivePower > 0.0) {
+        vec4 spec = texture(specTex, vUv);
+        float strength = dot(spec.rgb, specMask) * 0.15 * reflectivePower * (1.0 - dirtAmount);
+        float sharp = max(spec.a * 190.0 * reflectivePower, 1.0);
+        vec3 l = outdoor ? sunDir : light;
+        vec3 h = normalize(l + normalize(eyeAt - vPosition));
+        vehicleShine = strength * pow(max(dot(n, h), 0.0), sharp) * (outdoor ? sunColor : vec3(1.0));
+      }
       float a = alpha < 1.0 ? alpha : 1.0;
       if (textureAlpha) {
         a = base.a * vAlpha;
         if (a < 0.01) discard;
+        if (stipple) {
+          // A person's see-through part as gta_ped.fxc's forward shader: alpha test at 100 / 255, then of the
+          // pixels only the share its stipple level keeps (stipple.wtd all_stips: kept of 64 per level,
+          // level = alpha x 3.996 - row its whole part, column a quarter of the rest), each blended by
+          // alpha. Here as that share of the alpha, without the 8 x 8 pattern.
+          if (a < 100.0 / 255.0) discard;
+          const float kept[16] = float[16](0.0, 6.0, 8.0, 12.0, 11.0, 12.0, 16.0, 24.0, 32.0, 40.0, 48.0, 52.0, 52.0, 56.0, 58.0, 64.0);
+          float level = min(a, 1.0) * 3.996;
+          int index = int(floor(level)) * 4 + int(floor(fract(level) * 4.0));
+          a *= kept[index] / 64.0;
+        }
       }
-      vec3 rgb = emissive ? base.rgb : base.rgb * lit + shine;
+      vec3 rgb = emissive ? base.rgb : base.rgb * lit + shine + vehicleShine;
+      // A vehicle's glass mirrors its surroundings (the game's gta_vehicle_vehglass: its environment map x
+      // reflectivity, added): here the sky as the water mirrors it.
+      if (vehicle && alpha < 1.0 && outdoor) {
+        vec3 r = reflect(normalize(vPosition - eyeAt), n);
+        rgb += mix(skyColor, skyTopColor, clamp(r.z * 2.5, 0.0, 1.0)) * reflectivePower;
+      }
       if (outdoor) {
         // As bright as the game's picture: the light's values (up to about 3) brought down softly.
         rgb = 1.0 - exp(-rgb);
@@ -356,11 +401,19 @@
       useTexture: gl.getUniformLocation(program, "useTexture"),
       hasNormal: gl.getUniformLocation(program, "hasNormal"),
       color: gl.getUniformLocation(program, "color"),
+      paint: gl.getUniformLocation(program, "paint"),
+      vehicle: gl.getUniformLocation(program, "vehicle"),
+      useDirt: gl.getUniformLocation(program, "useDirt"),
+      dirtTex: gl.getUniformLocation(program, "dirtTex"),
+      dirtColor: gl.getUniformLocation(program, "dirtColor"),
+      dirtLevel: gl.getUniformLocation(program, "dirtLevel"),
+      reflectivePower: gl.getUniformLocation(program, "reflectivePower"),
       light: gl.getUniformLocation(program, "light"),
       toEye: gl.getUniformLocation(program, "toEye"),
       alpha: gl.getUniformLocation(program, "alpha"),
       lines: gl.getUniformLocation(program, "lines"),
       cutout: gl.getUniformLocation(program, "cutout"),
+      stipple: gl.getUniformLocation(program, "stipple"),
       uvAnim: gl.getUniformLocation(program, "uvAnim"),
       uvRow0: gl.getUniformLocation(program, "uvRow0"),
       uvRow1: gl.getUniformLocation(program, "uvRow1"),
@@ -562,8 +615,9 @@
     // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
     // another surface (decal), or not at all (a vehicle's no-water planes).
     const material = {
-      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
-      color: m.color || hsl(hue, 0.25, 0.62), layerCount, layers: [null, null, null],
+      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
+      color: m.paint || m.color || hsl(hue, 0.25, 0.62), paint: m.paint || [1, 1, 1], layerCount, layers: [null, null, null],
+      vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0,
       // Bumps and shine.
       normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
       specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
@@ -573,6 +627,7 @@
     if (m.texture) loadTexture(m.texture, t => material.texture = t);
     if (m.normal) loadTexture(m.normal, t => material.normal = t);
     if (m.specular) loadTexture(m.specular, t => material.specular = t);
+    if (m.dirtTexture && m.dirtLevel > 0) loadTexture(m.dirtTexture, t => material.dirt = t);
     (m.layers || []).forEach((url, i) => { if (url && i < 3) loadTexture(url, t => material.layers[i] = t); });
   }
 
@@ -1138,8 +1193,10 @@
   }
   function setSky(m) {
     const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
-    const horizon = mix(m.skyBottom, [0.85, 0.9, 0.91], 0.8);
-    const zenith = mix(m.skyBottom, [0.72, 0.82, 0.88], 0.75);
+    // Matched to the game's clear sky in bc_3 (08:18 in the video): 179 227 252 low over the horizon, 163 209
+    // 235 some 30 degrees up.
+    const horizon = mix(m.skyBottom, [0.825, 0.959, 0.988], 0.8);
+    const zenith = mix(m.skyBottom, [0.747, 0.857, 0.853], 0.75);
     sky = { ...m, horizon, zenith };
     if (m.clouds && !cloudTex) loadTexture(m.clouds, t => cloudTex = t);
     if (m.cloudDetail && !cloudDetailTex) loadTexture(m.cloudDetail, t => cloudDetailTex = t);
@@ -1250,7 +1307,8 @@
       float height = c.x + (c.y - 0.5) * Speed * step + a * step * step * 0.5;
       outColor = vec4(height, speed, (right - left) * 0.5 + 0.5, (up - down) * 0.5 + 0.5);
     }`;
-  // How windy (0 to 1) the water's simulation takes it (the game's comes from its weather; a light breeze).
+  // How windy (0 to 1) the water's simulation takes it. The game's (0x12DDEB4, a byte / 255) is set only from a
+  // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user chose.
   const WaterWind = 0.25;
   let waterSim = null;
   function waterSimStep() {
@@ -1487,6 +1545,15 @@
     }
     return Math.min(sky.fogEnd, hazeReach.end);
   }
+  // How far the game draws now ("drawDistance": [frame, metres] steps of the section; none: no limit).
+  let drawSteps = [];
+  function drawDistanceNow() {
+    if (!drawSteps.length) return Infinity;
+    const f = currentFrame();
+    let metres = Infinity;
+    for (const [frame, m] of drawSteps) { if (frame <= f + 1e-3) metres = m; else break; }
+    return metres;
+  }
   function hazeColour() {
     return sky.horizon;
   }
@@ -1659,7 +1726,11 @@
         facials: (a.clip.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
       } : null;
       if (sk) findFollowers(sk, cl);
-      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null });
+      // A removed bone takes the bones below it along (the game's hardtop glass hangs on misc_a, a child of
+      // the boat's extra_1).
+      const removed = new Set(a.removedBones || []);
+      if (sk && removed.size) for (let i = 0; i < sk.parent.length; i++) for (let p = sk.parent[i]; p >= 0; p = sk.parent[p]) if (removed.has(p)) { removed.add(i); break; }
+      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null, removed: [...removed] });
     }
     showFrame();
     // Where the actors are now (the view fitted before their clips were there looked at the origin); the
@@ -1667,6 +1738,7 @@
     if (list.length && first) fit();
   }
 
+  const NoBone = new Array(16).fill(0);
   function poseCast(frame) {
     for (const a of cast.values()) {
       if (!a.skeleton) continue;
@@ -1687,7 +1759,9 @@
       }
       a.room = roomOf(at);
       a.world = world;
-      uploadBones(a.skeleton, world);
+      // The parts the section's [VEHICLE_REMOVAL] takes off: their bones' matrices nothing, as the game draws
+      // them (what hangs on them shrinks away).
+      uploadBones(a.skeleton, a.removed.length ? world.map((m, i) => a.removed.includes(i) ? NoBone : m) : world);
     }
   }
 
@@ -2145,8 +2219,12 @@
           const d = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]);
           if (m.radius / Math.max(d, 1e-3) < 0.01) return false;
         }
-        // Outside, nothing wholly in the haze (beyond its end it is all haze).
-        if (outside && Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]) - m.radius > hazeEnd()) return false;
+        // Outside, nothing wholly in the haze (beyond its end it is all haze), nor beyond how far the game draws
+        // in this shot (the .cut's draw distance: bc_3's last shot from the boat 89 m, the city's towers not there).
+        if (outside) {
+          const away = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]) - m.radius;
+          if (away > hazeEnd() || (away > drawDistanceNow() && !(materials.get(m.material) || {}).water)) return false;
+        }
         return true;
       };
       for (const pass of ["solid", "glass"]) {
@@ -2169,6 +2247,7 @@
           const textured = showTextures && !!mat.texture;
           gl.uniform1i(loc.useTexture, textured);
           gl.uniform1i(loc.cutout, mat.cutout === true);
+          gl.uniform1i(loc.stipple, mat.stipple === true);
           gl.uniform1i(loc.textureAlpha, glassPass && !mat.glass);
           // Decals a little in front of the surface they lie on, so they don't flicker into it.
           // See-through layers over a surface (dirt, wear, posters in the interiors) a little less, so they
@@ -2180,6 +2259,16 @@
           else gl.disable(gl.POLYGON_OFFSET_FILL);
           gl.uniform1i(loc.hasNormal, m.hasNormal);
           gl.uniform3fv(loc.color, mat.color);
+          gl.uniform3fv(loc.paint, mat.paint || [1, 1, 1]);
+          gl.uniform1i(loc.vehicle, mat.vehicle === true);
+          gl.uniform1i(loc.useDirt, !!mat.dirt);
+          if (mat.dirt) {
+            gl.uniform3fv(loc.dirtColor, mat.dirtColor);
+            gl.uniform1f(loc.dirtLevel, mat.dirtLevel);
+            gl.uniform1i(loc.dirtTex, 14);
+            gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, mat.dirt); gl.activeTexture(gl.TEXTURE0);
+          }
+          gl.uniform1f(loc.reflectivePower, mat.reflectivePower || 0);
           gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
           gl.uniform1i(loc.water, mat.water === true);
           gl.uniform1i(loc.waterWaves, mat.water === true && !!mat.normal);
@@ -2204,11 +2293,12 @@
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
           gl.uniform1i(loc.dirtDecal, !!mat.dirtMask);
-          gl.uniform1i(loc.baked, m.baked);
+          // A vehicle of the cast lit as the cast is (its vertex colours are its paint's, not baked light).
+          gl.uniform1i(loc.baked, m.baked && !mat.vehicle);
           const actorNow = m.actor ? cast.get(m.actor) : null;
           gl.uniform1i(loc.meshRoom, actorNow ? (actorNow.room ?? -1) : m.room);
           // A map object without baked light (some walls): a middling one, not the view's bright light.
-          if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 0.45, 0.45, 0.45);
+          if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45);
           gl.uniform1i(loc.emissive, mat.emissive === true && textured);
           if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);
           gl.uniform1i(loc.normalTex, 5);
@@ -2222,6 +2312,16 @@
           useSkin(m);
           if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
           if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+          // A cutscene's vehicles and props only from the front, as the game draws them (culling back faces):
+          // bc_3's camera sits in the boat looking out past its side, whose inside face hid Niko and Bernie.
+          // Mirrored in the water the winding turns round.
+          if (m.actor && m.baked && !glassPass) {
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(gl.BACK);
+            gl.frontFace(reflecting ? gl.CW : gl.CCW);
+          } else {
+            gl.disable(gl.CULL_FACE);
+          }
           gl.bindVertexArray(m.vao);
           gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
           // The water near the camera: the sea's grid too, with the same material (the quads leave it out).
@@ -2431,6 +2531,7 @@
       if (m.type === "batch") { for (const one of m.messages) handle(one); }
       else if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
+      else if (m.type === "drawDistance") { drawSteps = m.steps || []; draw(); }
       else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); findSpots(); if (first || m.fit) fit(); else draw(); }
       else if (m.type === "options") {
         showTextures = m.textures; wireframe = m.wireframe;

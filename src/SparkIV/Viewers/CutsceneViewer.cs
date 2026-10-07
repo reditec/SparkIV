@@ -83,6 +83,7 @@ namespace SparkIV.WinUI.Viewers
       log.Step("cast: models and their textures", actors.Count + " models");
       CutsceneMessages.ApplyVariations(cut, actors, AppSettings.CutsceneSeeThroughLikeGame);
       CutsceneMessages.LoadProps(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
+      CutsceneMessages.ApplyPaint(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
       log.Step("cast: variations and props");
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
       log.Step("sound", audioNote);
