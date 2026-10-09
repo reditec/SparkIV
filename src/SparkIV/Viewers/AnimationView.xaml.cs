@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -9,7 +9,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.Web.WebView2.Core;
-using RageLib.Animation;
+using RageLib.GtaIV.Pc.Animation;
 
 namespace SparkIV.WinUI.Viewers
 {
@@ -209,10 +209,7 @@ namespace SparkIV.WinUI.Viewers
       string type = "image/png";
       if (name == "index.html")
       {
-        using var page = typeof(ModelView).Assembly.GetManifestResourceStream("SparkIV.ModelView.html")!;
-        using var copy = new MemoryStream();
-        page.CopyTo(copy);
-        body = copy.ToArray();
+        body = ModelViewPage.Bytes();
         type = "text/html; charset=utf-8";
       }
       else

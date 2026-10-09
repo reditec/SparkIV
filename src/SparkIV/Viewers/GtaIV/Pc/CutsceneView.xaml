@@ -1,9 +1,9 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <UserControl
-    x:Class="SparkIV.WinUI.Viewers.CutsceneView"
+    x:Class="SparkIV.WinUI.Viewers.GtaIV.Pc.CutsceneView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:SparkIV.WinUI.Viewers">
+    xmlns:local="using:SparkIV.WinUI.Viewers.GtaIV.Pc">
 
     <Grid RowSpacing="6">
         <Grid.RowDefinitions>

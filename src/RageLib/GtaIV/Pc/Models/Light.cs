@@ -1,7 +1,7 @@
 using RageLib.Common.ResourceTypes;
 using RageLib.Models.Resource;
 
-namespace RageLib.Models.Data
+namespace RageLib.GtaIV.Pc.Models
 {
   /// <summary>A light of a model (a lamp, a neon sign, a spot): where it is, where it shines, how far.</summary>
   public class Light

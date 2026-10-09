@@ -16,7 +16,7 @@ using System.IO;
 using System.Text;
 using RageLib.Common.Resources;
 
-namespace RageLib.Animation
+namespace RageLib.GtaIV.Pc.Animation
 {
   /// <summary>What a track moves.</summary>
   public enum AnimationTrackKind

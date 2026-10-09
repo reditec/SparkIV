@@ -4,13 +4,13 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Microsoft.UI.Xaml;
-using RageLib.Animation;
+using RageLib.GtaIV.Pc.Animation;
 using RageLib.Common;
 using RageLib.FileSystem;
 using SparkIV.WinUI.Services;
 using File = RageLib.FileSystem.Common.File;
 
-namespace SparkIV.WinUI.Viewers
+namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>What the cutscene view shows: the .cut, its cast loaded, each section's animations, the subtitles' texts.</summary>
   public sealed class CutsceneDocument
@@ -222,7 +222,7 @@ namespace SparkIV.WinUI.Viewers
       }
       try
       {
-        var gxt = new RageLib.Text.GxtFile { Charset = RageLib.Text.GxtCharset.Western };
+        var gxt = new RageLib.GtaIV.Pc.Text.GxtFile { Charset = RageLib.GtaIV.Pc.Text.GxtCharset.Western };
         using (var stream = System.IO.File.OpenRead(path))
         {
           gxt.Open(stream);

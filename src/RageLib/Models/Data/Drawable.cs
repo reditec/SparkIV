@@ -20,6 +20,7 @@
 
 using System.Collections.Generic;
 using RageLib.Models.Resource;
+using RageLib.GtaIV.Pc.Models;
 
 namespace RageLib.Models.Data
 {

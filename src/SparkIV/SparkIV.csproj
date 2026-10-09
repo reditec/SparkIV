@@ -31,6 +31,8 @@
     <EmbeddedResource Include="Viewers\TextDocumentView.html" LogicalName="SparkIV.TextDocumentView.html" />
     <EmbeddedResource Include="Viewers\HexView.html" LogicalName="SparkIV.HexView.html" />
     <EmbeddedResource Include="Viewers\ModelView.html" LogicalName="SparkIV.ModelView.html" />
+    <!-- GTA IV (PC)'s part of the model view (its shaders' and GTAIV.exe's rules), served before the page's own script. -->
+    <EmbeddedResource Include="Viewers\GtaIV\Pc\gtaiv-pc.js" LogicalName="SparkIV.GtaIV.Pc.gtaiv-pc.js" />
   </ItemGroup>
 
   <ItemGroup>

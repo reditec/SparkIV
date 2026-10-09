@@ -85,7 +85,7 @@ namespace SparkIV.WinUI.Services
           s_modelOfHash = new Dictionary<uint, string>();
           foreach (var name in s_dictionaryOfModel!.Keys)
           {
-            s_modelOfHash.TryAdd(RageLib.Text.GxtFile.Hash(name), name);
+            s_modelOfHash.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(name), name);
           }
         }
         return s_modelOfHash.TryGetValue(hash, out var found) ? found : null;

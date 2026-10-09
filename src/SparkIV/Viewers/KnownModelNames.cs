@@ -33,7 +33,7 @@ namespace SparkIV.WinUI.Viewers
           for (int model = 1; model <= 4; model++)
           {
             string name = "grass" + set + "_" + model;
-            names[RageLib.Text.GxtFile.Hash(name)] = name;
+            names[RageLib.GtaIV.Pc.Text.GxtFile.Hash(name)] = name;
           }
         }
         s_names = names;

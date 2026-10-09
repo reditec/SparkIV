@@ -205,10 +205,7 @@ namespace SparkIV.WinUI.Viewers
       string type = "image/png";
       if (name == "index.html")
       {
-        using var page = typeof(ModelView).Assembly.GetManifestResourceStream("SparkIV.ModelView.html")!;
-        using var copy = new MemoryStream();
-        page.CopyTo(copy);
-        body = copy.ToArray();
+        body = ModelViewPage.Bytes();
         type = "text/html; charset=utf-8";
       }
       else
@@ -481,15 +478,6 @@ namespace SparkIV.WinUI.Viewers
   internal sealed class ModelViewer : IViewer
   {
     public object Load(File file, byte[] data) => ModelScene.Load(file, data);
-
-    public FrameworkElement CreateView(ViewerContext context, object loaded) => new ModelView(context, (ModelScene)loaded);
-  }
-
-  /// <summary>Collision: static collision (.wbn) and collision dictionaries (.wbd), in the model view.</summary>
-  internal sealed class CollisionViewer : IViewer
-  {
-    public object Load(File file, byte[] data) =>
-      CollisionScene.Load(file, data, Services.Games.Current?.Folder ?? Services.Games.InstallFolder(Services.Games.GtaIV, "Windows"));
 
     public FrameworkElement CreateView(ViewerContext context, object loaded) => new ModelView(context, (ModelScene)loaded);
   }

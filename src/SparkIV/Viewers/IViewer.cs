@@ -89,10 +89,9 @@ namespace SparkIV.WinUI.Viewers
       ByExtension[".wtd"] = new TextureViewer();
       ByExtension[".whm"] = new WebPageViewer();
       ByExtension[".wad"] = new AnimationViewer();
-      ByExtension[".cut"] = new CutsceneViewer();
-      var collision = new CollisionViewer();
-      ByExtension[".wbn"] = collision;
-      ByExtension[".wbd"] = collision;
+      // The viewers that only know GTA IV (PC)'s formats and rules (cutscenes, collision). Another game or
+      // platform registers its own here.
+      GtaIV.Pc.GtaIVPcViewers.Register(ByExtension);
       var models = new ModelViewer();
       foreach (var ext in new[] { ".wdr", ".wdd", ".wft" })
       {

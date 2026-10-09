@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 
-namespace SparkIV.WinUI.Viewers
+namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>
   /// The light of a time and weather outside, from the game's pc\data\timecyc.dat: per weather (EXTRASUNNY,

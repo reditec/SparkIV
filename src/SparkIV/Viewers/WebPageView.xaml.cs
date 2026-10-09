@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -398,7 +398,7 @@ namespace SparkIV.WinUI.Viewers
 
     private Directory? _textFolder;
     private bool _textFolderSearched;
-    private RageLib.Text.GxtFile? _texts;
+    private RageLib.GtaIV.Pc.Text.GxtFile? _texts;
     private string? _language;
 
     /// <summary>The languages this game has text tables for, by their file name, and the name to show.</summary>
@@ -419,16 +419,16 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Loads the text table of a language; false if it can't be read (then the keys are shown).</summary>
     public bool SetLanguage(string file)
     {
-      RageLib.Text.GxtFile? texts = null;
+      RageLib.GtaIV.Pc.Text.GxtFile? texts = null;
       if (TextFolder()?.FindByName(file) is File gxt)
       {
         try
         {
-          texts = new RageLib.Text.GxtFile();
+          texts = new RageLib.GtaIV.Pc.Text.GxtFile();
           texts.Open(new MemoryStream(gxt.GetData()));
           texts.Charset = file.Equals("russian.gxt", StringComparison.OrdinalIgnoreCase)
-            ? RageLib.Text.GxtCharset.Russian
-            : RageLib.Text.GxtCharset.Western;
+            ? RageLib.GtaIV.Pc.Text.GxtCharset.Russian
+            : RageLib.GtaIV.Pc.Text.GxtCharset.Western;
         }
         catch (Exception)
         {
@@ -446,7 +446,7 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A text of the game the pages show by key ("EYE_HOME_3") in the chosen language, or null.</summary>
     public string? FindText(string key)
     {
-      RageLib.Text.GxtFile? texts;
+      RageLib.GtaIV.Pc.Text.GxtFile? texts;
       lock (this)
       {
         texts = _texts;

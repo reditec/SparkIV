@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using RageLib.Bounds;
+using RageLib.GtaIV.Pc.Bounds;
 using SparkIV.WinUI.Model;
 using File = RageLib.FileSystem.Common.File;
 
-namespace SparkIV.WinUI.Viewers
+namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>
   /// A procedural object (procedural.dat's PROCOBJ line) grown on collision faces of its tag: the model, one per
@@ -152,7 +152,7 @@ namespace SparkIV.WinUI.Viewers
       foreach (var other in file.ParentDirectory?.OfType<File>() ?? Enumerable.Empty<File>())
       {
         string model = Path.GetFileNameWithoutExtension(other.Name);
-        beside.TryAdd(RageLib.Text.GxtFile.Hash(model), model);
+        beside.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(model), model);
       }
       foreach (var (hash, bound) in bounds.Bounds)
       {

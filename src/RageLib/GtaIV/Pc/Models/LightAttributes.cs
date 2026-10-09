@@ -1,7 +1,7 @@
 using System.IO;
 using RageLib.Common.ResourceTypes;
 
-namespace RageLib.Models.Resource
+namespace RageLib.GtaIV.Pc.Models
 {
   /// <summary>
   /// A light of a drawable (CLightAttr, 0x6C bytes): a street lamp's, a neon sign's, a club's spot. Laid out

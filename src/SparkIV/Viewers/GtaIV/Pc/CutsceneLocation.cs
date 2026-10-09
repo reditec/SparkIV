@@ -10,7 +10,7 @@ using System.Text.Json.Nodes;
 using RageLib.FileSystem;
 using File = RageLib.FileSystem.Common.File;
 
-namespace SparkIV.WinUI.Viewers
+namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>
   /// A map object around a cutscene: its model, how it stands in the scene (model to scene), and the interior
@@ -401,7 +401,7 @@ namespace SparkIV.WinUI.Viewers
                   byte[] bytes = dictionary == null ? file.GetData()
                     : dictionaryData.TryGetValue(dictionary, out var known) ? known : dictionaryData[dictionary] = file.GetData();
                   location.Models.Add(ModelScene.Load(file, bytes, vertexColors: true,
-                                                      onlyModel: dictionary != null ? RageLib.Text.GxtFile.Hash(placement.Name) : null, shared: shared, rawTextures: true));
+                                                      onlyModel: dictionary != null ? RageLib.GtaIV.Pc.Text.GxtFile.Hash(placement.Name) : null, shared: shared, rawTextures: true));
                   location.ModelNames.Add(placement.Name);
                   model = location.Models.Count - 1;
                 }
@@ -549,7 +549,7 @@ namespace SparkIV.WinUI.Viewers
           img.Open(archive);
           foreach (var file in img.RootDirectory.OfType<File>().Where(f => f.Name.EndsWith(".wbn", StringComparison.OrdinalIgnoreCase)))
           {
-            var bounds = new RageLib.Bounds.BoundFile();
+            var bounds = new RageLib.GtaIV.Pc.Bounds.BoundFile();
             try
             {
               bounds.Open(new MemoryStream(file.GetData()));
@@ -558,7 +558,7 @@ namespace SparkIV.WinUI.Viewers
             {
               continue;
             }
-            void Collect(RageLib.Bounds.Bound bound, Matrix4x4 place)
+            void Collect(RageLib.GtaIV.Pc.Bounds.Bound bound, Matrix4x4 place)
             {
               if (bound.AabbMax.X < origin.X - radius || bound.AabbMin.X > origin.X + radius ||
                   bound.AabbMax.Y < origin.Y - radius || bound.AabbMin.Y > origin.Y + radius)
@@ -567,7 +567,7 @@ namespace SparkIV.WinUI.Viewers
               }
               for (int i = 0; i < bound.Children.Count; i++)
               {
-                if (bound.Children[i] is RageLib.Bounds.Bound child)
+                if (bound.Children[i] is RageLib.GtaIV.Pc.Bounds.Bound child)
                 {
                   Collect(child, bound.ChildMatrices[i] * place);
                 }
@@ -855,7 +855,7 @@ namespace SparkIV.WinUI.Viewers
         {
           if (fields[0].Length > 0)
           {
-            nameOf.TryAdd(RageLib.Text.GxtFile.Hash(fields[0]), fields[0]);
+            nameOf.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(fields[0]), fields[0]);
           }
         }
         // An object: name, texture dictionary, the distance it is drawn up to, flags, a number, its bounds

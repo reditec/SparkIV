@@ -1,4 +1,4 @@
-﻿/**********************************************************************\
+/**********************************************************************\
 
  RageLib - Text
 
@@ -21,7 +21,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace RageLib.Text
+namespace RageLib.GtaIV.Pc.Text
 {
   /// <summary>
   /// How the characters of a text table map to the letters of the game's fonts.

@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Microsoft.UI.Xaml;
-using RageLib.Animation;
+using RageLib.GtaIV.Pc.Animation;
 using RageLib.Common;
 using RageLib.FileSystem;
 using SparkIV.WinUI.Services;
@@ -310,7 +310,7 @@ namespace SparkIV.WinUI.Viewers
           if (length >= 3)
           {
             string name = System.Text.Encoding.ASCII.GetString(data, at, length);
-            names.TryAdd(RageLib.Text.GxtFile.Hash(name), name);
+            names.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(name), name);
           }
         }
         Add(start, i - start);
@@ -391,7 +391,7 @@ namespace SparkIV.WinUI.Viewers
             dictionary.Open(new MemoryStream(file.GetData()));
             foreach (var clip in dictionary.Animations)
             {
-              facials.TryAdd(RageLib.Text.GxtFile.Hash(clip.ShortName), (clip, Path.GetFileNameWithoutExtension(name)));
+              facials.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(clip.ShortName), (clip, Path.GetFileNameWithoutExtension(name)));
             }
           }
         }

@@ -26,7 +26,7 @@ using System.IO;
 using System.Numerics;
 using RageLib.Common.Resources;
 
-namespace RageLib.Bounds
+namespace RageLib.GtaIV.Pc.Bounds
 {
   /// <summary>The kind of a collision shape (phBound's type byte).</summary>
   public enum BoundType

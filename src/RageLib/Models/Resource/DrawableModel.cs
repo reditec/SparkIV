@@ -28,6 +28,7 @@ using RageLib.Models.Resource.Models;
 using RageLib.Models.Resource.Shaders;
 using RageLib.Models.Resource.Skeletons;
 using RageLib.Textures;
+using RageLib.GtaIV.Pc.Models;
 
 namespace RageLib.Models.Resource
 {

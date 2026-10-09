@@ -6,10 +6,10 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using RageLib.Animation;
+using RageLib.GtaIV.Pc.Animation;
 using SparkIV.WinUI.Model;
 
-namespace SparkIV.WinUI.Viewers
+namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>
   /// A cutscene (.cut, text): its sections, each played from one animation dictionary beside it (b_1.cut:

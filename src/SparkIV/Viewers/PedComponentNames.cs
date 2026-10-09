@@ -38,7 +38,7 @@ namespace SparkIV.WinUI.Viewers
             foreach (var kind in Kinds)
             {
               string name = part + "_" + number.ToString("000") + "_" + kind;
-              names[RageLib.Text.GxtFile.Hash(name)] = name;
+              names[RageLib.GtaIV.Pc.Text.GxtFile.Hash(name)] = name;
             }
           }
         }
@@ -47,7 +47,7 @@ namespace SparkIV.WinUI.Viewers
           for (int number = 0; number < 40; number++)
           {
             string name = "p_" + anchor + "_" + number.ToString("000");
-            names[RageLib.Text.GxtFile.Hash(name)] = name;
+            names[RageLib.GtaIV.Pc.Text.GxtFile.Hash(name)] = name;
           }
         }
         s_names = names;

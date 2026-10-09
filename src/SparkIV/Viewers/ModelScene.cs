@@ -8,6 +8,7 @@ using RageLib.Models.Data;
 using RageLib.Models.Resource.Shaders;
 using RageLib.Textures;
 using SparkIV.WinUI.Model;
+using SparkIV.WinUI.Viewers.GtaIV.Pc;
 using Directory = RageLib.FileSystem.Common.Directory;
 using File = RageLib.FileSystem.Common.File;
 using ImageFormat = System.Drawing.Imaging.ImageFormat;
@@ -976,21 +977,19 @@ namespace SparkIV.WinUI.Viewers
       return scene.Id;
     }
 
-    // The hash of "texturesampler_layer0", the first layer of the terrain shaders.
-    private const uint TerrainLayer0 = 0xd52b11df;
-
     /// <param name="assigned">The texture the game gives the model itself (the plants), in place of the one it names.</param>
     private SceneMaterial CreateMaterial(Material material, TextureFile? embedded, string? assigned = null)
     {
       // Terrain (gta_terrain_va_2lyr ... 4lyr) has no single texture but layers mixed per vertex; its
       // first layer, the ground the others are laid over, stands for it (tmp_ci6_7_beach04: CI_sandLHT_cm).
       string? textureName = assigned ?? (material.Parameters.TryGetValue((uint)ParamNameHash.Texture, out var param) ||
-                                         material.Parameters.TryGetValue(TerrainLayer0, out param)
+                                         material.Parameters.TryGetValue(GtaIVPcMaterials.TerrainLayer0, out param)
         ? (param as MaterialParamTexture)?.TextureName
         : null);
       // Planes the game never draws (boats' no-water and no-splash planes) have no real texture, only the
       // artists' placeholder "givemechecker": not looked for, so it isn't reported missing.
-      if (material.DrawBucket is 29 or 30)
+      bool neverDrawn = GtaIVPcMaterials.IsNeverDrawn(material.DrawBucket);
+      if (neverDrawn)
       {
         textureName = null;
       }
@@ -1046,11 +1045,12 @@ namespace SparkIV.WinUI.Viewers
 
       // Terrain: the layers laid over the first (the texture above), each its own texture.
       var layerKeys = new List<string?>();
-      if (material.Parameters.ContainsKey(TerrainLayer0))
+      var terrainLayers = GtaIVPcMaterials.TerrainLayers;
+      if (material.Parameters.ContainsKey(GtaIVPcMaterials.TerrainLayer0))
       {
-        for (int layer = 1; layer < TerrainLayers.Length && material.Parameters.ContainsKey(TerrainLayers[layer]); layer++)
+        for (int layer = 1; layer < terrainLayers.Length && material.Parameters.ContainsKey(terrainLayers[layer]); layer++)
         {
-          string? name = (material.Parameters[TerrainLayers[layer]] as MaterialParamTexture)?.TextureName;
+          string? name = (material.Parameters[terrainLayers[layer]] as MaterialParamTexture)?.TextureName;
           layerKeys.Add(string.IsNullOrEmpty(name) ? null : AddTexture(name, embedded, Materials.Count + "_" + layer + ".png"));
         }
       }
@@ -1058,80 +1058,65 @@ namespace SparkIV.WinUI.Viewers
       // Normal and specular maps, and how bumpy and shiny (the map shaders' parameters: gta_normal...,
       // gta_spec...). Not for planes the game doesn't draw.
       string? normalKey = null, specularKey = null;
-      if (material.DrawBucket is not (29 or 30))
+      if (!neverDrawn)
       {
-        if (TextureParameter(material, BumpSampler) is string normalName)
+        if (TextureParameter(material, GtaIVPcMaterials.BumpSampler) is string normalName)
         {
           normalKey = AddTexture(normalName, embedded, Materials.Count + "_n.png");
         }
-        if (TextureParameter(material, SpecSampler) is string specularName)
+        if (TextureParameter(material, GtaIVPcMaterials.SpecSampler) is string specularName)
         {
           specularKey = AddTexture(specularName, embedded, Materials.Count + "_s.png");
         }
       }
-      var mask = VectorParameter(material, SpecMapIntMask);
+      var mask = VectorParameter(material, GtaIVPcMaterials.SpecMapIntMask);
 
-      // Glass is drawn see-through; it is named so in the shader (gta_vehicle_vehglass, gta_glass ...).
-      bool glass = material.ShaderName.Contains("glass", StringComparison.OrdinalIgnoreCase);
-      bool vehicle = material.ShaderName.StartsWith("gta_vehicle", StringComparison.OrdinalIgnoreCase);
-      return new SceneMaterial(Materials.Count, material.ShaderName, textureName, key, glass)
+      string shader = material.ShaderName;
+      bool glass = GtaIVPcMaterials.IsGlass(shader);
+      bool vehicle = GtaIVPcMaterials.IsVehicle(shader);
+      var drawing = GtaIVPcMaterials.DrawingOf(material.DrawBucket, shader, glass);
+      return new SceneMaterial(Materials.Count, shader, textureName, key, glass)
       {
         LayerKeys = layerKeys,
         DrawBucket = material.DrawBucket,
+        Cutout = drawing.Cutout,
+        Blend = drawing.Blend,
+        Stipple = drawing.Stipple,
+        Decal = drawing.Decal,
+        Hidden = drawing.Hidden,
+        NoWater = drawing.NoWater,
+        Emissive = drawing.Emissive,
         RenderTarget = renderTarget,
         NormalKey = normalKey,
         SpecularKey = specularKey,
-        Bumpiness = VectorParameter(material, Bumpiness)?.X ?? 1,
-        SpecularPower = VectorParameter(material, SpecularFactor)?.X ?? 0,
-        SpecularIntensity = VectorParameter(material, SpecularColorFactor)?.X ?? 0,
+        Bumpiness = VectorParameter(material, GtaIVPcMaterials.Bumpiness)?.X ?? 1,
+        SpecularPower = VectorParameter(material, GtaIVPcMaterials.SpecularFactor)?.X ?? 0,
+        SpecularIntensity = VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor)?.X ?? 0,
         SpecularMask = mask == null ? new[] { 1f, 0f, 0f } : new[] { mask.Value.X, mask.Value.Y, mask.Value.Z },
-        DirtMask = material.ShaderName.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase)
-          ? (VectorParameter(material, DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
+        DirtMask = GtaIVPcMaterials.IsDirtDecal(shader)
+          ? (VectorParameter(material, GtaIVPcMaterials.DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
           : null,
-        PaintSlot = VectorParameter(material, MatDiffuseColor) is { X: 2 } paint && paint.Y >= 1 && paint.Y <= 6 ? (int)paint.Y : 0,
+        PaintSlot = VectorParameter(material, GtaIVPcMaterials.MatDiffuseColor) is { X: 2 } paint && paint.Y >= 1 && paint.Y <= 6 ? (int)paint.Y : 0,
         Vehicle = vehicle,
-        DirtKey = vehicle && material.DrawBucket is not (29 or 30) && TextureParameter(material, DirtSampler) is string dirtName
+        DirtKey = vehicle && !neverDrawn && TextureParameter(material, GtaIVPcMaterials.DirtSampler) is string dirtName
           ? AddTexture(dirtName, embedded, Materials.Count + "_d.png") : null,
-        DirtColor = VectorParameter(material, DirtColorHash) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
-        ReflectivePower = (VectorParameter(material, ReflectivePowerED) ?? VectorParameter(material, ReflectivePowerHash))?.X ?? 0,
-        HasSpecular2 = vehicle && VectorParameter(material, Specular2ColorIntensityED) != null,
-        EmissiveMultiplier = material.ShaderName.Contains("emissive", StringComparison.OrdinalIgnoreCase) ? VectorParameter(material, EmissiveMultiplierHash)?.X : null,
-        EmissiveAtNight = material.ShaderName.Contains("emissivenight", StringComparison.OrdinalIgnoreCase),
+        DirtColor = VectorParameter(material, GtaIVPcMaterials.DirtColor) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
+        ReflectivePower = (VectorParameter(material, GtaIVPcMaterials.ReflectivePowerED) ?? VectorParameter(material, GtaIVPcMaterials.ReflectivePower))?.X ?? 0,
+        HasSpecular2 = vehicle && VectorParameter(material, GtaIVPcMaterials.Specular2ColorIntensityED) != null,
+        EmissiveMultiplier = GtaIVPcMaterials.IsEmissive(shader) ? VectorParameter(material, GtaIVPcMaterials.EmissiveMultiplier)?.X : null,
+        EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
       };
     }
-
-    private static readonly uint EmissiveMultiplierHash = RageLib.Text.GxtFile.Hash("emissiveMultiplier");
-
-    private static readonly uint Specular2ColorIntensityED = RageLib.Text.GxtFile.Hash("specular2ColorIntensityED");
-
-    // A vehicle's shaders (gta_vehicle_paint1 ..., _mesh, _vehglass): their dirt, its colour, how reflective.
-    private static readonly uint DirtSampler = RageLib.Text.GxtFile.Hash("DirtSampler"), DirtColorHash = RageLib.Text.GxtFile.Hash("dirtColor"),
-                                 ReflectivePowerED = RageLib.Text.GxtFile.Hash("reflectivePowerED"), ReflectivePowerHash = RageLib.Text.GxtFile.Hash("reflectivePower");
-
-    // A vehicle's "matdiffusecolor": (2, slot, slot) a placeholder for one of the vehicle's colours (the
-    // game's shader multiplies the texture by it: gta_vehicle_mesh's pixel shader, texture x c66).
-    private static readonly uint MatDiffuseColor = RageLib.Text.GxtFile.Hash("matDiffuseColor");
-
-    // "dirtdecalmask": which of a dirt decal's texture channels says where the dirt is (gta_decal_dirt).
-    private static readonly uint DirtDecalMask = RageLib.Text.GxtFile.Hash("dirtDecalMask");
-
-    // The hashes of the map shaders' parameters for bumps and shine, named by hashing their names
-    // ("bumpsampler" ...) and checked against the materials of eleven exported map archives.
-    private const uint BumpSampler = 0x46b7c64f, SpecSampler = 0x608799c6, Bumpiness = 0xf6712b81,
-                       SpecularFactor = 0x166e0fd1, SpecularColorFactor = 0x484a5ebd, SpecMapIntMask = 0xff11711d;
 
     // Rockstar's placeholder for a texture never given (some vehicles' normal maps): not looked for.
     private static string? TextureParameter(Material material, uint hash) =>
       material.Parameters.TryGetValue(hash, out var param) && param is MaterialParamTexture texture && !string.IsNullOrEmpty(texture.TextureName) &&
-      !texture.TextureName.Equals("givemechecker", StringComparison.OrdinalIgnoreCase)
+      !texture.TextureName.Equals(GtaIVPcMaterials.NoTexture, StringComparison.OrdinalIgnoreCase)
         ? texture.TextureName
         : null;
 
     private static RageLib.Common.ResourceTypes.Vector4? VectorParameter(Material material, uint hash) =>
       material.Parameters.TryGetValue(hash, out var param) && param is MaterialParamVector4 vector ? vector.Value : null;
-
-    // The hashes of "texturesampler_layer0" to "_layer3": the terrain shaders' layers.
-    private static readonly uint[] TerrainLayers = { TerrainLayer0, 0x2420afd1, 0x31934ab6, 0x78b758fd };
 
     /// <summary>A texture of the model (from it or the dictionaries) as PNG under a key, listed; null if not found.</summary>
     private string? AddTexture(string name, TextureFile? embedded, string key)
@@ -1375,7 +1360,7 @@ namespace SparkIV.WinUI.Viewers
       blend = Blend,
       decal = Decal,
       hidden = Hidden,
-      noWater = DrawBucket == 30,
+      noWater = NoWater,
       emissive = Emissive,
       emissiveMultiplier = EmissiveMultiplier,
       emissiveAtNight = EmissiveAtNight,
@@ -1395,34 +1380,22 @@ namespace SparkIV.WinUI.Viewers
       reflectivePower = ReflectivePower,
     };
 
-    /// <summary>
-    /// The material's draw bucket (RageLib's Material.DrawBucket): 0 opaque, 1 see-through, 2 decal, 3 cut
-    /// out, 4 and 5 emissive (5 see-through), 29 and 30 vehicles' no-splash and no-water planes.
-    /// </summary>
+    /// <summary>The material's draw bucket as the model stores it (what it means is the game's: see GtaIV.Pc.GtaIVPcMaterials).</summary>
     public int DrawBucket { get; init; }
 
-    /// <summary>
-    /// Whether see-through texels are cut out (leaves, fences, hair): the cut-out bucket. Opaque ones keep
-    /// them (peds' skin: its alpha holds something else, the face would be gone).
-    /// </summary>
-    public bool Cutout => DrawBucket == 3;
+    // How it is drawn, set by the game's rules (GtaIV.Pc.GtaIVPcMaterials.DrawingOf for GTA IV (PC)).
+
+    /// <summary>Whether see-through texels are cut out (leaves, fences, hair).</summary>
+    public bool Cutout { get; init; }
 
     /// <summary>Whether it is drawn over what is behind it by its texture's alpha (see-through, decals); glass has its own way.</summary>
-    public bool Blend => !Glass && DrawBucket is 1 or 2 or 5;
+    public bool Blend { get; init; }
 
-    /// <summary>
-    /// A person's see-through part (gta_ped, bucket 1), drawn as the game draws it: gta_ped.fxc's technique
-    /// "draw" (forward, after the deferred pass) with its own render states AlphaTest on, AlphaRef 100,
-    /// AlphaBlend on (seen live in x32dbg while the game drew peds' props: ALPHAREF 100 then back to 0), and
-    /// its pixel shader keeps only part of the pixels by alpha before blending them (the stipple texture
-    /// platform:/textures/stipple.wtd all_stips, 16 levels of 8 x 8, level = alpha x 3.996). bc_3: Florian's
-    /// glasses (p_eyes_diff_000_a), lenses alpha 124: level 7, 24 of 64 pixels kept, blended at 0.486 -
-    /// about 18 % in all (blended whole they looked like sunglasses).
-    /// </summary>
-    public bool Stipple => DrawBucket == 1 && string.Equals(Shader, "gta_ped", StringComparison.OrdinalIgnoreCase);
+    /// <summary>Whether only part of its pixels are kept by alpha before blending (a stipple pattern), as the game draws peds' see-through parts.</summary>
+    public bool Stipple { get; init; }
 
     /// <summary>Whether it lies on another surface (a puddle, dirt, a poster): drawn a little in front of it.</summary>
-    public bool Decal => DrawBucket == 2;
+    public bool Decal { get; init; }
 
     /// <summary>
     /// A layer showing a render target (script_rt: a TV's picture), which no file holds: black, as the game's
@@ -1434,10 +1407,13 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A colour of its own (0 to 1) for a material without a texture (collision surfaces); null for the page's own.</summary>
     public float[]? Color { get; init; }
 
-    /// <summary>Planes the game doesn't draw (a vehicle's no-splash and no-water planes, keeping water out).</summary>
-    public bool Hidden => DrawBucket is 29 or 30;
+    /// <summary>Planes the game doesn't draw (a vehicle's no-splash and no-water planes).</summary>
+    public bool Hidden { get; init; }
 
-    /// <summary>Glowing (draw buckets 4 and 5: lamp shades, signs, windows at night): shown at full brightness, not lit.</summary>
-    public bool Emissive => DrawBucket is 4 or 5;
+    /// <summary>A plane that keeps the water out where it is (a boat's cockpit), not drawn itself.</summary>
+    public bool NoWater { get; init; }
+
+    /// <summary>Glowing (lamp shades, signs, windows at night): shown at full brightness, not lit.</summary>
+    public bool Emissive { get; init; }
   }
 }
