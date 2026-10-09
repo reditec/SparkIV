@@ -176,9 +176,10 @@
     // The game's sea round the camera (see the vertex shader): drawn as its grid where the water's quads are
     // (waterMask), the flat quads left out there.
     uniform bool waterGrid; uniform bool maskPass; uniform bool seaOn; uniform sampler2D waterMask; uniform vec3 skyColor; uniform vec3 skyTopColor;
-    // How bright the water's reflection is (water.fxc's waterReflectionScale, which the game sets while it
-    // runs; matched to its picture of bc_3).
-    const float WaterReflect = 2.6;
+    // How bright the water's reflection is (water.fxc's waterReflectionScale: the time cycle's, see TimeCycle.cs).
+    uniform float waterReflect;
+    // The picture's gamma (rage_postfx.fxc's deSatContrastGamma.z: the time cycle's Gamma).
+    uniform float toneGamma;
     out vec4 outColor;
     void main() {
       if (maskPass) { outColor = vec4(1.0); return; }
@@ -359,17 +360,18 @@
             mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
           vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
-          // From the water's own grey-blue (looking down at it) to what it mirrors (the further off, the
-          // flatter the look, the more): the game's open sea far off nearly the sky's colour (bc_3: 159 201 222
-          // under a sky of 169 217 240), near a quiet grey-blue (100 112 115). (water.fxc adds waterColour x 0.5
-          // and half the reflection by Fresnel; its reflection's brightness unknown, the timecyc's water colour
-          // black here - matched to the game's picture instead.)
-          // As water.fxc: its own colour (timecyc's, sunny at noon black) x 0.5 and half the reflection by
-          // Fresnel, the reflection times waterReflectionScale (set at run time: WaterReflect, from the game's
-          // picture of bc_3: near and middle water, flat and steep looks); far off the haze makes it bright.
-          rgb = waterColor * 0.5 + 0.5 * fresnel * (mirrored * WaterReflect + glint);
-          // The sun on the waves (water.fxc: a twentieth of the sun's light by the light's slope).
-          rgb += sunColor * max(dot(lightNormal, sunDir), 0.0) * 0.05;
+          // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's, sunny
+          // at noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
+          // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3).
+          // Into the picture and back as rage_postfx.fxc's tone mapping does it: by the luminance only,
+          // colour x saturate(L)^(gamma - 1), so the hue stays (the mirrored sky's pale blue, darker: grey-blue
+          // as in the game, not the saturated blue a curve per channel makes of it). The mirrored colour is
+          // already in the picture: back to light by L^((1 - gamma) / gamma).
+          const vec3 Luma = vec3(0.2125, 0.7154, 0.0721);
+          vec3 mirroredLight = mirrored * pow(max(dot(mirrored, Luma), 1e-4), (1.0 - toneGamma) / toneGamma);
+          vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredLight * waterReflect + glint)
+                          + sunColor * clamp((dot(lightNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
+          rgb = min(waterLight * pow(clamp(dot(waterLight, Luma), 1e-4, 1.0), toneGamma - 1.0), 1.0);
           a = 1.0;
         }
         // The haze: from where the fog starts to the end of what is drawn, wholly the haze's colour there
@@ -454,6 +456,8 @@
       hazeEnd: gl.getUniformLocation(program, "hazeEnd"),
       water: gl.getUniformLocation(program, "water"),
       waterColor: gl.getUniformLocation(program, "waterColor"),
+      waterReflect: gl.getUniformLocation(program, "waterReflect"),
+      toneGamma: gl.getUniformLocation(program, "toneGamma"),
       skyColor: gl.getUniformLocation(program, "skyColor"),
       skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
       waterWaves: gl.getUniformLocation(program, "waterWaves"),
@@ -2229,7 +2233,10 @@
         gl.uniform3fv(loc.hazeColor, hazeColour());
         gl.uniform1f(loc.hazeStart, Math.min(sky.fogStart, hazeEnd() * 0.5));
         gl.uniform1f(loc.hazeEnd, hazeEnd());
-        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3));
+        // In the light's units, as the sun's (times the exposure).
+        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3).map(c => c * (sky.exposure || 1)));
+        gl.uniform1f(loc.waterReflect, sky.waterReflection || 1);
+        gl.uniform1f(loc.toneGamma, sky.gamma || 1);
         gl.uniform3fv(loc.skyColor, sky.horizon);
         gl.uniform3fv(loc.skyTopColor, sky.zenith);
         // The water's simulation one step on (its texture on unit 10, for the water's waves).

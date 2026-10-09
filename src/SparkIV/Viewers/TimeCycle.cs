@@ -33,6 +33,14 @@ namespace SparkIV.WinUI.Viewers
     public float Exposure { get; private init; }
     public float AmbientMultiplierAbove { get; private init; }
     public float AmbientMultiplierBelow { get; private init; }
+    /// <summary>
+    /// How bright the water mirrors (water.fxc's waterReflectionScale): the line's 126th number. GTAIV.exe's
+    /// reader (0xAEFEB0, its sscanf's 126th target) puts it at +0x80 of the time's values, which 0xAD7EF0 sets as
+    /// waterReflectionScale; the names in the file's header don't line up with its numbers that far.
+    /// </summary>
+    public float WaterReflection { get; private init; }
+    /// <summary>The picture's gamma (column 47, "Gamma"): rage_postfx.fxc maps luminance L to L^gamma, the hue kept.</summary>
+    public float Gamma { get; private init; }
 
     /// <summary>The weather's line at the hour (blended between the two times round it), or null without the file or weather.</summary>
     public static TimeCycle? Load(string gameFolder, string weather, float hour)
@@ -95,6 +103,8 @@ namespace SparkIV.WinUI.Viewers
         Exposure = V(35),
         AmbientMultiplierAbove = V(58),
         AmbientMultiplierBelow = V(59),
+        WaterReflection = a.Length > 125 && b.Length > 125 ? V(125) : 1f,
+        Gamma = V(47),
       };
     }
 
@@ -118,6 +128,8 @@ namespace SparkIV.WinUI.Viewers
         ambientBelow = A(AmbientBelow * AmbientMultiplierBelow * Exposure),
         // For the lamps: their strength is in the sun's units (GTAIV.exe passes both to the lights unchanged).
         exposure = Exposure,
+        waterReflection = WaterReflection,
+        gamma = Gamma,
         skyTop = A(SkyTop),
         skyBottom = A(SkyBottom),
         fogStart = FogStart,
