@@ -16,7 +16,11 @@ namespace SparkIV.WinUI.Viewers
   /// A map object around a cutscene: its model, how it stands in the scene (model to scene), and the interior
   /// room it is in (an index into <see cref="CutsceneLocation.Rooms"/>; -1 for none).
   /// </summary>
-  public sealed record LocationObject(int Model, Matrix4x4 Place, int Room = -1);
+  public sealed record LocationObject(int Model, Matrix4x4 Place, int Room = -1)
+  {
+    /// <summary>Floating litter: where it floats (its centre on the water, in the scene), for the page to lift it with the sea; null otherwise.</summary>
+    public Vector3? FloatAt { get; init; }
+  }
 
   /// <summary>
   /// A room of an interior placed around a cutscene: its box in the interior (Min, Max), the interior's place
@@ -437,6 +441,14 @@ namespace SparkIV.WinUI.Viewers
         log.Add("  of which: model dictionaries", shared.ModelDictionarySeconds, shared.ModelDictionariesRead + " read (each once)");
       }
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
+      if (location.Outdoors && location.Water.Count > 0)
+      {
+        // The collision lies in the archives of the models near (bronx_e.img's bronx_e_*.wbn).
+        var archives = shown.Where(p => !IsFar(p.Name) && index.ArchiveOf.ContainsKey(p.Name))
+                            .Select(p => index.ArchiveOf[p.Name]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        int litter = location.AddFloatingLitter(folder, origin, radius, archives, index.ArchiveOf, shared);
+        log?.Step("location: floating litter", litter + " objects on " + archives.Count + " archives' collision");
+      }
       if (location.Outdoors)
       {
         try
@@ -507,6 +519,197 @@ namespace SparkIV.WinUI.Viewers
         {
           Water.Add(new Vector3(Math.Clamp(c.X, origin.X - radius, origin.X + radius), Math.Clamp(c.Y, origin.Y - radius, origin.Y + radius), c.Z) - origin);
         }
+      }
+    }
+
+    /// <summary>
+    /// Floating litter, as the game grows procedural objects (procedural.dat) on its collision: on the faces
+    /// within <paramref name="radius"/> of the origin whose material carries a tag whose objects float (bc_3's
+    /// harbour: PROC_INDUS_FLOATING - wood, a tyre), one per spacing² m² of face, none nearer than its minimum
+    /// distance to another of its kind, turned at random, on the water's surface above the face (the face must
+    /// be under water). The game places them anew each time (USESEED 0); here the same each time. The page
+    /// shows them within 30 m of the camera, as the game makes them. Returns how many were placed.
+    /// </summary>
+    private int AddFloatingLitter(string folder, Vector3 origin, float radius, List<string> archives,
+                                  Dictionary<string, string> archiveOf, ModelScene.SharedTextures shared)
+    {
+      CollisionNames.Load(folder);
+      var floating = CollisionNames.Objects.Where(o => o.Floats && o.Spacing > 0).GroupBy(o => o.Tag).ToDictionary(g => g.Key, g => g.ToList());
+      if (floating.Count == 0)
+      {
+        return 0;
+      }
+      // The faces whose objects float, in the scene's places.
+      var faces = new List<(Vector3 A, Vector3 B, Vector3 C, int Tag)>();
+      foreach (string archive in archives)
+      {
+        var img = new IMGFileSystem();
+        try
+        {
+          img.Open(archive);
+          foreach (var file in img.RootDirectory.OfType<File>().Where(f => f.Name.EndsWith(".wbn", StringComparison.OrdinalIgnoreCase)))
+          {
+            var bounds = new RageLib.Bounds.BoundFile();
+            try
+            {
+              bounds.Open(new MemoryStream(file.GetData()));
+            }
+            catch (Exception)
+            {
+              continue;
+            }
+            void Collect(RageLib.Bounds.Bound bound, Matrix4x4 place)
+            {
+              if (bound.AabbMax.X < origin.X - radius || bound.AabbMin.X > origin.X + radius ||
+                  bound.AabbMax.Y < origin.Y - radius || bound.AabbMin.Y > origin.Y + radius)
+              {
+                return;
+              }
+              for (int i = 0; i < bound.Children.Count; i++)
+              {
+                if (bound.Children[i] is RageLib.Bounds.Bound child)
+                {
+                  Collect(child, bound.ChildMatrices[i] * place);
+                }
+              }
+              foreach (var polygon in bound.Polygons)
+              {
+                int tag = polygon.Material < bound.Materials.Length ? bound.Materials[polygon.Material].ProceduralTag : 0;
+                if (!floating.ContainsKey(tag))
+                {
+                  continue;
+                }
+                Vector3 V(int i) => Vector3.Transform(bound.Vertices[i], place) - origin;
+                faces.Add((V(polygon.A), V(polygon.B), V(polygon.C), tag));
+                if (polygon.D >= 0)
+                {
+                  faces.Add((V(polygon.A), V(polygon.C), V(polygon.D), tag));
+                }
+              }
+            }
+            foreach (var (_, bound) in bounds.Bounds)
+            {
+              Collect(bound, Matrix4x4.Identity);
+            }
+          }
+        }
+        catch (Exception)
+        {
+          // Then no litter from this archive.
+        }
+        finally
+        {
+          img.Close();
+        }
+      }
+      if (faces.Count == 0)
+      {
+        return 0;
+      }
+
+      // The water's height above a point: the quad it lies in (flat; its corners' mean), or none.
+      float? WaterAt(Vector2 at)
+      {
+        for (int q = 0; q + 3 < Water.Count; q += 4)
+        {
+          float x0 = Math.Min(Math.Min(Water[q].X, Water[q + 1].X), Math.Min(Water[q + 2].X, Water[q + 3].X));
+          float x1 = Math.Max(Math.Max(Water[q].X, Water[q + 1].X), Math.Max(Water[q + 2].X, Water[q + 3].X));
+          float y0 = Math.Min(Math.Min(Water[q].Y, Water[q + 1].Y), Math.Min(Water[q + 2].Y, Water[q + 3].Y));
+          float y1 = Math.Max(Math.Max(Water[q].Y, Water[q + 1].Y), Math.Max(Water[q + 2].Y, Water[q + 3].Y));
+          if (at.X >= x0 && at.X <= x1 && at.Y >= y0 && at.Y <= y1)
+          {
+            return (Water[q].Z + Water[q + 1].Z + Water[q + 2].Z + Water[q + 3].Z) / 4;
+          }
+        }
+        return null;
+      }
+
+      // The same each time: seeded by the place.
+      var random = new Random(unchecked((int)(origin.X * 31 + origin.Y * 17)));
+      var placed = new Dictionary<ProceduralObject, List<Vector3>>();
+      var models = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+      int count = 0;
+      foreach (var (a, b, c, tag) in faces)
+      {
+        float area = Vector3.Cross(b - a, c - a).Length() / 2;
+        foreach (var entry in floating[tag])
+        {
+          // One per spacing² m² (spacing at least 2 m, as the game reads it): the whole number, and one more by chance.
+          float spacing = Math.Max(entry.Spacing, 2f);
+          float expected = area / (spacing * spacing);
+          int n = (int)expected + (random.NextDouble() < expected - (int)expected ? 1 : 0);
+          float minDistance = Math.Min(entry.MinDistance, 80f);
+          for (int k = 0; k < n; k++)
+          {
+            // A point on the face, evenly.
+            float u = (float)random.NextDouble(), v = (float)random.NextDouble();
+            if (u + v > 1)
+            {
+              u = 1 - u;
+              v = 1 - v;
+            }
+            var at = a + (b - a) * u + (c - a) * v;
+            if (WaterAt(new Vector2(at.X, at.Y)) is not float level || at.Z >= level)
+            {
+              continue;
+            }
+            var list = placed.TryGetValue(entry, out var known) ? known : placed[entry] = new List<Vector3>();
+            var onWater = new Vector3(at.X, at.Y, level + entry.ZOffsetMin + (float)random.NextDouble() * (entry.ZOffsetMax - entry.ZOffsetMin));
+            if (list.Any(p => Vector2.DistanceSquared(new Vector2(p.X, p.Y), new Vector2(onWater.X, onWater.Y)) < minDistance * minDistance))
+            {
+              continue;
+            }
+            int model = ModelFor(entry.Model);
+            if (model < 0)
+            {
+              continue;
+            }
+            list.Add(onWater);
+            float turn = (entry.MinTurn + (float)random.NextDouble() * (entry.MaxTurn - entry.MinTurn)) * MathF.PI / 180;
+            Objects.Add(new LocationObject(model, Matrix4x4.CreateRotationZ(turn) * Matrix4x4.CreateTranslation(onWater)) { FloatAt = onWater });
+            count++;
+          }
+        }
+      }
+      return count;
+
+      // The litter's model (in pc\data\maps\generic\procobj.img), loaded once; -1 if not found.
+      int ModelFor(string name)
+      {
+        if (models.TryGetValue(name, out int known))
+        {
+          return known;
+        }
+        models[name] = -1;
+        if (!archiveOf.TryGetValue(name, out var archive))
+        {
+          MissingModels.TryAdd(name, "no archive");
+          return -1;
+        }
+        var img = new IMGFileSystem();
+        try
+        {
+          img.Open(archive);
+          if (new[] { ".wdr", ".wft" }.Select(e => img.RootDirectory.FindByName(name + e) as File).FirstOrDefault(f => f != null) is File file)
+          {
+            Models.Add(ModelScene.Load(file, file.GetData(), vertexColors: true, shared: shared, rawTextures: true));
+            ModelNames.Add(name);
+            models[name] = Models.Count - 1;
+          }
+          else
+          {
+            MissingModels.TryAdd(name, "not in its archive");
+          }
+        }
+        catch (Exception ex)
+        {
+          MissingModels.TryAdd(name, "unreadable: " + ex.Message);
+        }
+        finally
+        {
+          img.Close();
+        }
+        return models[name];
       }
     }
 
@@ -811,6 +1014,10 @@ namespace SparkIV.WinUI.Viewers
           node["material"] = materialStart[obj.Model] + mesh.Material;
           node["background"] = true;
           node["room"] = obj.Room;
+          if (obj.FloatAt is Vector3 floatAt)
+          {
+            node["floatAt"] = new JsonArray(floatAt.X, floatAt.Y, floatAt.Z);
+          }
           // Moved and turned into the scene; it doesn't move with bones there.
           node["positions"] = Floats(Transform(mesh.Positions, obj.Place, true));
           if (mesh.Normals != null)
@@ -899,6 +1106,11 @@ namespace SparkIV.WinUI.Viewers
             cone = light.Spot ? light.Falloff : 0f,
             hotSpot = light.Spot ? light.HotSpot : 0f,
             intensity = light.Intensity,
+            // As GTAIV.exe hands it to the deferred light (0xC1E200 → 0xABCCD0): the radius is Distance
+            // (+0x38; none without it), the strength Range (+0x3C); Flags say when it is on (0xC1F9A0).
+            radius = light.Distance,
+            strength = light.Range,
+            flags = light.Flags,
           });
         }
       }

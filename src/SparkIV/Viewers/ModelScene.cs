@@ -108,6 +108,9 @@ namespace SparkIV.WinUI.Viewers
     // At most this many other dictionaries of the folder are searched for a texture that is still missing.
     private const int MaxDictionariesSearched = 300;
 
+    /// <summary>A scene without models or textures, for shapes built elsewhere (collision).</summary>
+    internal static ModelScene Empty(string name) => new ModelScene(name, new List<TextureFile>());
+
     private ModelScene(string name, List<TextureFile> dictionaries)
     {
       Root = new ModelPart(name, "", "\uF158");
@@ -754,7 +757,8 @@ namespace SparkIV.WinUI.Viewers
           var position = System.Numerics.Vector3.Transform(new System.Numerics.Vector3(light.Position.X, light.Position.Y, light.Position.Z), at);
           var direction = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(light.Direction.X, light.Direction.Y, light.Direction.Z), at);
           Lights.Add(new SceneLight(position, direction, light.Color[0] / 255f, light.Color[1] / 255f, light.Color[2] / 255f,
-                                    light.IsSpot, light.Range, light.Falloff, meshIds, light.Distance, light.HotSpot, light.Intensity));
+                                    light.IsSpot, light.Range, light.Falloff, meshIds, light.Distance, light.HotSpot, light.Intensity)
+                     { Flags = light.Flags });
         }
       }
     }
@@ -1090,8 +1094,15 @@ namespace SparkIV.WinUI.Viewers
           ? AddTexture(dirtName, embedded, Materials.Count + "_d.png") : null,
         DirtColor = VectorParameter(material, DirtColorHash) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
         ReflectivePower = (VectorParameter(material, ReflectivePowerED) ?? VectorParameter(material, ReflectivePowerHash))?.X ?? 0,
+        HasSpecular2 = vehicle && VectorParameter(material, Specular2ColorIntensityED) != null,
+        EmissiveMultiplier = material.ShaderName.Contains("emissive", StringComparison.OrdinalIgnoreCase) ? VectorParameter(material, EmissiveMultiplierHash)?.X : null,
+        EmissiveAtNight = material.ShaderName.Contains("emissivenight", StringComparison.OrdinalIgnoreCase),
       };
     }
+
+    private static readonly uint EmissiveMultiplierHash = RageLib.Text.GxtFile.Hash("emissiveMultiplier");
+
+    private static readonly uint Specular2ColorIntensityED = RageLib.Text.GxtFile.Hash("specular2ColorIntensityED");
 
     // A vehicle's shaders (gta_vehicle_paint1 ..., _mesh, _vehglass): their dirt, its colour, how reflective.
     private static readonly uint DirtSampler = RageLib.Text.GxtFile.Hash("DirtSampler"), DirtColorHash = RageLib.Text.GxtFile.Hash("dirtColor"),
@@ -1213,6 +1224,12 @@ namespace SparkIV.WinUI.Viewers
   public sealed record SceneLight(System.Numerics.Vector3 Position, System.Numerics.Vector3 Direction, float Red, float Green, float Blue,
                                   bool Spot, float Range, float Falloff, int[] Meshes, float Distance = 0, float HotSpot = 0, float Intensity = 1)
   {
+    /// <summary>
+    /// When it is on (GTAIV.exe 0xC1F9A0, by the game clock's night factor N): 0x20 by day, 0x40 by night, both
+    /// always; with 0x1 it fades (by day × (1 - N), by night × N); neither, never.
+    /// </summary>
+    public uint Flags { get; init; }
+
     /// <summary>For the page.</summary>
     public object ToMessage() => new
     {
@@ -1335,6 +1352,19 @@ namespace SparkIV.WinUI.Viewers
     public float[] DirtColor { get; init; } = { 0.23f, 0.22f, 0.2f };
     public float ReflectivePower { get; init; }
 
+    /// <summary>
+    /// A vehicle's shader with a second shine (gta_vehicle_paint2: specular2ColorIntensityED ...). Its values are
+    /// the vehicle's, set when the game makes it (see CutsceneMessages.ApplyPaint), not the model's.
+    /// </summary>
+    public bool HasSpecular2 { get; init; }
+
+    /// <summary>
+    /// An emissive shader's brightness (gta_emissive*: texture x vertex colour x emissiveMultiplier, unlit), or
+    /// null; and whether it only shines at night (gta_emissivenight: x the time cycle's day/night effects).
+    /// </summary>
+    public float? EmissiveMultiplier { get; init; }
+    public bool EmissiveAtNight { get; init; }
+
     /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
     public object ToMessage(Func<string, string> url) => new
     {
@@ -1345,9 +1375,12 @@ namespace SparkIV.WinUI.Viewers
       blend = Blend,
       decal = Decal,
       hidden = Hidden,
+      noWater = DrawBucket == 30,
       emissive = Emissive,
+      emissiveMultiplier = EmissiveMultiplier,
+      emissiveAtNight = EmissiveAtNight,
       texture = TextureKey == null ? null : url(TextureKey),
-      color = RenderTarget ? new[] { 0f, 0f, 0f } : null,
+      color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),
       layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
       normal = NormalKey == null ? null : url(NormalKey),
       specular = SpecularKey == null ? null : url(SpecularKey),
@@ -1397,6 +1430,9 @@ namespace SparkIV.WinUI.Viewers
     /// is shot).
     /// </summary>
     public bool RenderTarget { get; init; }
+
+    /// <summary>A colour of its own (0 to 1) for a material without a texture (collision surfaces); null for the page's own.</summary>
+    public float[]? Color { get; init; }
 
     /// <summary>Planes the game doesn't draw (a vehicle's no-splash and no-water planes, keeping water out).</summary>
     public bool Hidden => DrawBucket is 29 or 30;

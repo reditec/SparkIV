@@ -457,7 +457,7 @@ namespace SparkIV.WinUI.Viewers
       }
       var section = cut.Sections[index];
       var wad = _document.Sections[index];
-      var (timeline, cast, camera, notes) = CutsceneMessages.Section(section, _document.Actors, wad);
+      var (timeline, cast, camera, notes) = CutsceneMessages.Section(section, _document.Actors, wad, cut.Sections.Take(index));
       _section = index;
       _fps = FpsOf(index);
       var clip = wad?.Animations.FirstOrDefault();

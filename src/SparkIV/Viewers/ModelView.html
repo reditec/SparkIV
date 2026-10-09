@@ -25,7 +25,7 @@
   // A small WebGL 2 renderer for the meshes of a model: textured, lit from the camera, Z up as in the game.
   const canvas = document.getElementById("view");
   const message = document.getElementById("message");
-  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, alpha: true });
+  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, alpha: true, stencil: true });
 
   const meshes = new Map();      // id → { vao, count, lines, lineCount, material, min, max }
   const materials = new Map();   // id → { texture, glass, color }
@@ -66,6 +66,8 @@
     // the window's last 10 m as the game does (none at its edge, a tenth more for each metre in). maskPass:
     // the water's quads drawn from above into the window (where the grid shows; see drawWaterMask).
     uniform bool waterGrid; uniform bool maskPass; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform float gridLevel;
+    // Floating litter (procedural objects that float): lifted with the sea's height at its centre.
+    uniform bool floating; uniform vec2 floatAt;
     float seaEdge(vec2 inWindow) {
       float metres = floor(min(min(inWindow.x, 200.0 - inWindow.x), min(inWindow.y, 200.0 - inWindow.y)) + 0.001);
       return metres < 1.0 ? 0.0 : metres < 10.0 ? (metres + 1.0) * 0.1 : 1.0;
@@ -88,6 +90,7 @@
         vec2 at = dynamicMin + position.xy;
         p = vec4(at, gridLevel + textureLod(dynamicWater, at / 200.0 + 0.005, 0.0).r * seaEdge(position.xy), 1.0);
       }
+      if (floating) p.z += textureLod(dynamicWater, floatAt / 200.0 + 0.005, 0.0).r * seaEdge(floatAt - dynamicMin);
       vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
       if (maskPass) gl_Position = vec4((p.xy - dynamicMin) / 100.0 - 1.0, 0.0, 1.0);
       vUv = uvAnim ? vec2(dot(uvRow0, vec3(uv, 1.0)), dot(uvRow1, vec3(uv, 1.0))) : uv;
@@ -105,7 +108,9 @@
     // colour towards dirtColor), its shine (spec map . mask x 0.15 x reflectivity, sharpness its alpha x 190 x
     // reflectivity, less where dirty) and, on glass, the sky mirrored x reflectivity.
     uniform bool vehicle; uniform bool useDirt; uniform sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
-    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout; uniform bool stipple;
+    // gta_vehicle_paint2's second shine: its colour (the vehicle's third) and the exponent's and strength's
+    // factors (see CutsceneMessages.Scene); none while the strength's is 0.
+    uniform vec3 spec2Color; uniform vec2 spec2Scale;    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout; uniform bool stipple;
     // Where the camera is (the side of a surface it sees is the one toward it, point by point).
     uniform vec3 eyeAt;
     // See-through by the texture's alpha (the see-through and decal buckets).
@@ -138,6 +143,8 @@
     uniform int meshRoom;
     // Glowing materials (lamp shades, signs): at full brightness.
     uniform bool emissive;
+    // gta_emissivestrong: texture x vertex colour x its emissiveMultiplier (0: the texture as it is).
+    uniform float emissiveScale;
     // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
     uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
@@ -268,6 +275,15 @@
         vec3 l = outdoor ? sunDir : light;
         vec3 h = normalize(l + normalize(eyeAt - vPosition));
         vehicleShine = strength * pow(max(dot(n, h), 0.0), sharp) * (outdoor ? sunColor : vec3(1.0));
+        // The second shine, added to the colour as gta_vehicle_paint2 writes it into the game's colour buffer
+        // (then lit as the colour is): the sun mirrored in the paint, pow(dot(mirrored view, sun), factor x spec
+        // alpha x reflectivity) x factor x dot(spec map, mask) x reflectivity x the colour.
+        if (spec2Scale.y > 0.0) {
+          vec3 mirrored = reflect(normalize(vPosition - eyeAt), n);
+          float exponent = max(spec2Scale.x * spec.a * reflectivePower, 1.0);
+          float glint = dot(spec.rgb, specMask) * reflectivePower * spec2Scale.y * pow(max(dot(mirrored, l), 0.0), exponent);
+          base.rgb += spec2Color * glint;
+        }
       }
       float a = alpha < 1.0 ? alpha : 1.0;
       if (textureAlpha) {
@@ -285,7 +301,7 @@
           a *= kept[index] / 64.0;
         }
       }
-      vec3 rgb = emissive ? base.rgb : base.rgb * lit + shine + vehicleShine;
+      vec3 rgb = emissive ? (emissiveScale > 0.0 ? base.rgb * vColor * emissiveScale : base.rgb) : base.rgb * lit + shine + vehicleShine;
       // A vehicle's glass mirrors its surroundings (the game's gta_vehicle_vehglass: its environment map x
       // reflectivity, added): here the sky as the water mirrors it.
       if (vehicle && alpha < 1.0 && outdoor) {
@@ -408,7 +424,8 @@
       dirtColor: gl.getUniformLocation(program, "dirtColor"),
       dirtLevel: gl.getUniformLocation(program, "dirtLevel"),
       reflectivePower: gl.getUniformLocation(program, "reflectivePower"),
-      light: gl.getUniformLocation(program, "light"),
+      spec2Color: gl.getUniformLocation(program, "spec2Color"),
+      spec2Scale: gl.getUniformLocation(program, "spec2Scale"),      light: gl.getUniformLocation(program, "light"),
       toEye: gl.getUniformLocation(program, "toEye"),
       alpha: gl.getUniformLocation(program, "alpha"),
       lines: gl.getUniformLocation(program, "lines"),
@@ -448,6 +465,8 @@
       seaOn: gl.getUniformLocation(program, "seaOn"),
       waterMask: gl.getUniformLocation(program, "waterMask"),
       gridLevel: gl.getUniformLocation(program, "gridLevel"),
+      floating: gl.getUniformLocation(program, "floating"),
+      floatAt: gl.getUniformLocation(program, "floatAt"),
       reflectOn: gl.getUniformLocation(program, "reflectOn"),
       reflectTex: gl.getUniformLocation(program, "reflectTex"),
       screenSize: gl.getUniformLocation(program, "screenSize"),
@@ -462,6 +481,7 @@
       sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
       sceneLightColor: gl.getUniformLocation(program, "sceneLightColor"),
       emissive: gl.getUniformLocation(program, "emissive"),
+      emissiveScale: gl.getUniformLocation(program, "emissiveScale"),
       eyeAt: gl.getUniformLocation(program, "eyeAt"),
       marker: gl.getUniformLocation(program, "marker"),
       markerAt: gl.getUniformLocation(program, "markerAt"),
@@ -603,7 +623,7 @@
     // background: around a cutscene (its location), not looked at when fitting. A cutscene's props (a door)
     // are lit as its location is (baked: no light of the camera, a middling light round about where they have
     // none of their own).
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1 });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null });
   }
 
   function addMaterial(m) {
@@ -615,13 +635,15 @@
     // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
     // another surface (decal), or not at all (a vehicle's no-water planes).
     const material = {
-      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true,
+      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true, noWater: m.noWater === true,
       color: m.paint || m.color || hsl(hue, 0.25, 0.62), paint: m.paint || [1, 1, 1], layerCount, layers: [null, null, null],
-      vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0,
+      vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0, specular2: m.specular2 || null,
       // Bumps and shine.
       normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
       specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
       dirtMask: m.dirtMask || null, emissive: m.emissive === true,
+      // Only gta_emissivestrong's: the night ones' brightness hangs on the time of day (not known here yet).
+      emissiveScale: m.emissiveMultiplier && !m.emissiveAtNight ? m.emissiveMultiplier : 0,
     };
     materials.set(m.id, material);
     if (m.texture) loadTexture(m.texture, t => material.texture = t);
@@ -1398,6 +1420,32 @@
   // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
   // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
   const DynamicSize = 100, DynamicSpacing = 2;
+  // How far from the camera floating litter is there (see drawMeshes).
+  const FloatingRadius = 30;
+
+  // Whether a point lies in a vehicle of the cast as it is now (with a margin of 30 cm): in its root bone's
+  // space, inside the box of its meshes shown. A vehicle: an actor with a no-water plane (boats) or of
+  // vehicle materials.
+  function insideVehicle(point) {
+    for (const [id, a] of cast) {
+      if (!a.world) continue;
+      if (a.box === undefined) {
+        a.box = null;
+        for (const [meshId, mesh] of meshes) {
+          const mt = materials.get(mesh.material);
+          if (mesh.actor !== id || !visible.has(meshId) || !mt || !(mt.vehicle || mt.noWater)) continue;
+          a.box = a.box || { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+          for (let k = 0; k < 3; k++) { a.box.min[k] = Math.min(a.box.min[k], mesh.min[k]); a.box.max[k] = Math.max(a.box.max[k], mesh.max[k]); }
+        }
+      }
+      if (!a.box) continue;
+      const w = a.world[0], d = [point[0] - w[12], point[1] - w[13], point[2] - w[14]];
+      // Into its space: the rotation's transpose (its columns are its axes).
+      const local = [0, 1, 2].map(c => d[0] * w[c * 4] + d[1] * w[c * 4 + 1] + d[2] * w[c * 4 + 2]);
+      if ([0, 1, 2].every(k => local[k] >= a.box.min[k] - 0.3 && local[k] <= a.box.max[k] + 0.3)) return true;
+    }
+    return false;
+  }
   let dynamicWater = null;
   function dynamicWaterStep(eyeAt) {
     const n = DynamicSize;
@@ -1514,7 +1562,7 @@
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.BLEND);
-    gl.uniform1i(loc.maskPass, true);
+    gl.uniform1i(loc.maskPass, true); gl.uniform1i(loc.floating, false);
     gl.uniform1i(loc.skinned, false);
     gl.uniform1i(loc.waterGrid, false);
     for (const id of visible) {
@@ -1671,8 +1719,20 @@
       // game fades from the outer to the inner: scale = 1 / (cos inner - cos outer).
       cone: l.cone > 0 ? Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180) : -1,
       coneScale: l.cone > 0 ? 1 / Math.max(1e-3, Math.cos(Math.min(l.cone - 0.5, Math.max(0, l.hotSpot || 0)) * Math.PI / 180) - Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180)) : 0,
+      // Outside, as GTAIV.exe lights it (0xC1E200 → 0xABCCD0 → deferred_lighting.fxc): colour × strength in the
+      // same units as the sun (both times the time cycle's exposure), out to its radius; by day only with flag
+      // 0x20 (0x40 alone: a night light, not made at all; 0xC1F9A0 with the night factor 0 from 07:00 to 19:00).
+      radius: l.radius || 0, strength: l.strength || 0, rgb: l.color,
+      byDay: ((l.flags || 0) & 0x20) !== 0,
     }));
     draw();
+  }
+
+  // A lamp as the game lights it outside by day; null when it isn't on then or reaches nothing.
+  function outdoorLamp(l) {
+    if (!l.byDay || !(l.radius > 0.001) || !(l.strength >= 0.001)) return null;
+    const exposure = sky.exposure || 1;
+    return { ...l, range: l.radius, color: l.rgb.map(c => c * l.strength * exposure) };
   }
 
   // The lights now, at most MaxLights: the cutscene's own (whole frames: their values step as the game's
@@ -1684,9 +1744,13 @@
       const film = filmView();
       const e = film ? film.eye : eye();
       const near = [];
-      for (const l of mapLights) {
+      const outside = !!sky && skyOn && backgroundReach > 0;
+      for (const m of mapLights) {
+        const l = outside ? outdoorLamp(m) : m;
+        if (!l) continue;
         const d = Math.hypot(l.at[0] - e[0], l.at[1] - e[1], l.at[2] - e[2]);
-        if (d < l.range + 25) near.push({ l, d });
+        // Outside the game makes an object's lights only within 35 m of the camera (0xC1DB60).
+        if (outside ? d < 35 : d < l.range + 25) near.push({ l, d });
       }
       near.sort((a, b) => a.d - b.d);
       for (const { l } of near) { if (now.length >= MaxLights) break; now.push(l); }
@@ -2139,8 +2203,12 @@
       if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
       gl.viewport(0, 0, w, h);
       gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
+      // As the game (its render states' ZFUNC 4, less or equal): a surface laid on another with the same
+      // vertices (a vehicle's detail layer on its paint: the tropic's deck) is drawn over it, after it,
+      // instead of flickering through it.
+      gl.depthFunc(gl.LEQUAL);
       gl.useProgram(program);
       waterShown = false;
       const lightsNow = sceneLightsNow();
@@ -2227,6 +2295,7 @@
         }
         return true;
       };
+      let noWaterMasked = false;
       for (const pass of ["solid", "glass"]) {
         const glassPass = pass === "glass";
         if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
@@ -2240,10 +2309,46 @@
           if (!seen(m)) continue;
           // A cutscene's actor not in this section (of another part of the file): not there.
           if (m.actor && cast.size && !cast.has(m.actor)) continue;
+          // Floating litter only near the camera, as the game makes procedural objects: within 30 m (GTAIV.exe
+          // 0xC87760: its detail setting, 20 by default, x 0.5 + 20 m), lifted with the sea there.
+          if (m.floatAt && Math.hypot(m.floatAt[0] - eyeNow[0], m.floatAt[1] - eyeNow[1], m.floatAt[2] - eyeNow[2]) > FloatingRadius) continue;
+          // Nor where a vehicle of the cast is (the game's litter is pushed away by it; ours isn't: bc_3's lay in
+          // the boat, under its seat).
+          if (m.floatAt && insideVehicle(m.floatAt)) continue;
+          gl.uniform1i(loc.floating, !!m.floatAt && outside);
+          if (m.floatAt) gl.uniform2f(loc.floatAt, m.floatAt[0], m.floatAt[1]);
           // Glass and what is see-through by its texture after everything solid, without writing depth.
           // Outside the water is drawn whole (its overlapping quads see-through came out lighter where two lay).
           const seeThrough = (mat.glass && !(mat.water && outside)) || (mat.blend && showTextures && !!mat.texture);
           if (seeThrough !== glassPass) continue;
+          // No water inside a boat: before the first water, its no-water planes (draw bucket 30: the tropic's
+          // over its cockpit, above the water's level) where they are in sight into the stencil, unseen, and the
+          // water (and the sea's grid) only outside them, as the game masks it.
+          if (mat.water && !reflecting && !noWaterMasked) {
+            noWaterMasked = true;
+            gl.enable(gl.STENCIL_TEST);
+            gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+            gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+            gl.colorMask(false, false, false, false);
+            gl.depthMask(false);
+            gl.disable(gl.CULL_FACE);
+            gl.uniform1i(loc.useTexture, false); gl.uniform1i(loc.cutout, false); gl.uniform1i(loc.textureAlpha, false);
+            gl.uniform1i(loc.floating, false); gl.uniform1i(loc.waterGrid, false); gl.uniform1f(loc.alpha, 1.0);
+            for (const other of visible) {
+              const plane = meshes.get(other);
+              const planeMat = plane && materials.get(plane.material);
+              if (!planeMat || !planeMat.noWater || (plane.actor && cast.size && !cast.has(plane.actor))) continue;
+              useSkin(plane);
+              gl.bindVertexArray(plane.vao);
+              gl.drawElements(gl.TRIANGLES, plane.count, gl.UNSIGNED_SHORT, 0);
+            }
+            gl.colorMask(true, true, true, true);
+            gl.depthMask(!glassPass);
+            gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+            gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+            gl.uniform1i(loc.floating, !!m.floatAt && outside);
+          }
+          if (mat.water && noWaterMasked && !reflecting) gl.enable(gl.STENCIL_TEST); else gl.disable(gl.STENCIL_TEST);
           const textured = showTextures && !!mat.texture;
           gl.uniform1i(loc.useTexture, textured);
           gl.uniform1i(loc.cutout, mat.cutout === true);
@@ -2269,7 +2374,9 @@
             gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, mat.dirt); gl.activeTexture(gl.TEXTURE0);
           }
           gl.uniform1f(loc.reflectivePower, mat.reflectivePower || 0);
-          gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
+          const spec2 = mat.specular2;
+          gl.uniform3fv(loc.spec2Color, spec2 ? spec2.slice(0, 3) : [0, 0, 0]);
+          gl.uniform2f(loc.spec2Scale, spec2 ? spec2[3] : 0, spec2 ? spec2[4] : 0);          gl.uniform1f(loc.alpha, glassPass && mat.glass ? 0.45 : 1.0);
           gl.uniform1i(loc.water, mat.water === true);
           gl.uniform1i(loc.waterWaves, mat.water === true && !!mat.normal);
           if (mat.water && outside && !reflecting) waterShown = true;
@@ -2300,6 +2407,9 @@
           // A map object without baked light (some walls): a middling one, not the view's bright light.
           if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45);
           gl.uniform1i(loc.emissive, mat.emissive === true && textured);
+          gl.uniform1f(loc.emissiveScale, mat.emissiveScale || 0);
+          // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
+          if (mat.emissiveScale > 0 && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
           if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);
           gl.uniform1i(loc.normalTex, 5);
           gl.uniform1i(loc.specTex, 6);
@@ -2327,7 +2437,7 @@
           // The water near the camera: the sea's grid too, with the same material (the quads leave it out).
           if (mat.water && outside && !reflecting && dynamicWater && waterMask) {
             const grid = seaGridVao();
-            gl.uniform1i(loc.waterGrid, true);
+            gl.uniform1i(loc.waterGrid, true); gl.uniform1i(loc.floating, false);
             gl.uniform1i(loc.hasNormal, false);
             gl.bindVertexArray(grid.vao);
             gl.drawElements(gl.TRIANGLES, grid.count, gl.UNSIGNED_SHORT, 0);
@@ -2337,6 +2447,7 @@
       }
       gl.disable(gl.BLEND);
       gl.disable(gl.POLYGON_OFFSET_FILL);
+      gl.disable(gl.STENCIL_TEST);
       };
       // Outside with water: the scene mirrored in the water's level first, into a texture the water shows
       // (as the game's water.fxc its ReflectTextureSampler), what is under the water left out.
@@ -2405,7 +2516,7 @@
       if (showLights && lights.length) {
         gl.uniform1i(loc.lines, true);
         gl.uniform1i(loc.skinned, false);
-        gl.uniform1i(loc.marker, true);
+        gl.uniform1i(loc.marker, true); gl.uniform1i(loc.floating, false);
         const e = eye();
         for (const hidden of [true, false]) {
           if (hidden) gl.disable(gl.DEPTH_TEST); else { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); }
@@ -2418,7 +2529,7 @@
             gl.drawArrays(gl.LINES, 0, l.count);
           }
         }
-        gl.depthFunc(gl.LESS);
+        gl.depthFunc(gl.LEQUAL);
         gl.uniform1i(loc.marker, false);
       }
       // The cutscene's camera while the view isn't its: where it is and what it sees.
@@ -2470,7 +2581,7 @@
       gl.uniform3fv(loc.color, hidden ? [0.45, 0.32, 0.12] : [1.0, 0.62, 0.15]);
       gl.drawArrays(gl.LINES, 0, lines.length / 3);
     }
-    gl.depthFunc(gl.LESS);
+    gl.depthFunc(gl.LEQUAL);
   }
 
   new ResizeObserver(draw).observe(canvas);

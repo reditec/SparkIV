@@ -485,6 +485,15 @@ namespace SparkIV.WinUI.Viewers
     public FrameworkElement CreateView(ViewerContext context, object loaded) => new ModelView(context, (ModelScene)loaded);
   }
 
+  /// <summary>Collision: static collision (.wbn) and collision dictionaries (.wbd), in the model view.</summary>
+  internal sealed class CollisionViewer : IViewer
+  {
+    public object Load(File file, byte[] data) =>
+      CollisionScene.Load(file, data, Services.Games.Current?.Folder ?? Services.Games.InstallFolder(Services.Games.GtaIV, "Windows"));
+
+    public FrameworkElement CreateView(ViewerContext context, object loaded) => new ModelView(context, (ModelScene)loaded);
+  }
+
   /// <summary>
   /// The textures stored in a model (.wdr), model dictionary (.wdd, each entry may have some) or fragment
   /// (.wft), in the texture viewer. Replaced textures are written into the model's resource, as for web pages.

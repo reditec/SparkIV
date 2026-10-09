@@ -90,6 +90,9 @@ namespace SparkIV.WinUI.Viewers
       ByExtension[".whm"] = new WebPageViewer();
       ByExtension[".wad"] = new AnimationViewer();
       ByExtension[".cut"] = new CutsceneViewer();
+      var collision = new CollisionViewer();
+      ByExtension[".wbn"] = collision;
+      ByExtension[".wbd"] = collision;
       var models = new ModelViewer();
       foreach (var ext in new[] { ".wdr", ".wdd", ".wft" })
       {

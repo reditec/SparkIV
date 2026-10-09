@@ -116,6 +116,8 @@ namespace SparkIV.WinUI.Viewers
         sun = A(Sun * SunMultiplier * Exposure),
         ambientAbove = A(AmbientAbove * AmbientMultiplierAbove * Exposure),
         ambientBelow = A(AmbientBelow * AmbientMultiplierBelow * Exposure),
+        // For the lamps: their strength is in the sun's units (GTAIV.exe passes both to the lights unchanged).
+        exposure = Exposure,
         skyTop = A(SkyTop),
         skyBottom = A(SkyBottom),
         fogStart = FogStart,

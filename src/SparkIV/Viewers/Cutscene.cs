@@ -328,6 +328,13 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>A vehicle's dirt, 0 to 1 (the .cut's [VEHICLE_DETAILS] 0 to 15).</summary>
     public float Dirt { get; set; }
 
+    /// <summary>
+    /// A vehicle's shine as the game sets it on its shaders when it makes the vehicle (GTAIV.exe 0xD25040,
+    /// not the model's values): specularFactorED, specularColorFactorED, specular2FactorED,
+    /// specular2ColorIntensityED, reflectivePowerED; or null.
+    /// </summary>
+    public float[]? Shine { get; set; }
+
     /// <summary>The ped's prop dictionary (CS_Bernie_Crane_p), loaded when the cutscene has it wear some, or null.</summary>
     public ModelScene? PropScene { get; set; }
 
@@ -395,6 +402,18 @@ namespace SparkIV.WinUI.Viewers
           if (material.Vehicle)
           {
             node["dirtLevel"] = actor.Dirt;
+            if (actor.Shine is float[] shine)
+            {
+              node["reflectivePower"] = shine[4];
+              // The second shine (gta_vehicle_paint2's deferred pixel shader): the third colour (slot 6), the
+              // exponent's factor 6.8 x specular2FactorED / specularFactorED, the strength's
+              // specular2ColorIntensityED² / specularColorFactorED (both then x spec map and reflectivity).
+              if (material.HasSpecular2 && actor.Paint != null)
+              {
+                node["specular2"] = new JsonArray(actor.Paint[5][0], actor.Paint[5][1], actor.Paint[5][2],
+                                                  6.8f * shine[2] / shine[0], shine[3] * shine[3] / shine[1]);
+              }
+            }
           }
           materials.Add(node);
           nextMaterial = Math.Max(nextMaterial, firstMaterial + material.Id + 1);
@@ -626,7 +645,9 @@ namespace SparkIV.WinUI.Viewers
     /// A section's messages: the timeline (a clip without tracks, as long as the section), the cast with
     /// each actor's skeleton and clip, the camera. Notes say what was missing.
     /// </summary>
-    public static (object Timeline, object Cast, object? Camera, List<string> Notes) Section(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad)
+    /// <param name="earlier">The sections played before it: their [VEHICLE_REMOVAL] parts stay off (see below).</param>
+    public static (object Timeline, object Cast, object? Camera, List<string> Notes) Section(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad,
+                                                                                         IEnumerable<CutSection>? earlier = null)
     {
       var notes = new List<string>();
       var clips = wad?.Animations.ToDictionary(a => a.ShortName, StringComparer.OrdinalIgnoreCase) ?? new Dictionary<string, Animation>(StringComparer.OrdinalIgnoreCase);
@@ -713,8 +734,17 @@ namespace SparkIV.WinUI.Viewers
         // The bones the section's [VEHICLE_REMOVAL] lines take off this model: the game sets their matrices to
         // nothing while drawing it (GTAIV.exe 0xC66BE0 / 0xC66F80), so what hangs on them isn't seen (bc_3: of the
         // boat's five tops, extra_1 to extra_4 removed in its first section, an open boat left).
-        var removed = section.VehicleRemovals.Where(r => r.Model == model.Id && boneOfId.ContainsKey(r.BoneId))
-                                             .Select(r => boneOfId[r.BoneId]).Distinct().ToList();
+        // Those of the sections before stay off: the game zeroes them in the vehicle's own skeleton, which
+        // nothing sets again (its extras have no tracks) and which the scene keeps from section to section (bc_3:
+        // extra_3, the top's frame, removed in the first section only, isn't there in the game's second either).
+        var removals = section.VehicleRemovals.Where(r => r.Model == model.Id).Select(r => r.BoneId).ToList();
+        foreach (var before in earlier ?? Enumerable.Empty<CutSection>())
+        {
+          removals.AddRange(before.VehicleRemovals.Where(r => before.Models.FirstOrDefault(m => m.Id == r.Model) is CutModel same &&
+                                                              ReferenceEquals(ActorOf(actors, before, same), actor))
+                                                  .Select(r => r.BoneId));
+        }
+        var removed = removals.Where(boneOfId.ContainsKey).Select(id => boneOfId[id]).Distinct().ToList();
         cast.Add(new
         {
           id = actor.Id,
@@ -1114,6 +1144,42 @@ namespace SparkIV.WinUI.Viewers
           continue;
         }
         actor.Paint = new[] { Colour(numbers[0]), Colour(numbers[1]), Colour(numbers[2]), Colour(numbers[3]), new[] { 1f, 1f, 1f }, Colour(numbers[2]) };
+      }
+      ApplyShine(actors, folder, gtaIV);
+    }
+
+    /// <summary>
+    /// The vehicles' shine (<see cref="CutActor.Shine"/>), as GTAIV.exe 0xD25040 sets it by the model's
+    /// vehicles.ide line (its number after lodMult, read by 0x9D9D90 into the model's +0x84): 0 all five 1;
+    /// otherwise drawn at random per vehicle (rand / 32767) - specular, its colour and the second shine's
+    /// intensity 0.9 to 1, the second shine's factor 3.9 to 4, the reflectivity 0.7 to 0.75 for 1, else 0.55
+    /// to 0.6. Here the middle of each.
+    /// </summary>
+    private static void ApplyShine(IEnumerable<CutActor> actors, string folder, string? gtaIV)
+    {
+      string? file = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.Combine(f!, "common", "data", "vehicles.ide")).FirstOrDefault(File.Exists);
+      if (file == null)
+      {
+        return;
+      }
+      var kind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+      foreach (string raw in File.ReadLines(file))
+      {
+        // Model, txd, type, handling, game name, anims, anims2, frequency, max. number, wheel radii (2), dirt,
+        // swankness, lodMult, then this number, the flags.
+        var fields = raw.Split('#')[0].Split(',', StringSplitOptions.TrimEntries);
+        if (fields.Length >= 16 && int.TryParse(fields[14], NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
+        {
+          kind.TryAdd(fields[0], number);
+        }
+      }
+      foreach (var actor in actors)
+      {
+        if (actor.Scene == null || !actor.Scene.Materials.Any(m => m.Vehicle) || !kind.TryGetValue(actor.Model, out int number))
+        {
+          continue;
+        }
+        actor.Shine = number == 0 ? new[] { 1f, 1f, 1f, 1f, 1f } : new[] { 0.95f, 0.95f, 3.95f, 0.95f, number == 1 ? 0.725f : 0.575f };
       }
     }
 
