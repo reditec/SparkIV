@@ -106,7 +106,45 @@ namespace SparkIV.WinUI
         // Models find their textures through the game's .ide files and shared dictionaries.
         Games.SetCurrent(install);
         ShowVolume(volume, gameName + "  \u00B7  " + install.Folder);
+        _ = IndexCutsceneScriptsAsync(install);
       });
+    }
+
+    /// <summary>
+    /// When a game is loaded for the first time (or the game or SparkIV changed since): which mission script
+    /// plays which cutscene and how it colours its vehicles, from the game's scripts (GTA IV, and TLAD and TBoGT
+    /// each for the episodes), in the background, shown in the info bar. See CutsceneScriptIndex.
+    /// </summary>
+    private async Task IndexCutsceneScriptsAsync(GameInstall install)
+    {
+      // The game's own folders, and the episodes' inside it too (the Complete Edition keeps TLAD and TBoGT in
+      // GTA IV's folder: browsed from GTA IV, their cutscenes open from there).
+      var folders = install.Game.ContentFolders.Concat(Games.Episodes.ContentFolders)
+                           .Distinct(StringComparer.OrdinalIgnoreCase)
+                           .Select(c => (Name: c.Length == 0 ? install.Game.ShortName : c, Folder: c.Length == 0 ? install.Folder : Path.Combine(install.Folder, c)))
+                           .Where(g => Viewers.GtaIV.Pc.CutsceneScriptIndex.NeedsBuild(g.Folder))
+                           .ToList();
+      if (folders.Count == 0)
+      {
+        return;
+      }
+      var done = new List<string>();
+      try
+      {
+        foreach (var (name, folder) in folders)
+        {
+          void Report(int at, int of) => DispatcherQueue.TryEnqueue(() =>
+            ShowMessage(InfoBarSeverity.Informational, "Indexing the cutscenes' mission scripts",
+                        name + ": script " + Math.Min(at + 1, of) + " of " + of + " (once per game, and again after the game or SparkIV changes)"));
+          var index = await Viewers.GtaIV.Pc.CutsceneScriptIndex.EnsureAsync(folder, Report);
+          done.Add(name + " " + index.Cutscenes.Count);
+        }
+        ShowMessage(InfoBarSeverity.Success, "Cutscene scripts indexed", "Cutscenes found in mission scripts: " + string.Join(", ", done) + ".");
+      }
+      catch (Exception ex)
+      {
+        ShowMessage(InfoBarSeverity.Warning, "Could not index the cutscenes' mission scripts", ex.Message);
+      }
     }
 
     #region Edit mode

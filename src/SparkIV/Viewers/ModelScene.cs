@@ -866,12 +866,19 @@ namespace SparkIV.WinUI.Viewers
       var bones = new int[vertices.Length];
       float[]? skinBones = null, skinWeights = null;
       bool skinned = mesh.VertexHasBlendInfo && mesh.BoneMapping.Length > 0;
+      int placedAt = placement == null ? 0 : Math.Max(0, Bones.FindIndex(b => b.Name.Equals(placement.Bone, StringComparison.OrdinalIgnoreCase)));
+      // A part placed at a bone (a vehicle's wheels, the parts that break off) moves with it, all of it on that bone:
+      // laid at the bone's rest place, so the bone's move from its rest pose carries it (et01_ba: the Presidente's
+      // wheels stood on the road where the car was at rest, the car having driven on).
+      if (rigidBone < 0 && placement != null && !skinned && Bones.Count > 0)
+      {
+        rigidBone = placedAt;
+      }
       if (skinned || rigidBone >= 0)
       {
         skinBones = new float[vertices.Length * 4];
         skinWeights = new float[vertices.Length * 4];
       }
-      int placedAt = placement == null ? 0 : Math.Max(0, Bones.FindIndex(b => b.Name.Equals(placement.Bone, StringComparison.OrdinalIgnoreCase)));
       for (int i = 0; i < vertices.Length; i++)
       {
         bones[i] = placedAt;
@@ -952,7 +959,9 @@ namespace SparkIV.WinUI.Viewers
       // Dirt decals (gta_decal_dirt) take their colour from the vertices, the texture only says where; map
       // objects shown in their place (a cutscene's location) the light baked into them.
       // Vehicles' too: their shaders multiply the colour by them (gta_vehicle_paint2: texture x matDiffuseColor x vertex colour).
-      if (hasColor && colors == null && (_vertexColors || (material >= 0 && material < Materials.Count && (Materials[material].DirtMask != null || Materials[material].Vehicle))))
+      // Peds' as well: their red is the AO of the light from around (GtaIVPcMaterials.IsPed).
+      if (hasColor && colors == null && (_vertexColors || (material >= 0 && material < Materials.Count &&
+          (Materials[material].DirtMask != null || Materials[material].Vehicle || GtaIVPcMaterials.IsPed(Materials[material].Shader)))))
       {
         colors = new float[vertices.Length * 3];
         for (int i = 0; i < vertices.Length; i++)
@@ -1103,8 +1112,12 @@ namespace SparkIV.WinUI.Viewers
         DirtColor = VectorParameter(material, GtaIVPcMaterials.DirtColor) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
         ReflectivePower = (VectorParameter(material, GtaIVPcMaterials.ReflectivePowerED) ?? VectorParameter(material, GtaIVPcMaterials.ReflectivePower))?.X ?? 0,
         HasSpecular2 = vehicle && VectorParameter(material, GtaIVPcMaterials.Specular2ColorIntensityED) != null,
+        VehicleShine = vehicle ? GtaIVPcMaterials.VehicleShineOf(shader) : null,
         EmissiveMultiplier = GtaIVPcMaterials.IsEmissive(shader) ? VectorParameter(material, GtaIVPcMaterials.EmissiveMultiplier)?.X : null,
         EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
+        SubSurface = VectorParameter(material, GtaIVPcMaterials.SubColor) is { } sub && VectorParameter(material, GtaIVPcMaterials.SubScatWidth) is { } width
+          ? new[] { sub.X, sub.Y, sub.Z, VectorParameter(material, GtaIVPcMaterials.SubScatWrap)?.X ?? 0, width.X }
+          : null,
       };
     }
 
@@ -1328,9 +1341,8 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>
     /// A vehicle's shader (gta_vehicle_*): lit as the game's (gta_vehicle_paint2's pixel shader: the texture
-    /// mixed towards <see cref="DirtColor"/> by its dirt texture's red x the vehicle's dirt; the shine
-    /// dot(spec map, mask) x 0.15 x reflectivity, as sharp as its alpha x 190 x reflectivity; glass mirroring
-    /// its surroundings x reflectivity).
+    /// mixed towards <see cref="DirtColor"/> by its dirt texture's red x the vehicle's dirt; the shine and the
+    /// mirrored surroundings by <see cref="VehicleShine"/> and reflectivity).
     /// </summary>
     public bool Vehicle { get; init; }
     public string? DirtKey { get; init; }
@@ -1344,11 +1356,20 @@ namespace SparkIV.WinUI.Viewers
     public bool HasSpecular2 { get; init; }
 
     /// <summary>
+    /// A vehicle shader's shine numbers (intensity factor, power factor, 1 for the forward-drawn glass), read
+    /// from its pixel programs (see GtaIV.Pc.GtaIVPcMaterials.VehicleShineOf); null if not known.
+    /// </summary>
+    public float[]? VehicleShine { get; init; }
+
+    /// <summary>
     /// An emissive shader's brightness (gta_emissive*: texture x vertex colour x emissiveMultiplier, unlit), or
     /// null; and whether it only shines at night (gta_emissivenight: x the time cycle's day/night effects).
     /// </summary>
     public float? EmissiveMultiplier { get; init; }
     public bool EmissiveAtNight { get; init; }
+
+    /// <summary>gta_ped_skin's light through the skin: SubColor (r, g, b), SubScatWrap, SubScatWidth; or null.</summary>
+    public float[]? SubSurface { get; init; }
 
     /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
     public object ToMessage(Func<string, string> url) => new
@@ -1364,6 +1385,7 @@ namespace SparkIV.WinUI.Viewers
       emissive = Emissive,
       emissiveMultiplier = EmissiveMultiplier,
       emissiveAtNight = EmissiveAtNight,
+      subSurface = SubSurface,
       texture = TextureKey == null ? null : url(TextureKey),
       color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),
       layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
@@ -1378,6 +1400,7 @@ namespace SparkIV.WinUI.Viewers
       dirtTexture = DirtKey == null ? null : url(DirtKey),
       dirtColor = DirtColor,
       reflectivePower = ReflectivePower,
+      vehicleShine = VehicleShine,
     };
 
     /// <summary>The material's draw bucket as the model stores it (what it means is the game's: see GtaIV.Pc.GtaIVPcMaterials).</summary>

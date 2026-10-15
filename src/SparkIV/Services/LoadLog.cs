@@ -27,12 +27,22 @@ namespace SparkIV.WinUI.Services
     /// <summary>The step since the last one (or the start) is done.</summary>
     public void Step(string name, string? note = null)
     {
-      _steps.Add((name, _step.Elapsed.TotalSeconds, note));
-      _step.Restart();
+      // Locked: a view's steps and a background load's (the cutscene's cast) may come at the same time.
+      lock (_steps)
+      {
+        _steps.Add((name, _step.Elapsed.TotalSeconds, note));
+        _step.Restart();
+      }
     }
 
     /// <summary>A step measured elsewhere (seconds), not counted against the next one.</summary>
-    public void Add(string name, double seconds, string? note = null) => _steps.Add((name, seconds, note));
+    public void Add(string name, double seconds, string? note = null)
+    {
+      lock (_steps)
+      {
+        _steps.Add((name, seconds, note));
+      }
+    }
 
     /// <summary>Starts timing the next step from now (after waiting for something not to be counted).</summary>
     public void Restart() => _step.Restart();

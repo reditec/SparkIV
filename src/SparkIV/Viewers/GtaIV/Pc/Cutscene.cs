@@ -761,6 +761,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         var position = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraPosition && t.IsDecoded);
         var rotation = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraRotation && t.IsDecoded);
         var fov = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraFov && t.IsDecoded);
+        // The depth of field: near and far in metres (and a third value, 0), per frame; GTAIV.exe hands them to
+        // its post effects (0xADD200 -> 0xADE560 -> 0x5E16F0), which in a cutscene blur what is beyond far.
+        var dof = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraDof && t.IsDecoded);
         camera = new
         {
           frames = Math.Max(1, cameraClip.FrameCount),
@@ -768,6 +771,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           position = position == null ? null : Sampled(cameraClip, position, 3),
           rotation = rotation == null ? null : Sampled(cameraClip, rotation, 4),
           fov = fov == null ? null : SampledScalar(cameraClip, fov),
+          dof = dof == null ? null : Sampled(cameraClip, dof, 3),
         };
       }
       else if (section.Camera != null)
@@ -797,9 +801,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           frames = Math.Max(1, light.FrameCount),
           fps = FramesPerSecond(light),
           position = Sampled(light, place, 3),
+          // As GTAIV.exe hands them on (0x9CA7E0 to its lights, 0xABCC50): track 140 (OpenIV's "LightRange") the
+          // strength, 141 ("LightIntensity1") the range (its 11th argument: the sphere tested against the view),
+          // 142 ("LightIntensity2") the cone's outer angle from its axis in degrees (half of it the inner).
           color = Vector(AnimationTrackKind.LightColor),
-          range = Scalar(AnimationTrackKind.LightRange),
-          intensity = Scalar(AnimationTrackKind.LightIntensity1),
+          range = Scalar(AnimationTrackKind.LightIntensity1),
+          intensity = Scalar(AnimationTrackKind.LightRange),
           cone = Scalar(AnimationTrackKind.LightIntensity2),
           direction = Vector(AnimationTrackKind.LightDirection),
         });
@@ -1091,15 +1098,25 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// IV's). Six colours as the game makes them for a vehicle's shaders (GTAIV.exe 0xD25D80): the four, white,
     /// the third again.
     /// </summary>
-    public static void ApplyPaint(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV)
+    /// <param name="scriptColours">The colours the mission script playing the cutscene gives a vehicle of a model
+    /// (by the model's hash), or null: the game gives the cutscene's vehicle those of the vehicle of that model
+    /// in the world (GTAIV.exe 0xC67450), only without one the .cut's (see <see cref="CutsceneScriptIndex"/>).</param>
+    public static void ApplyPaint(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV, Func<uint, int[]?>? scriptColours = null)
     {
-      string? file = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.Combine(f!, "common", "data", "carcols.dat")).FirstOrDefault(File.Exists);
-      if (file == null)
+      // An episode's carcols.dat only adds its own vehicles' sets (TLAD's: car3, no colour table): the game reads
+      // GTA IV's too, so both are read, the episode's first (its sets win), the colours from the first that has
+      // them (et01_ba's Presidente came out white instead of black). For GTA IV itself the one file.
+      var files = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.GetFullPath(Path.Combine(f!, "common", "data", "carcols.dat")))
+                                          .Distinct(StringComparer.OrdinalIgnoreCase).Where(File.Exists).ToList();
+      if (files.Count == 0)
       {
         return;
       }
       var colours = new List<float[]>();
       var sets = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase);
+      foreach (string file in files)
+      {
+      bool ownColours = colours.Count == 0;
       string? block = null;
       foreach (string raw in File.ReadLines(file))
       {
@@ -1114,7 +1131,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           continue;
         }
         var fields = line.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        if (block == "col" && fields.Length >= 3 && fields.Take(3).All(f => int.TryParse(f, out _)))
+        if (block == "col" && ownColours && fields.Length >= 3 && fields.Take(3).All(f => int.TryParse(f, out _)))
         {
           colours.Add(fields.Take(3).Select(f => int.Parse(f, CultureInfo.InvariantCulture) / 255f).ToArray());
         }
@@ -1123,6 +1140,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var numbers = fields.Skip(1).Select(f => int.TryParse(f, out int n) ? n : -1).Where(n => n >= 0).ToArray();
           sets.TryAdd(fields[0], numbers);
         }
+      }
       }
       float[] Colour(int number) => number >= 0 && number < colours.Count ? colours[number] : new[] { 1f, 1f, 1f };
       foreach (var actor in actors)
@@ -1138,6 +1156,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           int per = set.Length % 4 == 0 && set.Length % 3 != 0 ? 4 : 3;
           numbers = set.Take(per).Concat(Enumerable.Repeat(per == 3 ? set.ElementAtOrDefault(2) : 0, 4 - per)).ToArray();
+        }
+        // The mission's vehicle's colours where its script sets them (et01_ba: elizabeta1's black Presidente).
+        if (scriptColours?.Invoke(RageLib.GtaIV.Pc.Text.GxtFile.Hash(actor.Model)) is int[] fromScript)
+        {
+          var merged = (numbers != null && numbers.Length >= 4 ? numbers : new int[4]).ToArray();
+          for (int k = 0; k < 4; k++)
+          {
+            if (fromScript[k] >= 0)
+            {
+              merged[k] = fromScript[k];
+            }
+          }
+          numbers = merged;
         }
         if (numbers == null || numbers.Length < 4)
         {
@@ -1157,13 +1188,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     private static void ApplyShine(IEnumerable<CutActor> actors, string folder, string? gtaIV)
     {
-      string? file = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.Combine(f!, "common", "data", "vehicles.ide")).FirstOrDefault(File.Exists);
-      if (file == null)
+      // An episode's vehicles.ide and GTA IV's, the episode's first (as carcols.dat in ApplyPaint).
+      var files = new[] { folder, gtaIV }.Where(f => f != null).Select(f => Path.GetFullPath(Path.Combine(f!, "common", "data", "vehicles.ide")))
+                                          .Distinct(StringComparer.OrdinalIgnoreCase).Where(File.Exists).ToList();
+      if (files.Count == 0)
       {
         return;
       }
       var kind = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-      foreach (string raw in File.ReadLines(file))
+      foreach (string raw in files.SelectMany(File.ReadLines))
       {
         // Model, txd, type, handling, game name, anims, anims2, frequency, max. number, wheel radii (2), dirt,
         // swankness, lodMult, then this number, the flags.
@@ -1206,7 +1239,24 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
           foreach (var part in parts)
           {
-            part.IsChecked = ReferenceEquals(part, chosen);
+            if (!ReferenceEquals(part, chosen))
+            {
+              part.IsChecked = false;
+              continue;
+            }
+            // Only its most detailed level, as a part is shown when loaded: checking the whole part checked
+            // every level under it (the TLAD player's head, hands and jacket drawn at three levels at once in
+            // et01_ba: four hands, the coarse head's faces showing through the fine one).
+            var levels = part.Children.Where(c => c.Lod >= 0).ToList();
+            if (levels.Count == 0)
+            {
+              part.IsChecked = true;
+              continue;
+            }
+            for (int i = 0; i < levels.Count; i++)
+            {
+              levels[i].IsChecked = i == 0;
+            }
           }
         }
         if (likeGame && !actor.Model.Equals("player", StringComparison.OrdinalIgnoreCase))

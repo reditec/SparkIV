@@ -20,13 +20,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   {
     /// <summary>Floating litter: where it floats (its centre on the water, in the scene), for the page to lift it with the sea; null otherwise.</summary>
     public Vector3? FloatAt { get; init; }
+
+    /// <summary>A far version (lod…, slod…): what the game draws into its map of the mirrored surroundings.</summary>
+    public bool Far { get; init; }
+
+    /// <summary>Only for that map: the far version of a model shown near (not shown itself, nor casting a shadow).</summary>
+    public bool MirrorOnly { get; init; }
   }
 
   /// <summary>
   /// A room of an interior placed around a cutscene: its box in the interior (Min, Max), the interior's place
-  /// in the scene (At) and the turn from the scene into the interior (Turn: local = Turn applied to scene - At).
+  /// in the scene (At) and the turn from the scene into the interior (Turn: local = Turn applied to scene - At);
+  /// Modifier: the hash of its time cycle modifier's name (0: none).
   /// </summary>
-  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max);
+  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max, uint Modifier = 0);
 
   /// <summary>
   /// Where a cutscene plays: the map objects around its origin ([OFFSET]; the scene's places are the
@@ -173,7 +180,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       public List<(string Name, Vector3 Position, Quaternion Rotation, bool Lod, int Room)> Objects { get; } =
         new List<(string, Vector3, Quaternion, bool, int)>();
-      public List<(string Name, Vector3 Min, Vector3 Max)> Rooms { get; } = new List<(string, Vector3, Vector3)>();
+      public List<(string Name, Vector3 Min, Vector3 Max, uint Modifier)> Rooms { get; } = new List<(string, Vector3, Vector3, uint)>();
     }
 
     private static readonly object Gate = new object();
@@ -228,7 +235,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             continue;
           }
           roomOf[r] = location.Rooms.Count;
-          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, p.Rotation, room.Min, room.Max));
+          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, p.Rotation, room.Min, room.Max, room.Modifier));
         }
         foreach (var o in interior.Objects)
         {
@@ -251,6 +258,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // which spans the scene, bc_3).
       bool Near(string name, Vector3 position) => Distance(position) - Bound(name) <= radius;
       var near = inside.Where(p => Near(p.Name, p.Position) && AtHour(p.Name)).ToList();
+      // Far versions only for the map of the mirrored surroundings (see below), by index and by name and place.
+      var mirrorOnly = new HashSet<int>();
+      var mirrorPlaces = new HashSet<(string, Vector3)>();
 
       // Inside: the origin across the ground in a room, up to 5 m below or above it (a scene's origin isn't
       // where it plays: bc_1's is 3.4 m under the floor of Bernie's living room).
@@ -349,6 +359,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             location.Far++;
           }
         }
+        // The game's map of the mirrored surroundings (paint, glass, the cast's shine) is drawn from the far
+        // versions, not from the models near: in the TLAD trace GTAIV.4 (et01_ba, frame 9350) 100 of its 102 vertex
+        // buffers aren't in the main pass, the 2 others far versions shown there too. So of each model shown near
+        // its far version as well, only for that map.
+        var chosenSet = chosen.ToHashSet();
+        foreach (int i in chosen)
+        {
+          var p = index.Placements[i];
+          int parent = p.Parent;
+          if (!IsFar(p.Name) && parent >= 0 && parent < index.Placements.Count && parent != i && !chosenSet.Contains(parent) &&
+              IsFar(index.Placements[parent].Name) && AtHour(index.Placements[parent].Name) && mirrorOnly.Add(parent))
+          {
+            var lod = index.Placements[parent];
+            near.Add((lod.Name, lod.Position, lod.Rotation, -1));
+            mirrorPlaces.Add((lod.Name, lod.Position));
+          }
+        }
       }
       log?.Step("location: choose its objects", (location.Outdoors ? "outside" : "inside") + ", " + near.Count + " placements");
       // Hidden by the scene: the same model within a metre of the place [REMOVE] gives (to a tenth of a metre there).
@@ -425,7 +452,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             // The placement's turn is the inverse of the model's (as the game reads it), then its place,
             // less the scene's origin.
             var place = Matrix4x4.CreateFromQuaternion(Quaternion.Conjugate(placement.Rotation)) * Matrix4x4.CreateTranslation(placement.Position - origin);
-            location.Objects.Add(new LocationObject(model, place, placement.Room));
+            location.Objects.Add(new LocationObject(model, place, placement.Room)
+            {
+              Far = IsFar(placement.Name),
+              MirrorOnly = mirrorPlaces.Contains((placement.Name, placement.Position)),
+            });
           }
         }
         finally
@@ -716,6 +747,50 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // Outside: how far models (not their far versions) are shown at most, in metres.
     private const float OutsideModels = 150;
 
+    /// <summary>
+    /// The map's files of a kind under <paramref name="sub"/> (pc\data ...) as the game loads them. An episode
+    /// (TLAD, TBoGT: a content.dat in its folder, GTA IV's folder above it) only adds to GTA IV's city: its
+    /// content.dat and images.txt list its own files besides GTA IV's (GTA IV's images.txt is read too), so
+    /// GTA IV's files come too; where the episode has a file of the same path (TLAD's east\bronx_w.img) both
+    /// are loaded, the episode's first so its models win where both have one (et01_ba: the roads and bridge
+    /// round the toll booth are only in GTA IV's bronx_w.img). <paramref name="replaced"/> gets GTA IV's files
+    /// the episode has one of the same path of (their placements are the episode's).
+    /// </summary>
+    private static IEnumerable<string> MapFiles(string folder, string sub, string pattern, HashSet<string>? replaced = null)
+    {
+      string own = Path.Combine(folder, sub);
+      var ownFiles = System.IO.Directory.Exists(own)
+        ? System.IO.Directory.EnumerateFiles(own, pattern, SearchOption.AllDirectories).ToList()
+        : new List<string>();
+      foreach (var path in ownFiles)
+      {
+        yield return path;
+      }
+      var parent = System.IO.Directory.GetParent(Path.TrimEndingDirectorySeparator(folder));
+      if (!System.IO.File.Exists(Path.Combine(folder, "content.dat")) || parent == null)
+      {
+        yield break;
+      }
+      string baseDir = Path.Combine(parent.FullName, sub);
+      if (!System.IO.Directory.Exists(baseDir))
+      {
+        yield break;
+      }
+      var episodes = new HashSet<string>(ownFiles.Select(p => Path.GetRelativePath(own, p)), StringComparer.OrdinalIgnoreCase);
+      foreach (var path in System.IO.Directory.EnumerateFiles(baseDir, pattern, SearchOption.AllDirectories))
+      {
+        if (!episodes.Contains(Path.GetRelativePath(baseDir, path)))
+        {
+          yield return path;
+        }
+        else if (replaced != null)
+        {
+          replaced.Add(path);
+          yield return path;
+        }
+      }
+    }
+
     private static MapIndex IndexOf(string folder)
     {
       lock (Gate)
@@ -727,21 +802,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         var index = new MapIndex();
         // The models' names by the hash a placement gives (from the .ide files).
         var nameOf = new Dictionary<uint, string>();
-        string data = Path.Combine(folder, "pc", "data");
-        if (System.IO.Directory.Exists(data))
+        foreach (var ide in MapFiles(folder, Path.Combine("pc", "data"), "*.ide", new HashSet<string>()))
         {
-          foreach (var ide in System.IO.Directory.EnumerateFiles(data, "*.ide", SearchOption.AllDirectories))
-          {
-            ReadIde(ide, nameOf, index.Interiors, index.Sizes, index.DictionaryOf, index.Hours);
-          }
+          ReadIde(ide, nameOf, index.Interiors, index.Sizes, index.DictionaryOf, index.Hours);
         }
-        string maps = Path.Combine(folder, "pc", "data", "maps");
         var looseStart = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (System.IO.Directory.Exists(maps))
         {
+          string maps = Path.Combine("pc", "data", "maps");
           // The far versions' placements are in loose files beside the archives (east\bronx_e.wpl ...), first:
           // the archives' placements point into them.
-          foreach (var path in System.IO.Directory.EnumerateFiles(maps, "*.wpl", SearchOption.AllDirectories))
+          foreach (var path in MapFiles(folder, maps, "*.wpl"))
           {
             try
             {
@@ -753,8 +823,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
               // A file that can't be read: its objects aren't shown.
             }
           }
-          foreach (var path in System.IO.Directory.EnumerateFiles(maps, "*.img", SearchOption.AllDirectories))
+          var replacedImgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+          foreach (var path in MapFiles(folder, maps, "*.img", replacedImgs))
           {
+            bool placements = !replacedImgs.Contains(path);
             var img = new IMGFileSystem();
             try
             {
@@ -770,7 +842,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                 {
                   index.DictionaryArchiveOf.TryAdd(Path.GetFileNameWithoutExtension(file.Name), path);
                 }
-                else if (extension.Equals(".wpl", StringComparison.OrdinalIgnoreCase))
+                else if (placements && extension.Equals(".wpl", StringComparison.OrdinalIgnoreCase))
                 {
                   ReadPlacements(file.GetData(), nameOf, index.Placements,
                              looseStart.TryGetValue(Path.GetFileNameWithoutExtension(path), out int parents) ? parents : -1);
@@ -861,16 +933,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // An object: name, texture dictionary, the distance it is drawn up to, flags, a number, its bounds
         // (box min, max, sphere centre, radius), the dictionary it is in; a timed one (tobj) also the hours
         // it is shown.
-        if (section is "objs" or "tobj" && fields.Length >= 15 &&
-            float.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float draw) &&
-            float.TryParse(fields[14], NumberStyles.Float, CultureInfo.InvariantCulture, out float bound))
+        // An animated one (anim, tanm) the same with its animations' dictionary third (manhat09.ide's
+        // LOD_BAWSAQ_01_DC9, manhat09, ...: far versions of Manhattan's signs, in slodmh96mh98_dc9_grp); shown at
+        // rest here, not animated.
+        int shift = section is "anim" or "tanm" ? 1 : 0;
+        if (section is "objs" or "tobj" or "anim" or "tanm" && fields.Length >= 15 + shift &&
+            float.TryParse(fields[2 + shift], NumberStyles.Float, CultureInfo.InvariantCulture, out float draw) &&
+            float.TryParse(fields[14 + shift], NumberStyles.Float, CultureInfo.InvariantCulture, out float bound))
         {
           sizes.TryAdd(fields[0], (draw, bound));
-          if (fields.Length >= 16 && fields[15].Length > 0 && !fields[15].Equals("null", StringComparison.OrdinalIgnoreCase))
+          if (fields.Length >= 16 + shift && fields[15 + shift].Length > 0 && !fields[15 + shift].Equals("null", StringComparison.OrdinalIgnoreCase))
           {
-            dictionaryOf.TryAdd(fields[0], fields[15]);
+            dictionaryOf.TryAdd(fields[0], fields[15 + shift]);
           }
-          if (section == "tobj" && fields.Length >= 17 && uint.TryParse(fields[16], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint shownHours))
+          if (section is "tobj" or "tanm" && fields.Length >= 17 + shift && uint.TryParse(fields[16 + shift], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint shownHours))
           {
             hours.TryAdd(fields[0], shownHours);
           }
@@ -887,16 +963,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
           if (fields.Length >= 9 && !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
           {
-            // A room's own line: its name and box.
+            // A room's own line: its name and box; its 11th number the hash of its time cycle modifier's name
+            // (Bernie's rooms 1720238244, "BernieCrane" in timecyclemodifiers3.dat; 0 none, limbo).
+            uint modifier = fields.Length > 10 && uint.TryParse(fields[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint m) ? m : 0;
             try
             {
               var a = new Vector3(F(fields[3]), F(fields[4]), F(fields[5]));
               var b = new Vector3(F(fields[6]), F(fields[7]), F(fields[8]));
-              interior.Rooms.Add((fields[0], Vector3.Min(a, b), Vector3.Max(a, b)));
+              interior.Rooms.Add((fields[0], Vector3.Min(a, b), Vector3.Max(a, b), modifier));
             }
             catch (FormatException)
             {
-              interior.Rooms.Add((fields[0], Vector3.Zero, Vector3.Zero));
+              interior.Rooms.Add((fields[0], Vector3.Zero, Vector3.Zero, modifier));
             }
           }
           else if (interior.Rooms.Count > 0)
@@ -1014,6 +1092,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           node["material"] = materialStart[obj.Model] + mesh.Material;
           node["background"] = true;
           node["room"] = obj.Room;
+          // A far version (drawn into the mirrored surroundings' map), and one only for that map.
+          if (obj.Far)
+          {
+            node["far"] = true;
+          }
+          if (obj.MirrorOnly)
+          {
+            node["mirrorOnly"] = true;
+          }
           if (obj.FloatAt is Vector3 floatAt)
           {
             node["floatAt"] = new JsonArray(floatAt.X, floatAt.Y, floatAt.Z);

@@ -46,8 +46,10 @@ namespace RageLib.GtaIV.Pc.Animation
     CameraControl = 144,
 
     // A cutscene's light (spt_dr_0, fil_red_0 in its dictionaries; its place is a BonePosition track of
-    // bone 0), named as OpenIV's export names them: its colour, range in metres, strength (0.1: as good as
-    // off), a second number of 35 to 105 (most likely the cone's angle in degrees), the way it shines.
+    // bone 0), named as OpenIV's export names them, though GTAIV.exe (0x9CA7E0) reads them otherwise:
+    // LightRange is its strength, LightIntensity1 its range in metres, LightIntensity2 the cone's outer angle
+    // from its axis in degrees (35 to 105, the game takes at most 89; half of it the inner); its colour and
+    // the way it shines.
     LightColor = 139,
     LightRange = 140,
     LightIntensity1 = 141,

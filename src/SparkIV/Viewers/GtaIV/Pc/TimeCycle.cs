@@ -16,7 +16,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// (DirLightMult at 57, AmbLightMult0 and 1 at 58 and 59, SkyLightMult, SunMult). Between two times the
   /// values are blended.
   /// </summary>
-  public sealed class TimeCycle
+  public sealed record TimeCycle
   {
     private static readonly int[] Hours = { 0, 5, 6, 7, 9, 12, 18, 19, 20, 21, 22 };
 
@@ -41,6 +41,41 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float WaterReflection { get; private init; }
     /// <summary>The picture's gamma (column 47, "Gamma"): rage_postfx.fxc maps luminance L to L^gamma, the hue kept.</summary>
     public float Gamma { get; private init; }
+
+    // The rest of rage_postfx.fxc's tone mapping, as GTAIV.exe sets it (0x930A80 → 0x930690 → 0x92F570) from
+    // the time cycle's values, which its reader (0xAEFEB0) fills from these columns:
+    /// <summary>ToneMapParams.y (column 37, "MidGreyValue"): the picture = light x exposure x this / the adapted luminance.</summary>
+    public float MidGrey { get; private init; }
+    /// <summary>IntensityBloom (column 38): the bloom added before the curve, x 0.5 (ToneMapParams.z) x 0.25.</summary>
+    public float Bloom { get; private init; }
+    /// <summary>deSatContrastGamma.x (column 45): how much colour stays, lerp(luminance, colour, this).</summary>
+    public float Saturation { get; private init; }
+    /// <summary>ColorCorrect (columns 39 to 41, bytes / 255; the shader doubles it).</summary>
+    public Vector3 ColorCorrect { get; private init; }
+    /// <summary>ColorShift (columns 42 to 44, bytes / 255; w = 1 / (its luminance + 0.001)).</summary>
+    public Vector3 ColorShift { get; private init; }
+    /// <summary>AdaptedLumMin and AdaptedLumMax (columns 53, 54): the eye's adaptation kept within them.</summary>
+    public float AdaptedLumMin { get; private init; }
+    public float AdaptedLumMax { get; private init; }
+    /// <summary>AdaptTime (column 55 x 10): from 1 on the adaptation follows by min(seconds / sqrt(2 x this), 1) a frame; below, at once.</summary>
+    public float AdaptTime { get; private init; }
+
+    /// <summary>SkyLightMult (column 60): the fog's colours are the sky's times this (0xAF3A50).</summary>
+    public float SkyLightMultiplier { get; private init; }
+    /// <summary>The near fog's amount (column 11, / 255: the alpha packed with the sky bottom at +0x2C).</summary>
+    public float NearFogAmount { get; private init; }
+
+    /// <summary>gDirectionalLight.w (GTAIV.exe 0xAC30F0): max(1, (SkyLightMult + SunMult) / DirLightMult), columns 60, 61, 57; scales the sun's shine.</summary>
+    public float DirectionalLightW { get; private init; }
+    /// <summary>globalScalars.w (0xAC6F70): 0.6 x the 64th number (0 to 4), +0xD8 of the time's values; scales the mirrored surroundings in the shine.</summary>
+    public float GlobalScalarsW { get; private init; }
+
+    /// <summary>
+    /// The film grain (column 10, the header's "Sky top" green; GTAIV.exe's parser 0xAEFEB0 reads it as an int into
+    /// +0x20C of the time's values, blended between the hours as an int by 0xAF0DB0): rage_postfx's NoiseParams.z is
+    /// it / 64 (0x930268); none while 0. Only TLAD's file has it (25 at noon in EXTRASUNNY; GTA IV's and TBoGT's 0).
+    /// </summary>
+    public int Noise { get; private init; }
 
     /// <summary>The weather's line at the hour (blended between the two times round it), or null without the file or weather.</summary>
     public static TimeCycle? Load(string gameFolder, string weather, float hour)
@@ -105,6 +140,99 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         AmbientMultiplierBelow = V(59),
         WaterReflection = a.Length > 125 && b.Length > 125 ? V(125) : 1f,
         Gamma = V(47),
+        MidGrey = V(37),
+        Bloom = V(38),
+        Saturation = V(45),
+        ColorCorrect = Rgb(39),
+        ColorShift = Rgb(42),
+        AdaptedLumMin = V(53),
+        AdaptedLumMax = V(54),
+        AdaptTime = V(55) * 10,
+        SkyLightMultiplier = V(60),
+        NearFogAmount = V(11) / 255f,
+        DirectionalLightW = Math.Max(1f, (V(60) + V(61)) / Math.Max(V(57), 1e-4f)),
+        GlobalScalarsW = 0.6f * Math.Clamp(V(63), 0f, 4f),
+        Noise = (int)V(10),
+      };
+    }
+
+    /// <summary>
+    /// The time cycle modifiers of pc\data\timecyclemodifiers.dat, ...2, ...3 and ...4 by the hash of their name
+    /// (GxtFile.Hash, as an interior's rooms name theirs). A line: the name, then its numbers - MinFarClip,
+    /// MaxFarClip, MinFogStart, MaxFogStart, AmbientLight0 RGBA and multiplier, AmbientLight1 RGBA and
+    /// multiplier, DirectionalLight RGBA and multiplier, AmbientDownMult, Fog RGBA, NearFog RGBA, FogMult,
+    /// NearFogAxis, Temperature, PostFxStrength, Exposure, ExposureMultiplier, BrightPassThreshold, MidGreyValue,
+    /// IntensityBloom, ColourCorrect RGB, ColourAdd RGB, Desaturation, Contrast, Gamma, ... LumMin, LumMax,
+    /// LumAdaptDelay, ... (the files' header); -1 where it changes nothing.
+    /// </summary>
+    public static Dictionary<uint, float[]> LoadModifiers(string gameFolder)
+    {
+      var modifiers = new Dictionary<uint, float[]>();
+      foreach (string file in new[] { "timecyclemodifiers.dat", "timecyclemodifiers2.dat", "timecyclemodifiers3.dat", "timecyclemodifiers4.dat" })
+      {
+        string path = Path.Combine(gameFolder, "pc", "data", file);
+        // An episode without its own: GTA IV's (the folder above it), as the game loads GTA IV's data first.
+        if (!File.Exists(path) && Directory.GetParent(Path.TrimEndingDirectorySeparator(gameFolder)) is DirectoryInfo parent)
+        {
+          path = Path.Combine(parent.FullName, "pc", "data", file);
+        }
+        if (!File.Exists(path))
+        {
+          continue;
+        }
+        foreach (string raw in File.ReadLines(path))
+        {
+          string line = raw.Trim();
+          if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal))
+          {
+            continue;
+          }
+          var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+          var values = parts.Skip(1).Select(s => float.TryParse(s.TrimEnd('f'), NumberStyles.Float, CultureInfo.InvariantCulture, out float f) ? f : -1f).ToArray();
+          if (values.Length >= 54)
+          {
+            modifiers.TryAdd(RageLib.GtaIV.Pc.Text.GxtFile.Hash(parts[0]), values);
+          }
+        }
+      }
+      return modifiers;
+    }
+
+    /// <summary>
+    /// The time cycle as a modifier changes it: each of its values that isn't -1 taken instead. Checked against a
+    /// D3D capture of bc_1 in Bernie's flat (BernieCrane): the game's gLightAmbient0 there was AmbientLight0's
+    /// RGB / 255 x its multiplier exactly (4.447, 4.182, 3.741), AmbientLight1 the same, its sun 0 (the
+    /// directional multiplier 0). The colours' alpha (255 there) is taken as how much of the modifier's colour
+    /// is used (not checked otherwise).
+    /// </summary>
+    public TimeCycle With(float[] m)
+    {
+      bool Set(int i) => i < m.Length && Math.Abs(m[i] + 1f) > 1e-4f;
+      float Or(int i, float value) => Set(i) ? m[i] : value;
+      Vector3 Rgb(int i) => new Vector3(m[i], m[i + 1], m[i + 2]) / 255f;
+      Vector3 Light(int i, Vector3 light) => Set(i + 4) ? Vector3.Lerp(light, Rgb(i) * m[i + 4], Math.Clamp(m[i + 3] / 255f, 0f, 1f)) : light;
+      return this with
+      {
+        AmbientAbove = Light(4, AmbientAbove * AmbientMultiplierAbove),
+        AmbientMultiplierAbove = 1f,
+        AmbientBelow = Light(9, AmbientBelow * AmbientMultiplierBelow),
+        AmbientMultiplierBelow = 1f,
+        Sun = Light(14, Sun * SunMultiplier),
+        SunMultiplier = 1f,
+        FarClip = Or(1, FarClip),
+        FogStart = Or(2, FogStart),
+        Exposure = Set(32) ? m[32] * Or(33, 1f) : Exposure,
+        MidGrey = Or(35, MidGrey),
+        Bloom = Or(36, Bloom),
+        ColorCorrect = Set(37) ? Rgb(37) : ColorCorrect,
+        ColorShift = Set(40) ? Rgb(40) : ColorShift,
+        Saturation = Or(43, Saturation),
+        Gamma = Or(45, Gamma),
+        AdaptedLumMin = Or(51, AdaptedLumMin),
+        AdaptedLumMax = Or(52, AdaptedLumMax),
+        AdaptTime = Set(53) ? m[53] * 10 : AdaptTime,
+        // Halved under a modifier (GTAIV.exe 0xAEE7E0: x 0.5 by the modifier's strength, 0xFE8830).
+        Noise = Noise / 2,
       };
     }
 
@@ -114,10 +242,31 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// below, the sky's colours, the haze (from where the fog starts to how far is drawn) and the water's colour;
     /// the clouds' noise textures' addresses where there are clouds.
     /// </summary>
-    public object Message(float hour, string? clouds = null, string? cloudDetail = null)
+    /// <summary>
+    /// Where the sun is (towards it) at the hour, as GTAIV.exe works it out (0xAEF38E in 0xAEF0E0): an angle from the
+    /// time - before 6 o'clock t x pi/12, from 6 to 20 o'clock pi/2 + (t - 6) x pi/14, after it 3pi/2 + (t - 20) x
+    /// pi/8, kept within pi/2 and 3pi/2 - then (1 - 2 x 0.1) x (angle - pi/2) + (0.1 + 0.5) x pi (0x103FC00 = 0.1),
+    /// and the direction normalize(sin a - cos a x (0, -0.342, 0.940)) (the sun's axis at 0x103FBF0, 20° from
+    /// upright). At noon (0.179, -0.337, 0.925). Before 6 and after 20 o'clock the game also turns it towards
+    /// the horizon (not done here: the cutscenes so far are by day).
+    /// </summary>
+    public static Vector3 SunDirection(float hour)
     {
-      double t = (hour - 6) / 12.0 * Math.PI;
-      var sunDirection = Vector3.Normalize(new Vector3((float)-Math.Cos(t), -0.35f, (float)Math.Max(Math.Sin(t), 0.05)));
+      double t = ((hour % 24) + 24) % 24;
+      double angle = t < 6 ? t * 0.2617994 : t < 20 ? (t - 6) * 0.2243995 + 1.570796 : (t - 20) * 0.3926991 + 4.712389;
+      angle = Math.Clamp(angle, 1.570796, 4.712389);
+      const double Offset = 0.1;
+      angle = (1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI;
+      double s = Math.Sin(angle), c = Math.Cos(angle);
+      var axis = new Vector3(0f, -0.3420202f, 0.9396926f);
+      return Vector3.Normalize(new Vector3((float)s, 0f, 0f) - (float)c * axis);
+    }
+
+    /// <param name="rooms">Per room of the location (in its list) its own message (the time cycle as the room's
+    /// modifier changes it), or null for none.</param>
+    public object Message(float hour, string? clouds = null, string? cloudDetail = null, object?[]? rooms = null)
+    {
+      var sunDirection = SunDirection(hour);
       static float[] A(Vector3 v) => new[] { v.X, v.Y, v.Z };
       return new
       {
@@ -130,6 +279,35 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         exposure = Exposure,
         waterReflection = WaterReflection,
         gamma = Gamma,
+        // rage_postfx.fxc's fog (see gameFog in gtaiv-pc.js), as GTAIV.exe 0xAF3A50 sets it: globalFogColorN =
+        // the sky bottom (columns 12 to 14, / 255) x SkyLightMult (column 60); globalFogParams = (FogSt (column 24),
+        // FarClp (column 23), NearFogAmount = column 11 / 255, the same).
+        fog = new
+        {
+          nearColor = A(SkyBottom * SkyLightMultiplier),
+          start = FogStart,
+          end = Math.Max(FarClip, FogStart + 1),
+          nearAmount = NearFogAmount,
+        },
+        directionalLightW = DirectionalLightW,
+        globalScalarsW = GlobalScalarsW,
+        // gDayNightEffects.x (GTAIV.exe 0x9CB895): seconds of the day / 43200 up to noon, then back down to 0.
+        dayNight = hour <= 12 ? Math.Max(hour, 0) / 12f : Math.Max(0, 1 - (hour - 12) / 12f),
+        tone = new
+        {
+          midGrey = MidGrey,
+          // ToneMapParams.z (GTAIV.exe 0x92FE85): IntensityBloom (column 38) x 0.5 x 0.2 x (0x103F9B4 x 0.5), that
+          // global 10 at run time (an apitrace capture: z 1.435 for IntensityBloom 2.87).
+          bloom = Bloom * 0.5f,
+          saturation = Saturation,
+          colorCorrect = A(ColorCorrect),
+          colorShift = A(ColorShift),
+          adaptedLumMin = AdaptedLumMin,
+          adaptedLumMax = AdaptedLumMax,
+          adaptTime = AdaptTime,
+          // NoiseParams.z (GTAIV.exe 0x930268): the film grain / 64 (0.375 in TLAD's trace at 12:50).
+          noise = Noise / 64f,
+        },
         skyTop = A(SkyTop),
         skyBottom = A(SkyBottom),
         fogStart = FogStart,
@@ -137,6 +315,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         water = new[] { Water.X, Water.Y, Water.Z, Water.W },
         clouds,
         cloudDetail,
+        rooms,
       };
     }
   }

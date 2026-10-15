@@ -49,6 +49,36 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>A vehicle's shaders (gta_vehicle_paint1 ..., _mesh, _vehglass).</summary>
     public static bool IsVehicle(string shader) => shader.StartsWith("gta_vehicle", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// How a vehicle shader turns its spec map into shine, read from its pixel programs (win32_30 .fxc):
+    /// (intensity factor, power factor, forward glass). The shine's strength is dot(spec map rgb,
+    /// specMapIntMask) x reflectivePowerED x the intensity factor x (1 - dirt), its power spec map alpha x
+    /// reflectivePowerED x the power factor.
+    /// - gta_vehicle_paint1/2/3, deferred_draw (paint1 program 13): GB2.x = 0.5 x dot x reflectivePowerED x 0.15
+    ///   (c0.z) x (1 - dirt) x matDiffuseColor2.w, GB2.y = sqrt(spec.a x reflectivePowerED x 190 (c0.y) x
+    ///   matDiffuseColor2.w / 512); deferred_lighting.fxc's sun pass (program 21) takes 2 x GB2.x and GB2.y² x 512
+    ///   back: (0.15, 190). The constants 0.15 and 190 are in all three paint .fxc files.
+    /// - gta_vehicle_mesh, deferred_draw (program 13): GB2.x = 0.5 x dot x reflectivePowerED (c76) x (1 - dirt) x
+    ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.09765625): (1, 50).
+    /// - gta_vehicle_vehglass, technique draw (forward, program 8): its own lighting, see the page (the third
+    ///   number 1): min(dot x reflectivePowerED x 0.225 (c1.z), 1), power spec.a x reflectivePowerED x 190 (c0.w).
+    /// matDiffuseColor2.w is taken as its .fxc default, 1 (what the game sets at run time is not traced).
+    /// Null for the other vehicle shaders (not read; the page keeps paint's numbers for them).
+    /// </summary>
+    public static float[]? VehicleShineOf(string shader) => shader.ToLowerInvariant() switch
+    {
+      "gta_vehicle_paint1" or "gta_vehicle_paint2" or "gta_vehicle_paint3" => new[] { 0.15f, 190f, 0f },
+      "gta_vehicle_mesh" => new[] { 1f, 50f, 0f },
+      "gta_vehicle_vehglass" => new[] { 0.225f, 190f, 1f },
+      _ => null,
+    };
+
+    /// <summary>
+    /// The ped shaders (gta_ped, gta_ped_skin, gta_ped_reflect ...): their vertex red is the AO the game's sun pass
+    /// takes the light from around by (gta_ped.fxc's vertex shader: 1 + gs2.y x gs2.z x (red x gs.z - 1)).
+    /// </summary>
+    public static bool IsPed(string shader) => shader.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Dirt decals (gta_decal_dirt): colour from the vertices, the texture only says where.</summary>
     public static bool IsDirtDecal(string shader) => shader.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase);
 
@@ -59,6 +89,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public static bool IsEmissiveAtNight(string shader) => shader.Contains("emissivenight", StringComparison.OrdinalIgnoreCase);
 
     public static readonly uint EmissiveMultiplier = GxtFile.Hash("emissiveMultiplier");
+
+    // gta_ped_skin's light through the skin (its G-buffer pass, program 10): a colour, how far the light wraps
+    // round and how wide the band at the shadow's edge is.
+    public static readonly uint SubColor = GxtFile.Hash("SubColor");
+    public static readonly uint SubScatWrap = GxtFile.Hash("SubScatWrap");
+    public static readonly uint SubScatWidth = GxtFile.Hash("SubScatWidth");
 
     public static readonly uint Specular2ColorIntensityED = GxtFile.Hash("specular2ColorIntensityED");
 

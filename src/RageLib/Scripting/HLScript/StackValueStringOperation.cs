@@ -37,10 +37,11 @@ namespace RageLib.Scripting.HLScript
     public StackValueStringOperation(OpCode opCode, uint targetBufferSize, uint sourceBufferSize)
         : base(StackValueOperationType.Unknown)
     {
-      Debug.Assert(targetBufferSize % 4 == 0);
+      // StrCpy, StrCat, StrCatI and IntToStr give the target's buffer in bytes (16, 32, 64...); StrVarCpy gives
+      // both sizes in stack slots of 4 bytes, any number (TLAD's webemail.sco copies 2 slots into 4: "PushD 2,
+      // PushD 4, Var4, StrVarCpy"), so only the former are whole words.
+      Debug.Assert(opCode == OpCode.StrVarCpy || targetBufferSize % 4 == 0);
       _targetBufferSize = targetBufferSize;
-
-      Debug.Assert(sourceBufferSize % 4 == 0);
       _sourceBufferSize = sourceBufferSize;
 
       switch (opCode)

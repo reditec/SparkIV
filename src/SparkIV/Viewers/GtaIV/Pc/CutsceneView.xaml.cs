@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -97,6 +97,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private List<int> _locationVisible = new List<int>();
     private bool _locationLoading;
     private string? _locationNote;
+    // The cast loading in the background after the view opened (see LoadCastAsync).
+    private System.Threading.Tasks.Task? _castTask;
+    private bool _castLoading;
 
     public CutsceneView(ViewerContext context, CutsceneDocument document)
     {
@@ -205,6 +208,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       _started = true;
       DrawSectionMarks();
+      // The cast loads now, in the background, while the page starts (the view is already there).
+      _castTask = LoadCastAsync();
 
       if (!await ViewerPages.StartAsync(Web, null, _context, Core_WebMessageReceived, allowCopyMenu: false))
       {
@@ -257,8 +262,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             Working.IsActive = false;
             break;
           }
-          SendScene();
-          ShowSection(Math.Max(0, _section), _frame, play: false);
+          ShowSceneWhenCastLoaded();
           break;
         case "loaded":
           // For the load log: the page's textures of the cast, then (later) the location's, are there.
@@ -300,6 +304,60 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           CameraButton.IsChecked = false;
           break;
       }
+    }
+
+    /// <summary>
+    /// The cast (CutsceneDocument.LoadCast: models, textures, variations, props, colours; some seconds) loaded in
+    /// the background once the view shows, the spinner going and the status saying so; then the cast list again.
+    /// </summary>
+    private async System.Threading.Tasks.Task LoadCastAsync()
+    {
+      var load = _document.LoadCast;
+      if (load == null)
+      {
+        return;
+      }
+      _castLoading = true;
+      Working.IsActive = true;
+      Status.Text = "loading the cast …";
+      try
+      {
+        await System.Threading.Tasks.Task.Run(load);
+      }
+      catch (Exception ex)
+      {
+        if (!_disposed)
+        {
+          Message.Text = "The cast couldn't be loaded: " + ex.Message;
+          Message.Visibility = Visibility.Visible;
+        }
+      }
+      finally
+      {
+        _document.LoadCast = null;
+        _castLoading = false;
+      }
+      if (_disposed)
+      {
+        return;
+      }
+      CastList.ItemsSource = _document.Actors.Select(a => new CutActorRow(a)).ToList();
+      ShowStatus();
+    }
+
+    /// <summary>The page is ready: the scene sent once the cast is there (at once when it already is).</summary>
+    private async void ShowSceneWhenCastLoaded()
+    {
+      if (_castTask != null)
+      {
+        await _castTask;
+      }
+      if (_disposed)
+      {
+        return;
+      }
+      SendScene();
+      ShowSection(Math.Max(0, _section), _frame, play: false);
     }
 
     private void Post(object message)
@@ -347,7 +405,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       string? folder = _document.GameFolder;
       float[]? offset = _document.Cut.Offset;
-      if (_locationLoading || _document.Location != null || folder == null || offset == null)
+      // (While the cast loads: after it, with the scene - SendScene - as before.)
+      if (_locationLoading || _castLoading || _document.Location != null || folder == null || offset == null)
       {
         return;
       }
@@ -358,7 +417,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       try
       {
         var removals = _document.Cut.Removals;
-        float drawDistance = _document.Cut.DrawDistance;
+        // How far the game draws in a cutscene (GTAIV.exe): the [DRAW_DISTANCE] line in force goes to the
+        // cutscene's camera (0x9CA620 -> 0xC61D80, +0x154), which 0xD53280 makes its far clip, 800 and a flag
+        // without any line; 0xC46050 then keeps it only as far as the time cycle's FarClp (0x15E8954, column
+        // 23), with the flag (no line: et01_ba) it takes FarClp. So the smaller of the two, FarClp without lines.
+        float farClip = TimeCycle.Load(folder, OutsideWeather, OutsideHour)?.FarClip ?? 0;
+        float drawDistance = _document.Cut.DrawDistance > 0 && (farClip <= 0 || _document.Cut.DrawDistance < farClip) ? _document.Cut.DrawDistance : farClip;
+        _drawDistance = drawDistance;
         var log = _document.Log;
         _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, OutsideHour, log));
       }
@@ -380,7 +445,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       var location = _document.Location;
       _locationNote = "location: " + location.Objects.Count + " objects within " + LocationRadius + " m"
-                      + (location.Far > 0 ? ", " + location.Far + " far ones up to " + _document.Cut.DrawDistance.ToString("0") + " m" : "")
+                      + (location.Far > 0 ? ", " + location.Far + " far ones up to " + _drawDistance.ToString("0") + " m" : "")
                       + (location.Outdoors ? "" : ", inside")
                       + (location.Hidden > 0 ? ", " + location.Hidden + " hidden by the scene" : "")
                       + (location.Missing > 0 ? ", " + location.Missing + " not found" : "");
@@ -398,6 +463,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too).
     private const string OutsideWeather = "SUNNY";
     private const int OutsideHour = 12;
+    // Whether the location's light from the time cycle was sent (the page then lights and shows it as the game).
+    private bool _lit;
+    // How far the location's far models were loaded (the [DRAW_DISTANCE] as the game limits it by the time cycle).
+    private float _drawDistance;
 
     private void SendLocation()
     {
@@ -415,12 +484,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       Post(scene);
       Post(_document.Location.LightsMessage());
-      // Outside: the sun and sky of the game's time cycle (the .cut gives no time or weather: noon, sunny).
-      if (_document.Location.Outdoors && _document.GameFolder is string folder &&
-          TimeCycle.Load(folder, OutsideWeather, OutsideHour) is TimeCycle cycle)
+      // The light of the game's time cycle (the .cut gives no time or weather: noon, sunny), and for each room of
+      // the location as its time cycle modifier changes it: the page lights by the one of the room the camera
+      // is in, as the game does, inside the same way as outside.
+      _lit = false;
+      if (_document.GameFolder is string folder && TimeCycle.Load(folder, OutsideWeather, OutsideHour) is TimeCycle cycle)
       {
+        var modifiers = _document.Location.Rooms.Any(r => r.Modifier != 0) ? TimeCycle.LoadModifiers(folder) : null;
+        var rooms = _document.Location.Rooms.Select(r =>
+          modifiers != null && modifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(OutsideHour) : null).ToArray();
         Post(cycle.Message(OutsideHour, _document.Location.Clouds != null ? Host + CutsceneLocation.CloudKey : null,
-                           _document.Location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null));
+                           _document.Location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null, rooms));
+        _lit = true;
       }
       _locationVisible = visible;
       PostVisible();
@@ -435,7 +510,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void PostBackground()
     {
       bool own = s_location && _document.Location != null;
-      bool outside = own && _document.Location!.Outdoors;
+      bool outside = own && _lit;
       BackgroundBox.IsEnabled = !own;
       Post(new { type = "useSky", on = outside });
       Post(new { type = "background", name = own ? (outside ? "" : "black") : BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
@@ -545,6 +620,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>To a time of the whole scene: the section it is in, the sound there; playing on or not.</summary>
     private void GoTo(double seconds, bool play)
     {
+      // Not while the cast still loads (its actors are being filled in the background); the page shows the
+      // section it was at once they are there.
+      if (_castLoading)
+      {
+        return;
+      }
       seconds = Math.Clamp(seconds, 0, Length);
       var (section, frame) = Locate(seconds);
       _playing = play;

@@ -36,6 +36,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>How long the opening takes, step by step (SparkIV-load.log beside the exe); the view adds its own steps.</summary>
     public LoadLog? Log { get; init; }
 
+    /// <summary>
+    /// Loads the cast into <see cref="Actors"/> (some seconds; the view runs it in the background once it shows,
+    /// then sets it to null); null when there is nothing to load or it was loaded.
+    /// </summary>
+    public Action? LoadCast { get; set; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
@@ -78,22 +84,52 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         KeyStore.SetKeyLoader(() => keyUtil.FindKey(install.Folder));
       }
       log.Step("find the game it is from", game.Name);
-      CutsceneMessages.LoadActors(actors, CutsceneMessages.ModelArchives(game.Folder, Games.InstallFolder(Games.GtaIV, "Windows")),
-                                  Path.Combine(game.Folder, "pc", "models", "cdimages", "playerped.rpf"), game.Player);
-      log.Step("cast: models and their textures", actors.Count + " models");
-      CutsceneMessages.ApplyVariations(cut, actors, AppSettings.CutsceneSeeThroughLikeGame);
-      CutsceneMessages.LoadProps(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
-      CutsceneMessages.ApplyPaint(cut, actors, game.Folder, Games.InstallFolder(Games.GtaIV, "Windows"));
-      log.Step("cast: variations and props");
       var (audioFile, audioTrack, audioNote) = LoadAudio(game.Folder, cut);
       log.Step("sound", audioNote);
       var texts = LoadTexts(game.Folder, cut);
       log.Step("subtitles");
+      // The cast (some seconds) is loaded by the view once it shows, with its spinner (CutsceneDocument.LoadCast).
+      var folder = game.Folder;
+      var player = game.Player;
       return new CutsceneDocument
       {
         Cut = cut, Actors = actors, Sections = sections, Texts = texts, Game = game.Name, GameFolder = game.Folder,
         AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote, Log = log,
+        LoadCast = () => LoadCast(file.Name, cut, actors, folder, player, install, log),
       };
+    }
+
+    /// <summary>The cast: everyone's model and textures, their variations and props, the vehicles' colours.</summary>
+    private static void LoadCast(string fileName, CutFile cut, List<CutActor> actors, string folder, string player, GameInstall? install, LoadLog log)
+    {
+      if (install != null)
+      {
+        // Again: another file opened since may have set another game's key.
+        var keyUtil = install.KeyUtil;
+        KeyStore.SetKeyLoader(() => keyUtil.FindKey(install.Folder));
+      }
+      CutsceneMessages.LoadActors(actors, CutsceneMessages.ModelArchives(folder, Games.InstallFolder(Games.GtaIV, "Windows")),
+                                  Path.Combine(folder, "pc", "models", "cdimages", "playerped.rpf"), player);
+      log.Step("cast: models and their textures", actors.Count + " models");
+      CutsceneMessages.ApplyVariations(cut, actors, AppSettings.CutsceneSeeThroughLikeGame);
+      CutsceneMessages.LoadProps(cut, actors, folder, Games.InstallFolder(Games.GtaIV, "Windows"));
+      // The vehicles' colours as the mission script that plays the cutscene gives them (the game takes those of
+      // the mission's vehicle in the world), from the game's cutscene script index - built when the game was
+      // loaded, else now (some seconds, once).
+      CutsceneScriptIndex? scripts = null;
+      try
+      {
+        scripts = CutsceneScriptIndex.EnsureAsync(folder).GetAwaiter().GetResult();
+      }
+      catch (Exception)
+      {
+        // Without the index: the .cut's colours.
+      }
+      string cutName = Path.GetFileNameWithoutExtension(fileName);
+      log.Step("cutscene script index", scripts?.Cutscenes.TryGetValue(cutName, out var entry) == true ? "played by " + entry.Script : "no script found");
+      CutsceneMessages.ApplyPaint(cut, actors, folder, Games.InstallFolder(Games.GtaIV, "Windows"),
+                                  scripts == null ? null : model => scripts.ColoursFor(cutName, model));
+      log.Step("cast: variations and props");
     }
 
     /// <summary>The sound the sections name ([AUDIO] B_1), from the game's pc\audio\sfx\cutscenes.rpf.</summary>
@@ -104,10 +140,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return (null, null, "no sound named");
       }
-      string path = Path.Combine(folder, "pc", "audio", "sfx", "cutscenes.rpf");
-      if (!System.IO.File.Exists(path))
+      // The wave pack the game's audio metadata names for the bank (CUTSCENES\B_1: cutscenes.rpf; TLAD's
+      // EP1_SFX/ET01_BA: EP1_SFX.rpf), see CutsceneSound.
+      if (CutsceneSound.Find(folder, name) is not (string path, string pack))
       {
-        return (null, null, "no cutscenes.rpf for the sound " + name);
+        return (null, null, "the sound " + name + " isn't in the game's audio metadata");
       }
       try
       {
@@ -115,13 +152,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         rpf.Open(path);
         try
         {
-          var file = rpf.RootDirectory.OfType<RageLib.FileSystem.Common.Directory>()
-                        .Select(d => d.FindByName(name + ".ivaud") as File)
-                        .FirstOrDefault(f => f != null)
+          var file = (rpf.RootDirectory.FindByName(pack) as RageLib.FileSystem.Common.Directory)?.FindByName(name + ".ivaud") as File
+                     ?? rpf.RootDirectory.OfType<RageLib.FileSystem.Common.Directory>()
+                           .Select(d => d.FindByName(name + ".ivaud") as File)
+                           .FirstOrDefault(f => f != null)
                      ?? rpf.RootDirectory.FindByName(name + ".ivaud") as File;
           if (file == null)
           {
-            return (null, null, "the sound " + name + " isn't in cutscenes.rpf");
+            return (null, null, "the sound " + name + " isn't in " + Path.GetFileName(path));
           }
           var audio = new RageLib.Audio.AudioFile();
           audio.Open(new MemoryStream(file.GetData()));
