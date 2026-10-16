@@ -82,9 +82,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public const string CloudKey = "msky/clouds", CloudDetailKey = "msky/detail";
 
     /// <summary>
-    /// Outside: the clouds' noise (pc\textures\skydome.wtd's baseperlinnoise3channel; the game's sky shader
-    /// gta_atmoscatt_clouds takes its red for the clouds' shape, its green for the higher ones') and their
-    /// fine detail (detailbump2), as ModelScene.Raw makes them; null without them.
+    /// Outside: the clouds' noise (pc\textures\skydome.wtd's baseperlinnoise3channel, which rage_perlinnoise turns
+    /// into the game's PerlinNoiseSampler every frame) and their fine detail (noise16_p, its HighDetailNoiseSampler:
+    /// the TLAD trace GTAIV.4 binds a DXT1 noise there, two levels smaller at its texture quality, and noise16_p
+    /// is the file's only one), as ModelScene.Raw makes them; null without them.
     /// </summary>
     public byte[]? Clouds { get; private set; }
     public byte[]? CloudDetail { get; private set; }
@@ -491,7 +492,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             textures.Open(sky);
             RageLib.Textures.Texture? Named(string part) => textures.Textures.FirstOrDefault(x => x.Name.Contains(part, StringComparison.OrdinalIgnoreCase));
             location.Clouds = Named("baseperlinnoise") is RageLib.Textures.Texture noise ? ModelScene.Raw(noise) : null;
-            location.CloudDetail = Named("detailbump2") is RageLib.Textures.Texture detail ? ModelScene.Raw(detail) : null;
+            location.CloudDetail = Named("noise16_p") is RageLib.Textures.Texture detail ? ModelScene.Raw(detail) : null;
           }
         }
         catch (Exception)

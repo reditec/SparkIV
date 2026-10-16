@@ -1224,6 +1224,39 @@
     // .y, HDRExposureClamp), the page's exposure; off without them (then the picture alone, as before).
     uniform bool skyHdrOn; uniform vec3 skyColorH; uniform vec3 azimuthH; uniform vec3 azimuthEastH; uniform vec2 azimuthHS;
     uniform vec3 sunColorH; uniform vec4 skyHdr; uniform float pageExposure;
+    // Its clouds (TimeCycle.cs: CloudColor, SunsetColor, TopCloudColor, TopCloudBiasDetailThresholdHeight;
+    // CloudThreshold, CloudBias, CloudShadowStrength, CloudInscatteringRange; the thickness, the detail's scale and
+    // strength, CloudFadeOut; CloudShadowOffset), from the noise rage_perlinnoise makes (PERLIN_FRAGMENT) and the
+    // fine detail.
+    uniform bool cloudsOn; uniform sampler2D perlin; uniform vec3 cloudColorH; uniform vec3 sunsetH; uniform vec3 topCloudColorH;
+    uniform vec4 topCloudH; uniform vec4 cloudShapeH; uniform vec4 cloudDetailH; uniform float cloudShadowOffsetH;
+    // The game's sky dome (GTAIV.4's vertex buffer 0x248B51C0, made at call 147965: 992 triangles, drawn x (10000,
+    // 2000, 10000) round the camera, its up the world's z, its z the world's -y): per ring its radius, height and how
+    // far its texture coordinates lie from (0.5, 0.5) - radial, towards the vertex. The lowest ring at -1.8 its
+    // vertex program lowers by another 1 (y - saturate(-y)).
+    const vec3 DOME[17] = vec3[17](vec3(2.0, -2.8, 0.5), vec3(1.990369, 0.160377, 0.476628), vec3(1.961571, 0.319210, 0.455850),
+      vec3(1.913881, 0.474967, 0.435314), vec3(1.847759, 0.626151, 0.414661), vec3(1.763843, 0.771311, 0.391533),
+      vec3(1.662939, 0.909041, 0.369135), vec3(1.546021, 1.038011, 0.343182), vec3(1.414214, 1.156980, 0.313923),
+      vec3(1.268786, 1.264809, 0.281642), vec3(1.111140, 1.360474, 0.246648), vec3(0.942793, 1.443023, 0.209279),
+      vec3(0.765367, 1.511670, 0.169894), vec3(0.580569, 1.565755, 0.128873), vec3(0.390181, 1.604780, 0.086611),
+      vec3(0.196034, 1.628340, 0.043515), vec3(0.0, 1.636219, 0.0));
+    // DetailOffset (the vertex program's c75 in the TLAD trace; it moves with the game's time, here kept).
+    const vec2 DetailOffset = vec2(0.01091306);
+    // Where the dome's meridian through the direction meets it (between two rings, as the card interpolates
+    // there): the direction's slope in the dome's own size 5 z / horizontal; its texture coordinates.
+    vec2 domeUv(vec3 d) {
+      float h = max(length(d.xy), 1e-6);
+      float slope = 5.0 * d.z / h;
+      float uvr = 0.5;
+      for (int k = 0; k < 16; k++) {
+        vec3 a = DOME[k], b = DOME[k + 1];
+        if (slope * b.x <= b.y) {
+          uvr = mix(a.z, b.z, clamp((slope * a.x - a.y) / ((b.y - a.y) - slope * (b.x - a.x)), 0.0, 1.0));
+          break;
+        }
+      }
+      return 0.5 + uvr * vec2(d.x, -d.y) / h;
+    }
     const float CloudThreshold = 2.2, CloudBias = 0.6, CloudThickness = 1.4, CloudEdge = 3.0, DetailStrength = 0.45, CloudScale = 0.035;
     void main() {
       vec4 far = inverseViewProjection * vec4(ndc, 1.0, 1.0);
@@ -1255,8 +1288,8 @@
         // 11.616)), b = saturate(0.9375 - 0.0625 cos), SunSize 1 in both traces; the disc's term x SunCentre.z, 0
         // there); then (sun + sun^4) x HDRSunExposure.x + saturate(saturate(1 - s) x HDRSunExposure.x x the sky's
         // colour), the sun = s x SunColor; x HDRExposure, at most HDRExposureClamp; no haze (the post's fog leaves
-        // the sky out). Here in the page's light (x its exposure). The clouds aren't ported yet: laid over it
-        // from the sky's own brightness by their cover above.
+        // the sky out). Here in the page's light (x its exposure). Then the clouds over it, as the pixel program
+        // works them out (below).
         vec3 skyV = skyColorH + mix(azimuthEastH, azimuthH, 0.5 * dir.x + 0.5) * (1.0 - clamp(dir.z * azimuthHS.x, 0.0, 1.0)) * azimuthHS.y;
         float c = dot(dir, sunDir);
         float a = clamp(clamp(1.0 - skyHdr.z, 0.0, 1.0) * (12.58 * c - 11.6163721), 0.0, 1.0);
@@ -1264,31 +1297,140 @@
         float s = clamp((pow(a, 32.0) - b * b * b * clamp(0.6 + sunDir.z, 0.0, 1.0) + clamp(0.5 + 0.5 * c, 0.0, 1.0)) * 0.5, 0.0, 1.0) * 4.0;
         vec3 sunLight = s * sunColorH;
         vec3 glow = (sunLight + sunLight * sunLight * sunLight * sunLight) * skyHdr.y + clamp(clamp(1.0 - s, 0.0, 1.0) * skyHdr.y * skyV, 0.0, 1.0);
-        if (hasClouds && dir.z > 0.005) {
-          vec2 uv = dir.xy / (dir.z + 0.05) * CloudScale;
-          float density = texture(clouds, uv).r + (texture(detail, uv * 4.0).r - 0.5) * DetailStrength;
-          float amount = clamp(CloudThreshold * density - CloudBias, 0.0, 1.0);
-          float cover = pow(amount, CloudThickness) * clamp(amount * CloudEdge, 0.0, 1.0) * clamp(dir.z * 4.0 - 0.05, 0.0, 1.0);
-          glow = mix(glow, vec3(max(glow.r, max(glow.g, glow.b))), cover);
+        if (cloudsOn) {
+          // The vertex program's texture coordinates (in the dome's x and z: the world's x and -y): the clouds'
+          // (o1), their shadow's, moved towards the sun by 0.1 CloudShadowOffset less towards the edge (o3.xy), the
+          // detail's, n(uv - 0.5) |uv - 0.5|^2 x its scale + DetailOffset (o3.zw), the higher clouds' (o5).
+          vec2 uv = domeUv(dir), fromMiddle = uv - 0.5, edge = uv * 2.0 - 1.0;
+          float r2 = dot(fromMiddle, fromMiddle);
+          vec2 shadowUv = uv + vec2(sunDir.x - dir.x, dir.y - sunDir.y) * 0.1 * cloudShadowOffsetH * (1.0 - dot(edge, edge));
+          vec2 detailUv = fromMiddle * inversesqrt(max(r2, 1e-12)) * r2 * cloudDetailH.y + DetailOffset;
+          vec2 topUv = fromMiddle * topCloudH.w + 0.5;
+          float topFade = 1.0 - length(fromMiddle * topCloudH.w);
+          // The pixel program: the shadow (the noise moved, with a fifth of the detail), the clouds' density (the
+          // noise's red + (detail - 0.5) x strength), amount = saturate(threshold x density - bias), cover = amount ^
+          // thickness (its edge infinite: column 93 is 1 throughout), lit by the noise's blue (the clumps); their
+          // colour CloudColor x (1 + cos^2 x max(1 - cover - shadow / 2, 0) x CloudInscatteringRange) - shadow +
+          // SunsetColor x (0.25 cos + 0.35) x light; the higher clouds from the noise's green; faded towards the
+          // horizon by saturate(4 up - CloudFadeOut).
+          float threshold = cloudShapeH.x, bias = cloudShapeH.y, strength = cloudDetailH.z;
+          float shadow = clamp((threshold * (texture(detail, shadowUv * cloudDetailH.y).r * strength * 0.2 + texture(perlin, shadowUv).r) - bias) * cloudShapeH.z, 0.0, 1.0);
+          vec4 noise = texture(perlin, uv);
+          float fine = texture(detail, detailUv).r - 0.5;
+          float clump = clamp(fine * 0.2 + noise.b, 0.0, 1.0);
+          float amount = clamp(threshold * (fine * strength + noise.r) - bias, 0.0, 1.0);
+          float cover = amount > 0.0 ? pow(amount, cloudDetailH.x) : 0.0;
+          float lit = (c * 0.25 + 0.35) * ((1.0 - shadow) * cover * clump + clump);
+          vec3 cloud = (c * c * max(1.0 - cover - 0.5 * shadow, 0.0) * cloudShapeH.w + 1.0) * cloudColorH - shadow + sunsetH * lit;
+          float top = clamp(topCloudH.z * (fine * strength * topCloudH.y + texture(perlin, topUv).g) - topCloudH.x, 0.0, 1.0) * topFade * (1.0 - cover);
+          float total = (1.0 - cover) * top + cover;
+          glow = mix(glow, mix(cloud, topCloudColorH, top), clamp(dir.z * 4.0 - cloudDetailH.w, 0.0, 1.0) * total);
         }
         outLight = vec4(min(glow * skyHdr.x, vec3(skyHdr.w)) * pageExposure, 1.0);
       }
     }`;
-  let skyProgram = null, skyLoc = null, skyQuad = null, cloudTex = null, cloudDetailTex = null;
+  // The clouds' noise as GTA IV (PC) makes it every frame (rage_perlinnoise into the 256 x 256 __perlinnoisert__,
+  // the pixel program 0x23C2D220 in the TLAD trace GTAIV.4): around the middle the place warped to n(p) |p|^(2
+  // NoiseWarp) x 12 + 0.5 (p = uv - 0.5), then six octaves of skydome.wtd's baseperlinnoise3channel, each two looks
+  // (Frequency1 and Velocity1, Frequency2 and Velocity2: at uv / 8 x frequency^octave + Phase x velocity), weighed
+  // 0.5 Persistance^octave; red and green their sums', blue twice the higher four's (the clumps), each less Contrast,
+  // x Brightness (blue through ClumpBump). The constants as set in both traces (GTA IV's and TLAD's). Phase grows by
+  // the time cycle's cloud speed per game hour (GTAIV.exe 0x62E110; see TimeCycle.cs CloudSpeed): here from TLAD's
+  // trace's 593.25 on with the cutscene's time, a game hour taken as 120 s (GTA IV's 2 s a game minute: assumed,
+  // not read from the exe).
+  const PERLIN_FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec2 ndc;
+    out vec4 outColor;
+    uniform sampler2D noise;
+    uniform float Phase;
+    const vec2 Velocity1 = vec2(-0.01, 0.01), Velocity2 = vec2(0.005, 0.02);
+    const float Frequency1 = 1.9, Frequency2 = 1.0, Contrast = 1.1, Brightness = 0.76, NoiseWarp = 1.0,
+                Persistance = 0.7692308, ClumpBump = 1.0;
+    void main() {
+      vec2 p = ndc * 0.5;
+      float l2 = max(dot(p, p), 1e-12);
+      vec2 at = p * inversesqrt(l2) * pow(l2, NoiseWarp) * 1.5 + 0.0625;
+      vec2 sum = vec2(0.0);
+      float higher = 0.0, weight = 0.5, f1 = 1.0, f2 = 1.0;
+      for (int k = 0; k < 6; k++) {
+        vec2 both = (texture(noise, at * f1 + Phase * Velocity1).rg + texture(noise, at * f2 + Phase * Velocity2).rg) * weight;
+        sum += both;
+        if (k >= 2) higher += both.x;
+        weight *= Persistance; f1 *= Frequency1; f2 *= Frequency2;
+      }
+      vec3 v = clamp(vec3(sum, 2.0 * higher) - Contrast, 0.0, 1.0) * Brightness;
+      outColor = vec4(clamp(v.xy, 0.0, 1.0), clamp(ClumpBump * (v.z - 1.0) + 1.0, 0.0, 1.0), 1.0);
+    }`;
+  const PhaseStart = 593.2532, SecondsPerGameHour = 120;
+  let perlinPass = null;
+  function perlinNoise(speed) {
+    if (!cloudTex) return null;
+    const drawn = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    if (!perlinPass) {
+      const program = createProgram(SKY_VERTEX, PERLIN_FRAGMENT);
+      const quad = gl.createVertexArray();
+      gl.bindVertexArray(quad);
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyBuffer);
+      const corner = gl.getAttribLocation(program, "corner");
+      gl.enableVertexAttribArray(corner);
+      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
+      const frame = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawn);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+      perlinPass = { program, quad, texture, frame, phase: NaN,
+                     noise: gl.getUniformLocation(program, "noise"), at: gl.getUniformLocation(program, "Phase") };
+    }
+    // Made anew only when its Phase moved (with the cutscene's time).
+    const phase = PhaseStart + (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour;
+    if (phase === perlinPass.phase) return perlinPass.texture;
+    perlinPass.phase = phase;
+    const viewport = gl.getParameter(gl.VIEWPORT), blend = gl.isEnabled(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, perlinPass.frame);
+    gl.viewport(0, 0, 256, 256);
+    gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(perlinPass.program);
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
+    gl.uniform1i(perlinPass.noise, 8);
+    gl.uniform1f(perlinPass.at, phase);
+    gl.bindVertexArray(perlinPass.quad);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawn);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+    gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    if (blend) gl.enable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.activeTexture(gl.TEXTURE0);
+    return perlinPass.texture;
+  }
+
+  let skyProgram = null, skyLoc = null, skyQuad = null, skyBuffer = null, cloudTex = null, cloudDetailTex = null;
   function drawSky(matrix, eyeAt) {
     if (!skyProgram) {
       skyProgram = createProgram(SKY_VERTEX, SKY_FRAGMENT);
       skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "haze", "hasClouds", "clouds", "detail",
-                "skyHdrOn", "skyColorH", "azimuthH", "azimuthEastH", "azimuthHS", "sunColorH", "skyHdr", "pageExposure"]
+                "skyHdrOn", "skyColorH", "azimuthH", "azimuthEastH", "azimuthHS", "sunColorH", "skyHdr", "pageExposure",
+                "cloudsOn", "perlin", "cloudColorH", "sunsetH", "topCloudColorH", "topCloudH", "cloudShapeH", "cloudDetailH",
+                "cloudShadowOffsetH"]
         .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
       skyQuad = gl.createVertexArray();
       gl.bindVertexArray(skyQuad);
-      const buffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      skyBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
       gl.enableVertexAttribArray(skyLoc.corner);
       gl.vertexAttribPointer(skyLoc.corner, 2, gl.FLOAT, false, 0, 0);
     }
+    const perlin = sky.skyHdr && sky.skyHdr.cloudShape && cloudDetailTex ? perlinNoise(sky.skyHdr.cloudSpeed) : null;
     gl.useProgram(skyProgram);
     gl.uniformMatrix4fv(skyLoc.inverseViewProjection, false, invert4(matrix));
     gl.uniform3fv(skyLoc.eye, eyeAt);
@@ -1307,15 +1449,30 @@
       gl.uniform3fv(skyLoc.sunColorH, h.sunColor);
       gl.uniform4f(skyLoc.skyHdr, h.exposure, h.sunExposure[0], h.sunExposure[1], h.clamp);
       gl.uniform1f(skyLoc.pageExposure, sky.exposure || 1);
+      if (perlin) {
+        gl.uniform3fv(skyLoc.cloudColorH, h.cloudColor);
+        gl.uniform3fv(skyLoc.sunsetH, h.sunsetColor);
+        gl.uniform3fv(skyLoc.topCloudColorH, h.topCloudColor);
+        gl.uniform4fv(skyLoc.topCloudH, h.topCloud);
+        gl.uniform4fv(skyLoc.cloudShapeH, h.cloudShape);
+        gl.uniform4fv(skyLoc.cloudDetailH, h.cloudDetail);
+        gl.uniform1f(skyLoc.cloudShadowOffsetH, h.cloudShadowOffset);
+      }
     }
-    // Units 8 and 9: not the meshes' (1 holds the bone matrices).
+    gl.uniform1i(skyLoc.cloudsOn, !!perlin);
+    // Units 8 and 9: not the meshes' (1 holds the bone matrices); the noise on 7 for the while (the water's
+    // reflection's there, put back after).
     gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
     gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, cloudDetailTex);
-    gl.uniform1i(skyLoc.clouds, 8); gl.uniform1i(skyLoc.detail, 9);
+    gl.activeTexture(gl.TEXTURE7);
+    const onSeven = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    gl.bindTexture(gl.TEXTURE_2D, perlin);
+    gl.uniform1i(skyLoc.clouds, 8); gl.uniform1i(skyLoc.detail, 9); gl.uniform1i(skyLoc.perlin, 7);
     gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
     gl.bindVertexArray(skyQuad);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, onSeven);
     gl.activeTexture(gl.TEXTURE0);
     gl.useProgram(program);
   }

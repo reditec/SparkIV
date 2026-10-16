@@ -90,6 +90,29 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public Vector3 SkySunColor { get; private init; }
     public float SkySunExposure { get; private init; }
 
+    /// <summary>
+    /// The clouds as gta_atmoscatt_clouds draws them, its constants matched in both traces (TLAD's GTAIV.4 at 12:50,
+    /// GTA IV's GTAIV.1 at 10:51): CloudColor (columns 81 to 83), SunsetColor (73 to 75, times column 89: 0 in TLAD's
+    /// trace, where 89 is 0), CloudShadowStrength (84), CloudThreshold (85), CloudBias (86), CloudShadowOffset (87),
+    /// CloudInscatteringRange (88), the detail's scale (90) and strength (91), the thickness (92), CloudFadeOut (94),
+    /// TopCloudBiasDetailThresholdHeight (95 to 98) and TopCloudColor (99 to 101 plus 73 to 75).
+    /// </summary>
+    public Vector3 CloudColor { get; private init; }
+    public Vector3 SunsetColor { get; private init; }
+    public Vector3 TopCloudColor { get; private init; }
+    public Vector4 TopCloud { get; private init; }
+    /// <summary>CloudThreshold, CloudBias, CloudShadowStrength, CloudInscatteringRange.</summary>
+    public Vector4 CloudShape { get; private init; }
+    /// <summary>The thickness, the detail's scale and strength, CloudFadeOut.</summary>
+    public Vector4 CloudDetail { get; private init; }
+    public float CloudShadowOffset { get; private init; }
+    /// <summary>
+    /// How fast the clouds' noise moves (column 107; the parser 0xAEFEB0 puts it at +0x1B4, 0xDBBDF0 hands it to the
+    /// noise, whose Phase grows by it per game hour, 0x62E110: 1.7 in TLAD's trace at noon, its Phase 1.8 on in a
+    /// little over an hour).
+    /// </summary>
+    public float CloudSpeed { get; private init; }
+
     /// <summary>The weather's line at the hour (blended between the two times round it), or null without the file or weather.</summary>
     public static TimeCycle? Load(string gameFolder, string weather, float hour)
     {
@@ -173,6 +196,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         AzimuthStrength = a.Length > 119 && b.Length > 119 ? V(78) : 0,
         SkySunColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(103), V(104), V(105)) : Vector3.Zero,
         SkySunExposure = a.Length > 119 && b.Length > 119 ? V(119) : 0,
+        CloudColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(81), V(82), V(83)) : Vector3.Zero,
+        SunsetColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(73), V(74), V(75)) * V(89) : Vector3.Zero,
+        TopCloudColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(99) + V(73), V(100) + V(74), V(101) + V(75)) : Vector3.Zero,
+        TopCloud = a.Length > 119 && b.Length > 119 ? new Vector4(V(95), V(96), V(97), V(98)) : Vector4.Zero,
+        CloudShape = a.Length > 119 && b.Length > 119 ? new Vector4(V(85), V(86), V(84), V(88)) : Vector4.Zero,
+        CloudDetail = a.Length > 119 && b.Length > 119 ? new Vector4(V(92), V(90), V(91), V(94)) : Vector4.Zero,
+        CloudShadowOffset = a.Length > 119 && b.Length > 119 ? V(87) : 0,
+        CloudSpeed = a.Length > 119 && b.Length > 119 ? V(107) : 0,
       };
     }
 
@@ -342,6 +373,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           exposure = SkyLightMultiplier * 2.85f,
           sunExposure = new[] { 0.35f, SkySunExposure },
           clamp = 30f,
+          cloudColor = A(CloudColor),
+          sunsetColor = A(SunsetColor),
+          topCloudColor = A(TopCloudColor),
+          topCloud = new[] { TopCloud.X, TopCloud.Y, TopCloud.Z, TopCloud.W },
+          cloudShape = new[] { CloudShape.X, CloudShape.Y, CloudShape.Z, CloudShape.W },
+          cloudDetail = new[] { CloudDetail.X, CloudDetail.Y, CloudDetail.Z, CloudDetail.W },
+          cloudShadowOffset = CloudShadowOffset,
+          cloudSpeed = CloudSpeed,
         },
         skyTop = A(SkyTop),
         skyBottom = A(SkyBottom),
