@@ -77,6 +77,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public int Noise { get; private init; }
 
+    /// <summary>
+    /// The sky as gta_atmoscatt_clouds draws it (its programs and constants in the TLAD trace GTAIV.4): SkyColor
+    /// (columns 64 to 66), AzimuthColor (67 to 69), AzimuthColorEast (70 to 72), AzimuthHeight (77), AzimuthStrength
+    /// (78), SunColor (103 to 105), HDRSunExposure's y (119).
+    /// </summary>
+    public Vector3 SkyColor { get; private init; }
+    public Vector3 AzimuthColor { get; private init; }
+    public Vector3 AzimuthColorEast { get; private init; }
+    public float AzimuthHeight { get; private init; }
+    public float AzimuthStrength { get; private init; }
+    public Vector3 SkySunColor { get; private init; }
+    public float SkySunExposure { get; private init; }
+
     /// <summary>The weather's line at the hour (blended between the two times round it), or null without the file or weather.</summary>
     public static TimeCycle? Load(string gameFolder, string weather, float hour)
     {
@@ -153,6 +166,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         DirectionalLightW = Math.Max(1f, (V(60) + V(61)) / Math.Max(V(57), 1e-4f)),
         GlobalScalarsW = 0.6f * Math.Clamp(V(63), 0f, 4f),
         Noise = (int)V(10),
+        SkyColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(64), V(65), V(66)) : Vector3.Zero,
+        AzimuthColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(67), V(68), V(69)) : Vector3.Zero,
+        AzimuthColorEast = a.Length > 119 && b.Length > 119 ? new Vector3(V(70), V(71), V(72)) : Vector3.Zero,
+        AzimuthHeight = a.Length > 119 && b.Length > 119 ? V(77) : 0,
+        AzimuthStrength = a.Length > 119 && b.Length > 119 ? V(78) : 0,
+        SkySunColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(103), V(104), V(105)) : Vector3.Zero,
+        SkySunExposure = a.Length > 119 && b.Length > 119 ? V(119) : 0,
       };
     }
 
@@ -307,6 +327,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           adaptTime = AdaptTime,
           // NoiseParams.z (GTAIV.exe 0x930268): the film grain / 64 (0.375 in TLAD's trace at 12:50).
           noise = Noise / 64f,
+        },
+        // The sky in light (see SKY_FRAGMENT): GTAIV.exe 0xDBC049 sets HDRExposure = SkyLightMult (column 60) x 2.85
+        // (0xEF4224; the traces: 8 x 2.85 = 22.8 in GTA IV's at 10:51, 19.25 x 2.85 live in TLAD at noon) and
+        // HDRSunExposure = (1 x 0.35 (0xFE880C), column 119); HDRExposureClamp 30 (0xDBC0A3).
+        skyHdr = new
+        {
+          color = A(SkyColor),
+          azimuth = A(AzimuthColor),
+          azimuthEast = A(AzimuthColorEast),
+          height = AzimuthHeight,
+          strength = AzimuthStrength,
+          sunColor = A(SkySunColor),
+          exposure = SkyLightMultiplier * 2.85f,
+          sunExposure = new[] { 0.35f, SkySunExposure },
+          clamp = 30f,
         },
         skyTop = A(SkyTop),
         skyBottom = A(SkyBottom),
