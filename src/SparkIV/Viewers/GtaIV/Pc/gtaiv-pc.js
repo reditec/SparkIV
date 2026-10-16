@@ -68,13 +68,18 @@ const GameGlsl = Object.freeze({
         // As the game's pixel shader for it (0x1A37E8E0 in the trace): nothing below the camera (texkill of the height
         // over it), the texture lit by the light from around x AO and the sun (saturate((n.l - 0.25) x 4/3), no shadow,
         // no lamps), the far fog over it (globalFogColor by saturate((distance - FogStart) / (FarClip - FogStart))).
+        // Blended over the sky drawn first (the pass's state: SRCALPHA / INVSRCALPHA) by the texture's alpha x the
+        // vertex's x saturate((64 - distance) x 0.25): fading from 60 m, gone from 64 m (globalScalars.x 1).
         if (vPosition.z < parabolicAt.z) discard;
         vec3 around0 = mix(ambientAbove, ambientBelow, clamp(0.5 - 0.5 * n0.z, 0.0, 1.0));
         float sun0 = clamp((dot(n0, sunDir) - 0.25) * 1.3333333, 0.0, 1.0);
         float ao0 = clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0);
         vec3 lit0 = base.rgb * (around0 * ao0 + sunColor * sun0);
-        float far0 = clamp((length(vPosition - parabolicAt) - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
-        outColor = vec4(mix(lit0, gameToneUnmap(hazeColor), far0), 1.0);
+        float distance0 = length(vPosition - parabolicAt);
+        float far0 = clamp((distance0 - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
+        float alpha0 = clamp(base.a * vAlpha, 0.0, 1.0) * clamp((64.0 - distance0) * 0.25, 0.0, 1.0);
+        if (alpha0 <= 0.0) discard;
+        outColor = vec4(mix(lit0, gameToneUnmap(hazeColor), far0), alpha0);
         outLight = vec4(0.0);
         return;
   `,

@@ -1078,6 +1078,9 @@ namespace SparkIV.WinUI.Viewers
           specularKey = AddTexture(specularName, embedded, Materials.Count + "_s.png");
         }
       }
+      string? environmentKey = !neverDrawn && GtaIVPcMaterials.IsMapReflect(material.ShaderName) &&
+                               TextureParameter(material, GtaIVPcMaterials.EnvironmentSampler) is string environmentName
+        ? AddTexture(environmentName, embedded, Materials.Count + "_e.png") : null;
       var mask = VectorParameter(material, GtaIVPcMaterials.SpecMapIntMask);
 
       string shader = material.ShaderName;
@@ -1098,6 +1101,7 @@ namespace SparkIV.WinUI.Viewers
         RenderTarget = renderTarget,
         NormalKey = normalKey,
         SpecularKey = specularKey,
+        EnvironmentKey = environmentKey,
         Bumpiness = VectorParameter(material, GtaIVPcMaterials.Bumpiness)?.X ?? 1,
         SpecularPower = VectorParameter(material, GtaIVPcMaterials.SpecularFactor)?.X ?? 0,
         SpecularIntensity = VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor)?.X ?? 0,
@@ -1317,6 +1321,12 @@ namespace SparkIV.WinUI.Viewers
     public string? NormalKey { get; init; }
     public string? SpecularKey { get; init; }
 
+    /// <summary>
+    /// A map *_reflect shader's environment texture (GTA IV (PC): its EnvironmentSampler, added to the albedo by
+    /// the specular map x specularColorFactor x reflectivePower), or null.
+    /// </summary>
+    public string? EnvironmentKey { get; init; }
+
     /// <summary>How strongly the normal map bends the surface (1 as made).</summary>
     public float Bumpiness { get; init; } = 1;
 
@@ -1391,6 +1401,7 @@ namespace SparkIV.WinUI.Viewers
       layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
       normal = NormalKey == null ? null : url(NormalKey),
       specular = SpecularKey == null ? null : url(SpecularKey),
+      environment = EnvironmentKey == null ? null : url(EnvironmentKey),
       bumpiness = Bumpiness,
       specularPower = SpecularPower,
       specularIntensity = SpecularIntensity,
