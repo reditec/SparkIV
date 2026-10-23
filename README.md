@@ -52,7 +52,9 @@ Third-party components:
 
 ## Changelog
 
-### Unreleased (WinUI version, reditec)
+Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC).
+
+### v0.9.0-alpha.1 (WinUI version, reditec)
 
 * New WinUI 3 app on .NET 10.
 
