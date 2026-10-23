@@ -945,10 +945,15 @@ namespace SparkIV.WinUI.Viewers
       }
 
       // See-through materials and decals fade by their vertices' alpha too (the coastline decal of
-      // tmp_ci6_7_beach04: 0 at its edges, so the dark hollow below shows, as in OpenIV).
+      // tmp_ci6_7_beach04: 0 at its edges, so the dark hollow below shows, as in OpenIV). GTA IV PC's map glass
+      // as well: gta_glass_spec's vertex shader passes the colour's alpha on (program 4: o3.zw = v1) and its
+      // pixel shader (program 20) outputs alpha = texture alpha x it x globalScalars.x, blended SRCALPHA /
+      // INVSRCALPHA (TLAD trace GTAIV.4, et01_ba's toll booth panes from call 145517152). Not a vehicle's glass:
+      // gta_vehicle_vehglass sets the alpha to 1 (vertex shader 0x247A27C0).
       float[]? alphas = null;
       bool hasColor = mesh.VertexDeclaration.Elements.TakeWhile(e => e.Stream != -1).Any(e => e.Usage == VertexElementUsage.Color && e.UsageIndex == 0);
-      if (hasColor && material >= 0 && material < Materials.Count && Materials[material].Blend)
+      if (hasColor && material >= 0 && material < Materials.Count &&
+          (Materials[material].Blend || Materials[material].Glass && !Materials[material].Vehicle))
       {
         alphas = new float[vertices.Length];
         for (int i = 0; i < vertices.Length; i++)

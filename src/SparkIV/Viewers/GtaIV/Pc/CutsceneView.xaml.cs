@@ -69,6 +69,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // Remembered while SparkIV runs.
     private static int s_background;
     private static bool s_camera = true;
+    private static bool s_showCamera = true;
     private static bool s_subtitles = true;
     private static bool s_lights = true;
     private static bool s_location = true;
@@ -138,6 +139,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
       BackgroundBox.SelectedIndex = s_background;
       CameraButton.IsChecked = s_camera;
+      ShowCameraButton.IsChecked = s_showCamera;
       SubtitlesButton.IsChecked = s_subtitles;
       LightsButton.IsChecked = s_lights;
       LocationButton.IsChecked = s_location;
@@ -550,6 +552,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         cast,
         camera ?? new { type = "camera", camera = (object?)null },
         new { type = "useCamera", on = s_camera && camera != null },
+        new { type = "showCamera", on = s_showCamera },
         // How far the game draws, shot by shot (the map beyond isn't drawn).
         new { type = "drawDistance", steps = cut.DrawDistanceSteps(index, _fps) },
         // The fade in at the start of the first section, out at the end of the last (in the section's frames).
@@ -831,6 +834,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // Off: the free view goes on from where the cutscene's camera is (the page does that).
       s_camera = CameraButton.IsChecked == true;
       Post(new { type = "useCamera", on = s_camera });
+    }
+
+    private void ShowCamera_Click(object sender, RoutedEventArgs e)
+    {
+      s_showCamera = ShowCameraButton.IsChecked == true;
+      Post(new { type = "showCamera", on = s_showCamera });
     }
 
     private void Lights_Click(object sender, RoutedEventArgs e)

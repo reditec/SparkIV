@@ -34,6 +34,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float AmbientMultiplierAbove { get; private init; }
     public float AmbientMultiplierBelow { get; private init; }
     /// <summary>
+    /// What the light from around reaches of what moves (peds, a cutscene's props, vehicles), not of the map: a
+    /// modifier's AmbientDownMult (column 19), 1 without one. GTAIV.exe gives such an object the value of its room's
+    /// modifier (0xA0D720 → 0xAEF820; x the room's blend, eased over its portals) as globalScalars.z (0xB12370,
+    /// 0xC645A0 → 0xAC6FB0), which their vertex shaders multiply the vertex colour's AO by (gta_ped: AO = red x
+    /// globalScalars.z); the map gets 254 / 255. The TLAD trace GTAIV.3, et01_aa: em_4's 0.20, globalScalars.z 0.2
+    /// for every ped and Elizabeta's earrings, 0.996 for the map.
+    /// </summary>
+    public float ActorAmbient { get; private init; } = 1f;
+    /// <summary>
     /// How bright the water mirrors (water.fxc's waterReflectionScale): the line's 126th number. GTAIV.exe's
     /// reader (0xAEFEB0, its sscanf's 126th target) puts it at +0x80 of the time's values, which 0xAD7EF0 sets as
     /// waterReflectionScale; the names in the file's header don't line up with its numbers that far.
@@ -48,6 +57,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float MidGrey { get; private init; }
     /// <summary>IntensityBloom (column 38): the bloom added before the curve, x 0.5 (ToneMapParams.z) x 0.25.</summary>
     public float Bloom { get; private init; }
+    /// <summary>
+    /// ToneMapParams.x (column 36, "BrightPassThreshold"): only what of the bloom lies above it (in the picture's
+    /// units) is added (rage_postfx.fxc program 12: max(bloom x Exposure - x x adapted / MidGrey, 0) x z x 0.25).
+    /// The TLAD trace GTAIV.4 (et01_ba): c81 = (0.16, 0.62, 1.088), column 36 0.16 at 12h EXTRASUNNY.
+    /// </summary>
+    public float BrightPass { get; private init; }
     /// <summary>deSatContrastGamma.x (column 45): how much colour stays, lerp(luminance, colour, this).</summary>
     public float Saturation { get; private init; }
     /// <summary>ColorCorrect (columns 39 to 41, bytes / 255; the shader doubles it).</summary>
@@ -64,6 +79,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float SkyLightMultiplier { get; private init; }
     /// <summary>The near fog's amount (column 11, / 255: the alpha packed with the sky bottom at +0x2C).</summary>
     public float NearFogAmount { get; private init; }
+    /// <summary>The near fog's colour where a modifier gives one (globalFogColorN), else null: the sky bottom x SkyLightMult.</summary>
+    public Vector3? NearFogColor { get; private init; }
 
     /// <summary>gDirectionalLight.w (GTAIV.exe 0xAC30F0): max(1, (SkyLightMult + SunMult) / DirLightMult), columns 60, 61, 57; scales the sun's shine.</summary>
     public float DirectionalLightW { get; private init; }
@@ -178,6 +195,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         Gamma = V(47),
         MidGrey = V(37),
         Bloom = V(38),
+        BrightPass = V(36),
         Saturation = V(45),
         ColorCorrect = Rgb(39),
         ColorShift = Rgb(42),
@@ -271,10 +289,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         Sun = Light(14, Sun * SunMultiplier),
         SunMultiplier = 1f,
         FarClip = Or(1, FarClip),
-        FogStart = Or(2, FogStart),
+        ActorAmbient = Or(19, ActorAmbient),
+        // The fog as the modifier sets it (the TLAD trace GTAIV.3, et01_aa in Elizabeta's flat, modifier em_4:
+        // globalFogParams c41 = (3, 1500, 0, 0.784) - MaxFogStart (column 3) 3, NearFog's alpha (column 27) 200
+        // / 255 -, and the near fog's colour, measured back from the light before and after the fog, NearFog's
+        // RGB (columns 24 to 26, 59/52/43) / 255 x 7.0 = column 66, as outside the sky bottom x SkyLightMult:
+        // the room fogged three quarters towards a warm grey from 3 m on). MinFogStart (column 2) where there is
+        // no MaxFogStart (BernieCrane: 300, its NearFog's alpha 0 - no near fog).
+        FogStart = Set(3) ? m[3] : Or(2, FogStart),
+        NearFogAmount = Set(27) ? Math.Clamp(m[27] / 255f, 0f, 1f) : NearFogAmount,
+        NearFogColor = Set(27) && m[27] > 0 ? Rgb(24) * (Set(66) ? m[66] : SkyLightMultiplier) : NearFogColor,
         Exposure = Set(32) ? m[32] * Or(33, 1f) : Exposure,
         MidGrey = Or(35, MidGrey),
         Bloom = Or(36, Bloom),
+        BrightPass = Or(34, BrightPass),
         ColorCorrect = Set(37) ? Rgb(37) : ColorCorrect,
         ColorShift = Set(40) ? Rgb(40) : ColorShift,
         Saturation = Or(43, Saturation),
@@ -282,6 +310,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         AdaptedLumMin = Or(51, AdaptedLumMin),
         AdaptedLumMax = Or(52, AdaptedLumMax),
         AdaptTime = Set(53) ? m[53] * 10 : AdaptTime,
+        // GlobEnvRefl (column 54) as globalScalars.w = 0.6 x it: em_4 and BernieCrane set 0, no mirrored
+        // surroundings in the shine inside (the TLAD trace GTAIV.3 in Elizabeta's flat: c39.w = 0). With the
+        // outside's 0.216 Bernie's hall wallpaper by his door showed bright vertical streaks over it, twice as
+        // light as the game's video.
+        GlobalScalarsW = Set(54) ? 0.6f * Math.Clamp(m[54], 0f, 4f) : GlobalScalarsW,
         // Halved under a modifier (GTAIV.exe 0xAEE7E0: x 0.5 by the modifier's strength, 0xFE8830).
         Noise = Noise / 2,
       };
@@ -335,11 +368,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // FarClp (column 23), NearFogAmount = column 11 / 255, the same).
         fog = new
         {
-          nearColor = A(SkyBottom * SkyLightMultiplier),
+          nearColor = A(NearFogColor ?? SkyBottom * SkyLightMultiplier),
           start = FogStart,
           end = Math.Max(FarClip, FogStart + 1),
           nearAmount = NearFogAmount,
         },
+        actorAmbient = ActorAmbient,
         directionalLightW = DirectionalLightW,
         globalScalarsW = GlobalScalarsW,
         // gDayNightEffects.x (GTAIV.exe 0x9CB895): seconds of the day / 43200 up to noon, then back down to 0.
@@ -350,6 +384,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           // ToneMapParams.z (GTAIV.exe 0x92FE85): IntensityBloom (column 38) x 0.5 x 0.2 x (0x103F9B4 x 0.5), that
           // global 10 at run time (an apitrace capture: z 1.435 for IntensityBloom 2.87).
           bloom = Bloom * 0.5f,
+          brightPass = BrightPass,
           saturation = Saturation,
           colorCorrect = A(ColorCorrect),
           colorShift = A(ColorShift),

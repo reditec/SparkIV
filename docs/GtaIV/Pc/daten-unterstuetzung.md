@@ -1,4 +1,4 @@
-# GTA IV (PC): Welche Spieldaten SparkIV unterstützt
+﻿# GTA IV (PC): Welche Spieldaten SparkIV unterstützt
 
 Diese Datei gilt nur für **GTA IV, PC-Version**. Andere Spiele und Plattformen bekommen eine eigene Datei unter
 `docs/<Spiel>/<Plattform>/`.
@@ -21,6 +21,16 @@ Jede Zeile trägt einen Status:
 
 Jeder Eintrag sagt außerdem, **woher** die Erkenntnis stammt: Datei, Exe-Adresse, Shader oder Aufnahme.
 Vermutungen sind als solche gekennzeichnet.
+
+Ausführliche Beschreibungen einzelner Formate mit allen Funden stehen unter [formate/](formate/):
+
+- [wpl.md](formate/wpl.md): Platzierungen, Instanz-Flags
+- [ide-mlo.md](formate/ide-mlo.md): Innenräume, Räume, Portale
+- [timecyclemodifiers.md](formate/timecyclemodifiers.md): Spalten der Modifikatoren, AmbientDownMult, GlobEnvRefl
+- [2dfx-lichter.md](formate/2dfx-lichter.md): Lichter in Modellen, Schattenlampen, Lichter für vorwärts gezeichnete Objekte
+- [deferred_lighting.md](formate/deferred_lighting.md): Beleuchtungs-Shader, Stencil, Ablauf eines Bildes
+
+Die gefundenen Funktionen von GTAIV.exe sind im Ghidra-Projekt benannt (Skript `ApplyCutsceneFindings.java`).
 
 ---
 
@@ -79,7 +89,11 @@ openFormats-Export (`.onim`) aller 357 Zwischensequenz-Wörterbücher.
 
 | Shader / Parameter | Status | Inhalt / Herkunft |
 |---|---|---|
-| `gta_emissive`, `gta_emissivestrong`, `gta_emissivenight` | verwendet (seit 12.10.2026 wie im Spiel) | Programm 14: eine normal beleuchtete Fläche, die Textur als Albedo. Programm 12: dazu Textur × Vertexfarbe × `emissiveMultiplier`, bei `emissivenight` × `gDayNightEffects.w` = 1 − Tagesfaktor. Draußen zusätzlich × Belichtung, wie alle Lichter. |
+| `gta_emissive`, `gta_emissivestrong`, `gta_emissivenight` | verwendet (seit 12.10.2026 wie im Spiel) | Programm 14: eine normal beleuchtete Fläche, die Textur als Albedo. Programm 12: dazu Textur × Vertexfarbe × `emissiveMultiplier`, bei `emissivenight` × `gDayNightEffects.w` = 1 − Tagesfaktor. Draußen zusätzlich × Belichtung, wie alle Lichter.
+- **Im Raum eines Interiors** (seit 23.10.2026, aus Trace und Videos):
+  - Feste Emissive im G-Buffer leuchten **nicht**, sie sind nur beleuchtet (et01_aa-Trace, Programm 14).
+  - Transparente oder gläserne Emissive (vorwärts gezeichnet, PS 0x24B6EE60) leuchten **ohne** Tag/Nacht-Faktor (bc_1 bei Tag: Glasschale leuchtet, Stoffschirm nicht).
+  - Woran das Spiel das genau festmacht (Bucket, Pass), ist nicht im Exe belegt. |
 | `gta_ped_skin(_blendshape)`: `SubColor`, `SubScatWrap`, `SubScatWidth` | verwendet (seit 12.10.2026) | Programm 10: Albedo + 0,5 × SubColor × Texturalpha in einem Band an der Schattengrenze (Formel im Code). Schablonenwert 1 im GBuffer, Durchgang 1 der Spotlichter beleuchtet nur diesen Wert. |
 
 ### Licht draußen (gemessen in der D3D-Aufnahme `GTAIV.1.trace`, bc_3)
@@ -103,7 +117,8 @@ openFormats-Export (`.onim`) aller 357 Zwischensequenz-Wörterbücher.
 - **Unterstützt:** `TimeCycle.LoadModifiers` und `TimeCycle.With` übernehmen Licht, Belichtung, Tone-Mapping-Werte, Nebelbeginn und Sichtweite. Der Wert −1 heißt „unverändert“.
 - **Offen bzw. ungeklärt:**
   - Der Alpha-Wert der Farben; angenommen als Mischanteil, gemessen nur bei 255.
-  - Diese Spalten werden nicht verwendet: `AmbientDownMult`, `Temperature`, `PostFxStrength`, `BrightPassThreshold`, `Contrast`, die `Far`-Spalten, die `DOF`-Spalten, `AmbientOcclusionMult`, `SkyMultiplier` (vermutlich c40.w) und `PedAmbOccHack`.
+  - `AmbientDownMult` und `GlobEnvRefl` werden seit 22.10.2026 verwendet, Einzelheiten in [formate/timecyclemodifiers.md](formate/timecyclemodifiers.md).
+  - Diese Spalten werden nicht verwendet: `Temperature`, `PostFxStrength`, `BrightPassThreshold`, `Contrast`, die `Far`-Spalten, die `DOF`-Spalten, `AmbientOcclusionMult`, `SkyMultiplier` (vermutlich c40.w) und `PedAmbOccHack`.
   - Wie im Spiel gilt der Modifikator des Raums, in dem die Kamera steht. Steht sie in keinem Raum, gilt `timecyc.dat` allein. SparkIV schickt dazu pro Raum den veränderten Zeitzyklus mit, und die Ansicht wählt ihn in jedem Frame. Ob das Spiel beim Raumwechsel überblendet, ist nicht geprüft.
   - Die Tone-Mapping-Konstanten innen sind noch nicht gegen die Aufnahme geprüft.
 
@@ -164,6 +179,11 @@ openFormats-Export (`.onim`) aller 357 Zwischensequenz-Wörterbücher.
   - `0xC61D80` (thiscall) schreibt in das Objekt `this[0x140 + Index·4]`: +0x154 = Entfernung, +0x158 = vierte Zahl.
   - Vermutung: Das Objekt ist die Kamera. Dann wäre +0x154 die Far-Clip- und +0x158 die Near-Clip-Entfernung; der Standardwert 0,05 passt zum gemessenen `dofProj`-Near von 0,05.
   - Das ist noch nicht belegt. In GTAIV.1.trace war bei bc_3, Frame 870, der Far-Wert von `dofProj` 1500, obwohl der Block dort 185 m vorgibt.
+  - **Videobefund 23.10.2026:**
+    - In bc_3, Section 3, Frame 828 (Stufe 89,2 m) zeigt das Spiel vom Teil der großen Brücke jenseits von etwa 89 m nichts.
+    - SparkIV zeichnete das Mesh ganz, weil es nahe Teile hat. Seit dem 23.10. schneidet SparkIV durch die Cutscene-Kamera pro Pixel jenseits der Stufe ab (`drawReach` in ModelView.html, nicht für Wasser).
+    - Das passt zum Video und verbessert 4 von 5 geprüften Referenzen.
+    - Ob das Spiel dafür die Projektion, einen Clip in den Shadern oder etwas anderes nutzt, ist nicht belegt (siehe den abweichenden `dofProj`-Wert oben).
 - **Kette (statisch belegt):**
   - Jeden Frame holt `0x9CB0F0` über `0xA86AC0(0x103E498)` die Kamera-Steuerung der Zwischensequenz. Dann ruft es `0xC61B30` und `0x9CA7E0` auf (die Lichter, siehe oben) sowie `0x9CA620`.
   - Das Objekt `this[0x140 + Abschnitt·4]` ist die Kamera des Abschnitts. Sie wird in `0xC61AD0` über `0xA86C40(0x1F, …)` als Kamera-Typ 0x1F angelegt und heißt `CutCam%d`.
@@ -220,7 +240,7 @@ Noch nicht vollständig aufgenommen. Bisher bekannt:
 
 | Schlüssel | Status | Inhalt / Herkunft |
 |---|---|---|
-| `misc.DOFBlurMultiplier.HD` / `.SD` (1 / 0,5) | verwendet (SD-Wert fest eingetragen), **Wahl unklar** | Stärke der Tiefenunschärfe. Gelesen bei 0xAF2210, gespeichert in 0x103F9B0. Mit x32dbg gemessen galt bei deinen Einstellungen der SD-Wert 0,5. In der zweiten Aufnahme (mit gesenkten Grafikeinstellungen) war es 1 (DOF_BLUR = (1, 0, 1, 0)). Welche Einstellung das umschaltet, ist offen (0x424000 in Ghidra nicht lesbar). |
+| `misc.DOFBlurMultiplier.HD` / `.SD` (1 / 0,5) | verwendet (HD-Wert 1; **gemessen** am 23.10.2026 mit x32dbg bei den Video-Einstellungen des Nutzers: DOF_BLUR = (1, 0, 1, 0) in der Cutscene. Passt auch empirisch an 7 Referenzen besser als 0,5). Welche Einstellung zwischen HD und SD umschaltet, ist offen | Der TLAD-Trace (et01_aa, 1920×1080, Aufruf 102289045) setzt für Programm 12 DOF_BLUR = (1, 0, 1, 0) und TexelSize = (1/1920, 1/1080). Die 4 Taps liegen also nur ±1,5 Pixel auseinander. | Stärke der Tiefenunschärfe. Gelesen bei 0xAF2210, gespeichert in 0x103F9B0. Mit x32dbg gemessen galt bei deinen Einstellungen der SD-Wert 0,5. In der zweiten Aufnahme (mit gesenkten Grafikeinstellungen) war es 1 (DOF_BLUR = (1, 0, 1, 0)). Welche Einstellung das umschaltet, ist offen (0x424000 in Ghidra nicht lesbar). |
 | `misc.BloomIntensityClamp.HD` (10) | verwendet | 0x103F9B4, begrenzt den Bloom. |
 | `misc.HiDof.nearBlur/midBlur/farBlur`, `misc.cutscene.nearBlurMin` | **unklar** | Nicht verwendet. Ob die PC-Fassung sie nutzt, ist ungeklärt. |
 | `misc.CrossPMultiplier.*` | **unklar** | Nicht verwendet (RimLight 0,7, Gamma 1,15, Desaturation 1,29 …). |

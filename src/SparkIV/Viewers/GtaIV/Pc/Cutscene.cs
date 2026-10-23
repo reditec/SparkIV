@@ -910,7 +910,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
               }
               return null;
             }
-            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null);
+            // A prop (.wdr) with its vertex colours: its map shaders write their red as the AO the light from
+            // around is multiplied by (gta_normal_spec's G-buffer program: GB2.z = colour.r; the TLAD trace
+            // GTAIV.3, et01_aa's earrings csElizEarRing at 102287127). Without, the page's middling 0.45 lit
+            // Elizabeta's earrings bright gold where the game shows them dark.
+            bool prop = file.Name.EndsWith(".wdr", StringComparison.OrdinalIgnoreCase);
+            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null, vertexColors: prop);
             actor.Source = file.Name + " · " + RelativeArchive(from);
           }
           catch (Exception ex)

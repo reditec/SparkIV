@@ -26,6 +26,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>Only for that map: the far version of a model shown near (not shown itself, nor casting a shadow).</summary>
     public bool MirrorOnly { get; init; }
+
+    /// <summary>Its placement's instance flags have 0x100: its lamps with their own flag 0x8000 cast shadows (see MapIndex.LampShadows).</summary>
+    public bool LampShadows { get; init; }
   }
 
   /// <summary>
@@ -33,7 +36,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// in the scene (At) and the turn from the scene into the interior (Turn: local = Turn applied to scene - At);
   /// Modifier: the hash of its time cycle modifier's name (0: none).
   /// </summary>
-  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max, uint Modifier = 0);
+  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max, uint Modifier = 0)
+  {
+    /// <summary>
+    /// Its portals as GTAIV.exe eases a ped's light from around over them (0xA0D720): the sphere through two
+    /// opposite corners (0xB20EC0: centre half way, radius half the diagonal; in the interior, as Min and Max),
+    /// and the room on the other side (the index in the location's list; -1 outside or none, limbo).
+    /// </summary>
+    public IReadOnlyList<(Vector3 Centre, float Radius, int To)> Portals { get; init; } = Array.Empty<(Vector3, float, int)>();
+  }
 
   /// <summary>
   /// Where a cutscene plays: the map objects around its origin ([OFFSET]; the scene's places are the
@@ -61,6 +72,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>Whether the scene's origin is in none of the interiors' rooms: a scene outside.</summary>
     public bool Outdoors { get; private set; }
+
+    /// <summary>The floating litter placed, by model and count (for the load log).</summary>
+    public string LitterModels { get; private set; } = "";
 
     /// <summary>Outside: the far versions (lod…) placed beyond the near objects, up to the scene's draw distance.</summary>
     public int Far { get; private set; }
@@ -147,6 +161,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       /// version's one of the same loose file (its district's "slod"). A name not known is empty.
       /// </summary>
       public List<(string Name, Vector3 Position, Quaternion Rotation, int Parent)> Placements { get; } = new List<(string, Vector3, Quaternion, int)>();
+      /// <summary>
+      /// The placements whose instance flags have 0x100 (the .wpl entry's +32): GTAIV.exe lets their lamps cast
+      /// shadows (0x9D76C0: entity +0x28 |= 8; 0xC1DB60 → 0xC1E200 passes it, with the lamp's own flag 0x8000).
+      /// </summary>
+      public HashSet<int> LampShadows { get; } = new HashSet<int>();
       public Dictionary<string, string> ArchiveOf { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
       /// <summary>
@@ -182,6 +201,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       public List<(string Name, Vector3 Position, Quaternion Rotation, bool Lod, int Room)> Objects { get; } =
         new List<(string, Vector3, Quaternion, bool, int)>();
       public List<(string Name, Vector3 Min, Vector3 Max, uint Modifier)> Rooms { get; } = new List<(string, Vector3, Vector3, uint)>();
+      /// <summary>Its objects (their numbers in Objects) whose instance flags have 0x100 (see MapIndex.LampShadows).</summary>
+      public HashSet<int> LampShadows { get; } = new HashSet<int>();
+      /// <summary>Its portals: the rooms on either side (their numbers in Rooms, 0 limbo), the sphere through two opposite corners.</summary>
+      public List<(int From, int To, Vector3 Centre, float Radius)> Portals { get; } = new List<(int, int, Vector3, float)>();
     }
 
     private static readonly object Gate = new object();
@@ -204,10 +227,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       log?.Step("location: the maps' index", "read once per game while SparkIV runs");
       var origin = new Vector3(offset[0], offset[1], offset[2]);
       var location = new CutsceneLocation();
-      // An interior placed: its objects, each placed in it as the interior is in the world (the interior's
-      // turn inverted as any placement's in the map; the object's own turn applied first, as it is).
+      // An interior placed: its objects, each placed in it as the interior is in the world (the object's own
+      // turn applied first, then the interior's, both as they are: an interior's placement isn't inverted as
+      // a model's in the map. et01_aa (TLAD) plays in E1_Elizabeta's lounge, turned 245°: inverted, the cast
+      // stood 12 m beside the flat in the air, as it is, all five in the lounge and csElizabetaDoor at its end
+      // wall, as in the game's video. Bernie's flat, turned 180°, is the same either way).
       var world = new List<int>();
       var inside = new List<(string Name, Vector3 Position, Quaternion Rotation, int Room)>();
+      // The objects (by name and place) whose lamps may cast shadows (instance flag 0x100, see MapIndex.LampShadows).
+      var shadowPlaces = new HashSet<(string, Vector3)>(index.LampShadows.Select(i => (index.Placements[i].Name, index.Placements[i].Position)));
       for (int i = 0; i < index.Placements.Count; i++)
       {
         var p = index.Placements[i];
@@ -224,7 +252,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           continue;
         }
-        var turn = Quaternion.Conjugate(p.Rotation);
+        var turn = p.Rotation;
         // Its rooms, numbered across the location; "limbo" (the walls around the rooms, in none of them) as none.
         var roomOf = new int[interior.Rooms.Count];
         for (int r = 0; r < interior.Rooms.Count; r++)
@@ -236,10 +264,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             continue;
           }
           roomOf[r] = location.Rooms.Count;
-          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, p.Rotation, room.Min, room.Max, room.Modifier));
+          // (The room's turn from the scene into the interior: the other way.)
+          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, Quaternion.Conjugate(turn), room.Min, room.Max, room.Modifier));
         }
-        foreach (var o in interior.Objects)
+        for (int r = 0; r < interior.Rooms.Count; r++)
         {
+          if (roomOf[r] < 0)
+          {
+            continue;
+          }
+          var portals = interior.Portals.Where(q => q.From == r || q.To == r)
+                                        .Select(q => (q.Centre, q.Radius, To: (q.From == r ? q.To : q.From) is int other && other > 0 && other < roomOf.Length ? roomOf[other] : -1))
+                                        .ToList();
+          location.Rooms[roomOf[r]] = location.Rooms[roomOf[r]] with { Portals = portals };
+        }
+        for (int k = 0; k < interior.Objects.Count; k++)
+        {
+          var o = interior.Objects[k];
           if (o.Lod)
           {
             continue;
@@ -248,7 +289,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           // (pub3_BERNIProps, turned 128° in Bernie's flat: inverted, its candles, frames and box stood in the
           // middle of the room instead of on the shelves where they are in the game).
           var combined = Quaternion.Concatenate(o.Rotation, turn);
-          inside.Add((o.Name, p.Position + Vector3.Transform(o.Position, turn), Quaternion.Conjugate(combined), o.Room >= 0 ? roomOf[o.Room] : -1));
+          var at = p.Position + Vector3.Transform(o.Position, turn);
+          inside.Add((o.Name, at, Quaternion.Conjugate(combined), o.Room >= 0 ? roomOf[o.Room] : -1));
+          if (interior.LampShadows.Contains(k))
+          {
+            shadowPlaces.Add((o.Name, at));
+          }
         }
       }
       float Bound(string name) => index.Sizes.TryGetValue(name, out var size) ? size.Radius : 0;
@@ -304,7 +350,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             return false;
           }
-          if (!IsFar(p.Name))
+          // A far version: named so (lod…, slod…) or the far version of others (SupLOD_Ks3_02, og_BS3blk02a_lod:
+          // bc_3's buildings across the water, 500 m off, were missing as models beyond OutsideModels).
+          if (!IsFar(p.Name) && !below.ContainsKey(i))
           {
             // A model near, or as far as the game draws it (its .ide distance), up to OutsideModels: beyond,
             // its coarse far version (sea floor and shore far versions lie above the water near the shore).
@@ -457,6 +505,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             {
               Far = IsFar(placement.Name),
               MirrorOnly = mirrorPlaces.Contains((placement.Name, placement.Position)),
+              LampShadows = shadowPlaces.Contains((placement.Name, placement.Position)),
             });
           }
         }
@@ -475,11 +524,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       location.AddWater(folder, origin, location.Far > 0 ? farRadius : radius);
       if (location.Outdoors && location.Water.Count > 0)
       {
-        // The collision lies in the archives of the models near (bronx_e.img's bronx_e_*.wbn).
-        var archives = shown.Where(p => !IsFar(p.Name) && index.ArchiveOf.ContainsKey(p.Name))
+        // The collision lies in the archives of the models shown (bronx_e.img's bronx_e_*.wbn), near and far: the
+        // litter's reach (below) goes beyond the near models' (each bound is checked against it).
+        var archives = shown.Where(p => index.ArchiveOf.ContainsKey(p.Name))
                             .Select(p => index.ArchiveOf[p.Name]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        int litter = location.AddFloatingLitter(folder, origin, radius, archives, index.ArchiveOf, shared);
-        log?.Step("location: floating litter", litter + " objects on " + archives.Count + " archives' collision");
+        // As far round the scene as the page shows litter from a camera at its edge (the page's FloatingRadius, 75 m).
+        int litter = location.AddFloatingLitter(folder, origin, radius + 75, archives, index.ArchiveOf, shared);
+        log?.Step("location: floating litter", litter + " objects on " + archives.Count + " archives' collision (" + location.LitterModels + ")");
       }
       if (location.Outdoors)
       {
@@ -560,7 +611,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// harbour: PROC_INDUS_FLOATING - wood, a tyre), one per spacing² m² of face, none nearer than its minimum
     /// distance to another of its kind, turned at random, on the water's surface above the face (the face must
     /// be under water). The game places them anew each time (USESEED 0); here the same each time. The page
-    /// shows them within 30 m of the camera, as the game makes them. Returns how many were placed.
+    /// shows them within 75 m of the camera, as the game makes them at the reference videos' detail distance
+    /// (see FloatingRadius in gtaiv-pc.js). Returns how many were placed.
     /// </summary>
     private int AddFloatingLitter(string folder, Vector3 origin, float radius, List<string> archives,
                                   Dictionary<string, string> archiveOf, ModelScene.SharedTextures shared)
@@ -703,6 +755,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
         }
       }
+      LitterModels = string.Join(", ", placed.GroupBy(p => p.Key.Model, StringComparer.OrdinalIgnoreCase).Select(g => g.Key + " " + g.Sum(p => p.Value.Count)))
+                     + "; faces by tag " + string.Join(", ", faces.GroupBy(f => f.Tag).Select(g => g.Key + ": " + g.Count()));
       return count;
 
       // The litter's model (in pc\data\maps\generic\procobj.img), loaded once; -1 if not found.
@@ -755,7 +809,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// GTA IV's files come too; where the episode has a file of the same path (TLAD's east\bronx_w.img) both
     /// are loaded, the episode's first so its models win where both have one (et01_ba: the roads and bridge
     /// round the toll booth are only in GTA IV's bronx_w.img). <paramref name="replaced"/> gets GTA IV's files
-    /// the episode has one of the same path of (their placements are the episode's).
+    /// the episode has one of the same path of; without it those aren't given (the loose .wpl: the episode's
+    /// alone).
     /// </summary>
     private static IEnumerable<string> MapFiles(string folder, string sub, string pattern, HashSet<string>? replaced = null)
     {
@@ -817,17 +872,22 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             try
             {
               looseStart[Path.GetFileNameWithoutExtension(path)] = index.Placements.Count;
-              ReadPlacements(System.IO.File.ReadAllBytes(path), nameOf, index.Placements, index.Placements.Count);
+              ReadPlacements(System.IO.File.ReadAllBytes(path), nameOf, index.Placements, index.Placements.Count, index.LampShadows);
             }
             catch (Exception)
             {
               // A file that can't be read: its objects aren't shown.
             }
           }
-          var replacedImgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-          foreach (var path in MapFiles(folder, maps, "*.img", replacedImgs))
+          // An archive's placements by the name of their .wpl, each name once: an episode's archive of the same
+          // path as GTA IV's holds only the .wpl it changes (TLAD's bronx_w.img 9 of GTA IV's 18, its manhat09.img
+          // none), GTA IV's others stay (et01_aa: St Mary's ground, path and church in GTA IV's
+          // bronx_w_stream3.wpl, which TLAD's archive hasn't; without them the cast stood in the air). Their
+          // links to far versions point into the loose file of the archive's name, the episode's having GTA IV's
+          // records in the same order.
+          var placementFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+          foreach (var path in MapFiles(folder, maps, "*.img", new HashSet<string>(StringComparer.OrdinalIgnoreCase)))
           {
-            bool placements = !replacedImgs.Contains(path);
             var img = new IMGFileSystem();
             try
             {
@@ -843,10 +903,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                 {
                   index.DictionaryArchiveOf.TryAdd(Path.GetFileNameWithoutExtension(file.Name), path);
                 }
-                else if (placements && extension.Equals(".wpl", StringComparison.OrdinalIgnoreCase))
+                else if (extension.Equals(".wpl", StringComparison.OrdinalIgnoreCase) && placementFiles.Add(file.Name))
                 {
                   ReadPlacements(file.GetData(), nameOf, index.Placements,
-                             looseStart.TryGetValue(Path.GetFileNameWithoutExtension(path), out int parents) ? parents : -1);
+                             looseStart.TryGetValue(Path.GetFileNameWithoutExtension(path), out int parents) ? parents : -1, index.LampShadows);
                 }
               }
             }
@@ -952,6 +1012,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             hours.TryAdd(fields[0], shownHours);
           }
         }
+        if (section == "mlo" && inPortals && interior != null && fields.Length >= 19)
+        {
+          // A portal: the rooms on either side, its four corners, ..., its flags (19th number). GTAIV.exe leaves
+          // out of a ped's easing those with flag 0x10 or 0x4 (0xA8F6A0, 0xA8F7D0 on the portal's +0x4C).
+          try
+          {
+            int flags = int.TryParse(fields[18], NumberStyles.Integer, CultureInfo.InvariantCulture, out int fl) ? fl : 0;
+            var first = new Vector3(F(fields[2]), F(fields[3]), F(fields[4]));
+            var third = new Vector3(F(fields[8]), F(fields[9]), F(fields[10]));
+            if ((flags & 0x14) == 0 && int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int from) &&
+                int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int to))
+            {
+              interior.Portals.Add((from, to, (first + third) / 2, Vector3.Distance(first, third) / 2));
+            }
+          }
+          catch (FormatException)
+          {
+          }
+          continue;
+        }
         if (section != "mlo" || inPortals)
         {
           continue;
@@ -1007,6 +1087,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             // The far versions (level of detail 1, 2) are kept in the list (the rooms count them) but not shown.
             interior.Objects.Add((fields[0], new Vector3(F(fields[1]), F(fields[2]), F(fields[3])), new Quaternion(F(fields[4]), F(fields[5]), F(fields[6]), F(fields[7])),
                                   fields[8] != "0", -1));
+            // Its instance flags (tenth number; 384 = 0x180 for most), 0x100 letting its lamps cast shadows.
+            if (fields.Length > 9 && uint.TryParse(fields[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint instanceFlags) && (instanceFlags & 0x100) != 0)
+            {
+              interior.LampShadows.Add(interior.Objects.Count - 1);
+            }
           }
           catch (FormatException)
           {
@@ -1022,7 +1107,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// whose placements start at <paramref name="parents"/>; -1 for none). All are kept, those of names not
     /// known empty, so the indexes stay right.
     /// </summary>
-    private static void ReadPlacements(byte[] d, Dictionary<uint, string> nameOf, List<(string, Vector3, Quaternion, int)> placements, int parents)
+    private static void ReadPlacements(byte[] d, Dictionary<uint, string> nameOf, List<(string, Vector3, Quaternion, int)> placements, int parents,
+                                       HashSet<int>? lampShadows = null)
     {
       if (d.Length < 68 || BitConverter.ToUInt32(d, 0) != 3)
       {
@@ -1034,6 +1120,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         int o = 68 + i * 48;
         string name = nameOf.TryGetValue(BitConverter.ToUInt32(d, o + 28), out var known) ? known : "";
         int lod = BitConverter.ToInt32(d, o + 36);
+        if ((BitConverter.ToUInt32(d, o + 32) & 0x100) != 0)
+        {
+          lampShadows?.Add(placements.Count);
+        }
         placements.Add((name,
                         new Vector3(BitConverter.ToSingle(d, o), BitConverter.ToSingle(d, o + 4), BitConverter.ToSingle(d, o + 8)),
                         new Quaternion(BitConverter.ToSingle(d, o + 12), BitConverter.ToSingle(d, o + 16), BitConverter.ToSingle(d, o + 20), BitConverter.ToSingle(d, o + 24)),
@@ -1199,6 +1289,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             radius = light.Distance,
             strength = light.Range,
             flags = light.Flags,
+            // Drawn by the lighting's shadow program: its own flag 0x8000 and its object's instance flag 0x100.
+            shadows = obj.LampShadows && (light.Flags & 0x8000) != 0,
           });
         }
       }
@@ -1209,6 +1301,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         turn = new[] { r.Turn.X, r.Turn.Y, r.Turn.Z, r.Turn.W },
         min = new[] { r.Min.X, r.Min.Y, r.Min.Z },
         max = new[] { r.Max.X, r.Max.Y, r.Max.Z },
+        portals = r.Portals.Select(q => new { centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To }).ToList(),
       }).ToList();
       return new { type = "mapLights", lights, rooms };
     }

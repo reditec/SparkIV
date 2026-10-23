@@ -18,6 +18,10 @@
                                 ToolTipService.ToolTip="Look through the cutscene's camera (turning the view by mouse leaves it)">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xE714;" /></AppBarToggleButton.Icon>
             </AppBarToggleButton>
+            <AppBarToggleButton x:Name="ShowCameraButton" Label="Show camera" IsChecked="True" Click="ShowCamera_Click"
+                                ToolTipService.ToolTip="In the free view, draw the cutscene's camera: where it is and what it sees (move with W/A/S/D, Q/E down and up, Shift faster)">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE722;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
             <AppBarToggleButton x:Name="LocationButton" Label="Location" IsChecked="True" Click="Location_Click"
                                 ToolTipService.ToolTip="Show the map around the scene: the buildings, rooms and things where it plays (without what the scene hides)">
                 <AppBarToggleButton.Icon><FontIcon Glyph="&#xE80F;" /></AppBarToggleButton.Icon>

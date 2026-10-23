@@ -4,6 +4,9 @@
 // its shaders and calls the rest (the water simulation, the sea, the lamps outside) by name; another game or engine
 // version brings its own file with the same names. SparkIV serves it before the page's own script.
 
+// How many lamps' shadow maps a frame draws (see lampShadowTarget).
+const LampShadowSlots = 4;
+
 const GameGlsl = Object.freeze({
   // The fragment shader's uniforms for the parts below.
   uniforms: `
@@ -19,6 +22,8 @@ const GameGlsl = Object.freeze({
     uniform float dayNight;
     // A ped's shine: gDirectionalLight.w, globalScalars.w (see pedShine).
     uniform vec2 pedShineScale;
+    // A map's glass, drawn forward, not in the G-buffer (see pedShine).
+    uniform bool glassForward;
     // A vehicle shader's shine: intensity factor, power factor, 1 for gta_vehicle_vehglass's forward draw (see
     // vehicleShine; GtaIVPcMaterials.VehicleShineOf).
     uniform vec3 vehicleSpec;
@@ -33,6 +38,10 @@ const GameGlsl = Object.freeze({
     // (shadowPass) less the cascade's bias.
     uniform bool shadowOn; uniform highp sampler2D shadowMap; uniform vec3 shadowU; uniform vec3 shadowV; uniform vec3 shadowH;
     uniform vec4 shadowBox[4]; uniform vec3 viewForward; uniform float shadowRef; uniform bool shadowPass; uniform float shadowBias;
+    // The lamps' shadows (see lampShadow, lampShadowTarget): their maps, each light's in it (its slot, -1 none),
+    // whether they are there to read; drawing into a lamp's (lampShadowPass) its place and radius.
+    uniform highp sampler2D lampShadowMap; uniform float sceneLightShadow[40]; uniform bool lampShadowOn;
+    uniform bool lampShadowPass; uniform vec3 lampShadowAt; uniform float lampShadowRange;
   `,
   // The vertex shader drawing into the sun's shadow map (sets gl_Position from p).
   shadowVertex: `
@@ -49,6 +58,31 @@ const GameGlsl = Object.freeze({
         // cascade's bias (the game's cascades' fourth constant is that much lower than the sun pass's).
         float stored0 = dot(vPosition, shadowH) - shadowRef - shadowBias;
         outColor = vec4(stored0, stored0, 0.0, 1.0);
+        outLight = vec4(0.0);
+        return;
+  `,
+  // The vertex shader drawing into a lamp's shadow map (sets gl_Position from p; lampShadowSide the half, -1 or 1).
+  lampShadowVertex: `
+        // As the game draws its peds into a lamp's map each frame (the TLAD trace GTAIV.3, frame 10210 from
+        // 102284236: VS 0x25afd220, gShadowMatrix c60-c63 = the lamp's dShadowMatrix, turning the world's x into the
+        // axis and y, -z across): of the point's offset L from the lamp in that frame and s its side's sign (the red
+        // half +1, the green -1: gShadowParam14151617.y 0 or 1), the place L.xy / (|L| - s L.z) - every point, also
+        // the other side's (stretched far out) -; the depth |L| / radius; on to the pixel s L.z / radius and
+        // |L| / radius (interpolated, not the pixel's own).
+        vec3 lampOff = p.xyz - lampShadowAt;
+        vec3 lampL = vec3(lampOff.y, -lampOff.z, lampOff.x);
+        float lampLen = length(lampL);
+        float lampSide = -lampShadowSide * lampL.z;
+        gl_Position = vec4(lampL.xy / max(lampLen - lampSide, 1e-6), lampLen / lampShadowRange * 2.0 - 1.0, 1.0);
+        vLampShadow = vec2(lampSide, lampLen) / lampShadowRange;
+  `,
+  // The fragment shader drawing into a lamp's shadow map (writes outColor and returns).
+  lampShadowFragment: `
+        // Its pixel shader (0x25d42d60): only what is on its side (s L.z / radius at most 0.01, else killed), the
+        // distance over the radius as it came from the vertices (in the trace's map 0.23 to 1 where a ped was, 1
+        // where nothing; see lampShadowTarget).
+        if (vLampShadow.x > 0.01) discard;
+        outColor = vec4(vLampShadow.y, 0.0, 0.0, 1.0);
         outLight = vec4(0.0);
         return;
   `,
@@ -100,7 +134,19 @@ const GameGlsl = Object.freeze({
       // gs2.y, gs2.z 1 - no day/night; GTAIV.exe 0xAF3A50, 0xAEFEB0), no light of their own nor any dimming.
       vec3 aroundLight = mix(ambientAbove, ambientBelow, clamp(0.5 - 0.5 * n.z, 0.0, 1.0));
       float sunLit = clamp((dot(n, sunDir) - 0.25) * 1.3333333, 0.0, 1.0);
-      float ao = clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0);
+      // (x the room's AmbientDownMult for what moves: peds, a cutscene's props; see TimeCycle.ActorAmbient)
+      float ao = clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0) * actorAmbient;
+      // A ped's rim on top, as its G-buffer pass writes it (gta_ped's PS 0x25ee22a0 in the TLAD trace GTAIV.3, Malc's
+      // body at 102287002, and gta_ped_skin's): of v.n (the camera's view to the point, the normal after the normal
+      // map) rim = 1 + 2 v.n where v.n <= 0 (else 1), x the vertex shader's gs2.w x green, at least 0; GB2.z (the AO
+      // the light passes read) = AO + rim², GB2.x (the shine, see pedShine) + 0.5 rim². Where the ped faces the
+      // camera nothing, towards its outline up to gs2.w x green: Malc's shirt brighter in patches (its green).
+      float pedRim = 0.0;
+      if (!baked && !vehicle) {
+        float viewN = dot(normalize(vPosition - eyeAt), n);
+        pedRim = max((viewN <= 0.0 ? 1.0 + 2.0 * viewN : 1.0) * PedRimScale * vColor.g, 0.0);
+        ao = clamp(ao + pedRim * pedRim, 0.0, 1.0);
+      }
       float sunShadow = outdoor ? gameSunShadow(vPosition) : 1.0;
       vec3 outside = aroundLight * ao + sunColor * sunLit * sunShadow;
   `,
@@ -115,11 +161,16 @@ const GameGlsl = Object.freeze({
       // surroundings from the game's map (mirroredAround), looked up along R + v x saturate(distance x 0.02)
       // (normalized), blurred by the power (lod 4 - 4 saturate(power x 512 x dReflectionParams.x), that 1 / 230 in
       // both traces).
+      // The map's surfaces with a specular map the same, by what their G-buffer passes write (gta_spec,
+      // gta_normal_spec, gta_spec_reflect program 14: GB2.x = 0.5 x dot(spec map, specMapIntMask) x
+      // specularColorFactor, GB2.y = sqrt(spec map alpha x specularFactor / 512), so the power spec map alpha x
+      // specularFactor; gta_default writes GB2.x 0, no shine): et01_ba's booth's chrome slot box (gta_spec_reflect)
+      // mirrors the sky as in the game's sun pass (TLAD trace GTAIV.4, call 145514802, the same program).
       vec3 pedShine = vec3(0.0);
-      if (outdoor && !baked && !vehicle && useSpecMap && useTexture) {
+      if (outdoor && !vehicle && useSpecMap && useTexture) {
         vec4 spec = texture(specTex, vUv);
-        float shineAmount = 0.25 * dot(spec.rgb, specMask) * specIntensity;
-        float power = spec.a * specPower * 0.75;
+        float shineAmount = (baked ? 0.5 : 0.25) * dot(spec.rgb, specMask) * specIntensity + 0.5 * pedRim * pedRim;
+        float power = spec.a * specPower * (baked ? 1.0 : 0.75);
         vec3 view = normalize(vPosition - eyeAt);
         vec3 mirroredDir = reflect(view, n);
         float fresnel = 0.75 * pow(1.0 - abs(dot(view, n)), 4.0) + 0.25;
@@ -127,12 +178,49 @@ const GameGlsl = Object.freeze({
         vec3 mapDir = normalize(mirroredDir + view * clamp(away * 0.02, 0.0, 1.0));
         vec3 skyLight = mirroredAround(mapDir, 4.0 - 4.0 * clamp(power / 230.0, 0.0, 1.0));
         float nearby = 1.0 - clamp(away * 0.01, 0.0, 1.0);
-        pedShine = 2.0 * shineAmount * (sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4) * 2.0 * pedShineScale.x
-                 + 10.0 * pedShineScale.y * ao * fresnel * skyLight * clamp(mapDir.z * 5.0, 0.0, 1.0) * nearby);
+        if (glassForward) {
+          // A map's glass instead by its own forward pass (gta_glass_spec program 20, the trace's booth panes from
+          // call 145517152): dot(spec map, specMapIntMask) x specularColorFactor x the sun x its shadow x
+          // (saturate(R.l) + 1e-4)^(spec map alpha x specularFactor + 1e-4) x gDirectionalLight.w; no mirrored
+          // surroundings (glass isn't in the G-buffer the sun pass reads).
+          pedShine = 2.0 * shineAmount * sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4) * pedShineScale.x;
+        } else {
+          pedShine = 2.0 * shineAmount * (sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4) * 2.0 * pedShineScale.x
+                   + 10.0 * pedShineScale.y * ao * fresnel * skyLight * clamp(mapDir.z * 5.0, 0.0, 1.0) * nearby
+                   // The lamps' and a cutscene's lights' shine (deferred_lighting program 26: 2 x GB2.x x it).
+                   + lampShine);
+        }
       }
   `,
   // Functions the shader calls (after its uniforms, before main).
   functions: `
+    // globalScalars2.w, the peds' rim strength (see outsideLight; 0.725 measured with x32dbg in GTA IV at 11:05,
+    // SUNNY; in the TLAD trace GTAIV.3 the constant isn't set again within a frame).
+    // gs2.w (0.725 at run time) would scale the ped's rim (see pedRim); off (0): as derived it puts a bright fringe on
+    // hair and outlines that the game's videos don't show (bc_3 Niko; 23.10.), the reading of the shader unconfirmed.
+    const float PedRimScale = 0.0;
+    // How much of a lamp reaches the point past its shadow (deferred_lighting.fxc program 35, the TLAD trace GTAIV.3
+    // draw 102287953): the point 0.1 m off along its normal, in the lamp's frame (see lampShadowVertex); its place in
+    // its half's map (red: the axis's negative side), four reads around it turned by a pixel's own angle
+    // (frac(vPos . (3, 4.272)) of a turn) at 0.75, 0.25, 0.5 and 1 x dShadowOffsetScale.z (0.0029), each kept in
+    // the half; lit where the stored distance is at least the point's (stored - distance x dShadowParam0123.w,
+    // -1 / radius, >= 0); the four's mean.
+    float lampShadow(float slot, vec3 at, float range, vec3 n) {
+      vec3 off = vPosition + n * 0.1 - at;
+      vec3 l = vec3(off.y, -off.z, off.x);
+      float len = length(l);
+      vec2 uv = l.xy / max(abs(l.z) + len, 1e-4) * 0.5 + 0.5;
+      float side = l.z <= 0.0 ? 0.0 : 1.0;
+      float turn = fract(dot(gl_FragCoord.xy - 0.5, vec2(3.0, 4.272)) * 0.159154937 + 0.5) * 6.28318548 - 3.14159274;
+      vec2 cs = vec2(cos(turn), sin(turn)) * 0.0029296875;
+      vec2 taps[4] = vec2[4](cs.yx * 0.75, -cs.yx * 0.25, vec2(-cs.x, cs.y) * 0.5, vec2(cs.x, -cs.y));
+      float lit = 0.0;
+      for (int k = 0; k < 4; k++) {
+        vec2 at2 = (clamp(uv + taps[k], 0.0, 0.999) + vec2(side, slot)) / vec2(2.0, ${LampShadowSlots}.0);
+        if (texture(lampShadowMap, at2).r - len / range >= 0.0) lit += 0.25;
+      }
+      return lit;
+    }
     // The picture as rage_postfx.fxc's tone mapping makes it of the light (the game's HDR x Exposure, the units
     // of this page's light outside): x = light x MidGrey / adapted luminance, L its luminance, the colour drawn
     // towards L (deSatContrastGamma.x), shifted (ColorShift, none at noon), x ColorCorrect x 2, x saturate(L)^
@@ -159,13 +247,17 @@ const GameGlsl = Object.freeze({
     // At noon the near fog grows to 17 % of its bright blue by FogStart (147 m). The far fog's colour (the game's
     // bottomSkyColour x SkyLightMult, from its sky's own values: not derived yet) here the haze's colour.
     vec3 gameToneUnmap(vec3 picture);
-    vec3 gameFog(vec3 light, float distance) {
+    // How much of the fog's colour at a distance.
+    float gameFogAmount(float distance) {
       float nearRamp = clamp(distance / fogParams.x, 0.0, 1.0);
       float farRamp = clamp((distance - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
       // (the + NearFogAmount only where FogStart is 0 or less: GTAIV.exe 0xAF3A50 sets globalFogParams.z to 0 otherwise)
-      float amount = mix(farRamp, nearRamp, fogParams.z) + (fogParams.x > 0.0 ? 0.0 : fogParams.z);
+      return mix(farRamp, nearRamp, fogParams.z) + (fogParams.x > 0.0 ? 0.0 : fogParams.z);
+    }
+    vec3 gameFog(vec3 light, float distance) {
+      float farRamp = clamp((distance - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
       vec3 colour = mix(fogNear, gameToneUnmap(hazeColor), farRamp);
-      return light + amount * (colour - light);
+      return light + gameFogAmount(distance) * (colour - light);
     }
     // Back from the picture to light (without a colour shift, as at noon; what was clipped stays at 1).
     vec3 gameToneUnmap(vec3 picture) {
@@ -499,8 +591,10 @@ const GameGlsl = Object.freeze({
   // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
   // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
   const DynamicSize = 100, DynamicSpacing = 2;
-  // How far from the camera floating litter is there (see drawMeshes).
-  const FloatingRadius = 30;
+  // How far from the camera floating litter is there (see drawMeshes): GTAIV.exe 0xC87760, 0.5 x the detail
+  // distance + 20 m, the detail distance (0x103F714, set by 0xAEBD70 from 0x59EEF0) its menu slider / 99 x 100 + 10;
+  // the reference videos' slider at 100: 75 m.
+  const FloatingRadius = 75;
 
   // Whether a point lies in a vehicle of the cast as it is now (with a margin of 30 cm): in its root bone's
   // space, inside the box of its meshes shown. A vehicle: an actor with a no-water plane (boats) or of
@@ -800,6 +894,34 @@ function shadowTarget() {
 // A16B16G16R16F with three smaller levels (512, 256, 128), each drawn from the one above by a pass of its own (its
 // shader not derived: here the mipmaps), and a depth; null where the browser can't draw into half floats. The game
 // binds it as ParabSampler (the sun pass) and EnvironmentSampler (vehglass).
+// The lamps' shadow maps as the game keeps them (the TLAD trace GTAIV.3, draw 102287887's PS_RESOURCE_14: a 4096 x 4096
+// G16R16F atlas of 1024 x 1024 a lamp, red its half on the axis's negative side, green the positive; the ceiling
+// lamp in Elizabeta's lounge holding only the peds there, 1 where nothing): here LampShadowSlots lamps one above the
+// other, each lamp's halves side by side at 1024, R32F, with a depth; null where the browser can't draw into floats.
+let lampShadowState = null;
+function lampShadowTarget() {
+  if (lampShadowState !== null) return lampShadowState || null;
+  const size = 1024;
+  if (!gl.getExtension("EXT_color_buffer_float") || gl.getParameter(gl.MAX_TEXTURE_SIZE) < size * LampShadowSlots) { lampShadowState = false; return null; }
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, size * 2, size * LampShadowSlots);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  const depth = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, size * 2, size * LampShadowSlots);
+  const frame = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+  if (!complete) { lampShadowState = false; return null; }
+  lampShadowState = { texture, frame, size };
+  return lampShadowState;
+}
+
 let parabolicMapState = null;
 function parabolicTarget() {
   if (parabolicMapState !== null) return parabolicMapState || null;
@@ -838,7 +960,7 @@ function gamePostShader(fragment) {
     uniform sampler2D picture; uniform sampler2D light; uniform sampler2D bloom;
     uniform vec2 texel; uniform vec2 direction;
     uniform float toneScale; uniform float toneSaturation; uniform vec3 toneCorrect; uniform vec4 toneShift;
-    uniform float toneGamma; uniform float bloomScale;
+    uniform float toneGamma; uniform float bloomScale; uniform float brightPass;
     const vec3 Luma = vec3(0.2125, 0.7154, 0.0721);
     vec3 unmap(vec3 p) {
       vec3 m = p / max(toneCorrect * 2.0, vec3(1e-4));
@@ -862,7 +984,7 @@ function gamePostShader(fragment) {
   gl.bindAttribLocation(p, 0, "corner");
   gl.linkProgram(p);
   const u = {};
-  for (const n of ["picture", "light", "bloom", "depth", "dof", "noise", "grain", "texel", "direction", "toneScale", "toneSaturation", "toneCorrect", "toneShift", "toneGamma", "bloomScale"]) u[n] = gl.getUniformLocation(p, n);
+  for (const n of ["picture", "light", "bloom", "depth", "dof", "noise", "grain", "texel", "direction", "toneScale", "toneSaturation", "toneCorrect", "toneShift", "toneGamma", "bloomScale", "brightPass"]) u[n] = gl.getUniformLocation(p, n);
   return { p, u };
 }
 
@@ -921,9 +1043,10 @@ function gamePostBegin(w, h) {
           // them (its luminance further from their mean than they spread); then lerp(point, their mean).
           float d = texture(depth, uv).r * 2.0 - 1.0;
           float z = 2.0 * dof.x * dof.y / (dof.y + dof.x - d * (dof.y - dof.x));
-          // x DOF_BLUR's z: misc.DOFBlurMultiplier of visualSettings.dat, its SD one (0.5; measured in the game
-          // with x32dbg at 0x930580: DOF_BLUR (0.5, 0, 0.5, 0)), so at most a quarter blurred.
-          float b = min(max(z - dof.z, 0.0) * 2.0, 1.0) * 0.5;
+          // x DOF_BLUR's z: misc.DOFBlurMultiplier of visualSettings.dat, its HD one (1): read with x32dbg at
+          // 0x930580 during a cutscene at the reference videos' settings (1600 x 900, 23.10.: DOF_BLUR (1, 0, 1, 0));
+          // an earlier read at other settings gave the SD one (0.5).
+          float b = min(max(z - dof.z, 0.0) * 2.0, 1.0) * 1.0;
           b *= b;
           vec3 s0 = lightAt(uv + texel * vec2(-0.5, -1.5)), s1 = lightAt(uv + texel * vec2(1.5, -0.5));
           vec3 s2 = lightAt(uv + texel * vec2(0.5, 1.5)), s3 = lightAt(uv + texel * vec2(-1.5, 0.5));
@@ -940,7 +1063,11 @@ function gamePostBegin(w, h) {
         // NoiseParams.z x 1.1, onto the light after the depth of field (here x Exposure: the page's light is the
         // game's x Exposure). grain: NoiseParams.x, .y, .z x Exposure.
         if (grain.z > 0.0) hdr += (texture(noise, fract(uv * vec2(3.2, 1.8) + grain.xy)).b - 0.5) * grain.z * 1.1;
-        vec3 x =(hdr + texture(bloom, uv).rgb * bloomScale) * toneScale;
+        // The bloom only above the bright pass (program 12: max(bloom x Exposure - ToneMapParams.x x adapted /
+        // MidGrey, 0) x ToneMapParams.z x 0.25, then all x MidGrey / adapted; here the light is x Exposure
+        // already, toneScale MidGrey / adapted): em_4's bloom 10 in TLAD's Elizabeta flat (et01_aa) stays on the
+        // lamps instead of lighting the whole room.
+        vec3 x = hdr * toneScale + max(texture(bloom, uv).rgb * toneScale - brightPass, 0.0) * bloomScale;
         float L = dot(x, Luma);
         vec3 c = mix(vec3(L), x, toneSaturation);
         float s = L * toneShift.w;
@@ -1005,6 +1132,7 @@ function gamePostUniforms(u) {
   gl.uniform4f(u.toneShift, shift[0], shift[1], shift[2], 1 / (shift[0] * 0.2125 + shift[1] * 0.7154 + shift[2] * 0.0721 + 0.001));
   gl.uniform1f(u.toneGamma, sky.gamma || 1);
   gl.uniform1f(u.bloomScale, (t.bloom ?? 0) * 0.25);
+  gl.uniform1f(u.brightPass, t.brightPass ?? 0);
   gl.uniform1i(u.picture, 0); gl.uniform1i(u.light, 1); gl.uniform1i(u.bloom, 2); gl.uniform1i(u.depth, 3); gl.uniform1i(u.noise, 4);
 }
 
@@ -1027,8 +1155,8 @@ function gameGrainTexture() {
 // null. GTAIV.exe: Cut_StartSection (0x9C9180) puts its post effects into the cutscene mode (+0x264), in which
 // FUN_005E16F0 makes DOF_PARAMS (0.5, far - near, 0.5, (near + far) / 2) from the camera clip's CameraDof
 // (near, far; measured with x32dbg) and the end of 0x930A80 DOF_BLUR (M, M x 0, M, 0), M the
-// misc.DOFBlurMultiplier of visualSettings.dat (measured: its SD one, 0.5): sharp to far, from half a metre
-// beyond a quarter blurred. Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game
+// misc.DOFBlurMultiplier of visualSettings.dat (its HD one, 1, at the reference videos' settings: x32dbg, 23.10.):
+// sharp to far, from half a metre beyond fully blurred. Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game
 // recorded) turns it off.
 function gamePostEnd(w, h, playing, depthOfField) {
   const post = gamePost;
