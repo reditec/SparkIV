@@ -11,8 +11,6 @@
     <Nullable>disable</Nullable>
     <!-- File, Directory, Path ... are also RageLib type names; implicit usings would make them ambiguous. -->
     <ImplicitUsings>disable</ImplicitUsings>
-    <!-- Properties\AssemblyInfo.cs still holds the assembly attributes. -->
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- The audio, texture and model views are WinForms/WPF until the WinUI app replaces them. -->
     <UseWindowsForms>true</UseWindowsForms>
@@ -25,13 +23,6 @@
     <EmbeddedResource Include="Audio\SoundBank\Hashes\Names.txt" />
     <EmbeddedResource Include="FileSystem\RPF\KnownFilenames.txt" />
     <EmbeddedResource Include="Scripting\Script\NativesList.txt" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="lib\ragezip.dll">
-      <Link>ragezip.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
 
   <ItemGroup>

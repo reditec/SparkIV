@@ -65,18 +65,10 @@ namespace RageLib.Scripting.Script
         byte[] encryptedData = br.ReadBytes(Header.CompressedSize);
         byte[] compressedData = DataUtil.Decrypt(encryptedData);
 
-        IntPtr handle = RageZip.InflateInit(compressedData, compressedData.Length);
-
-        code = new byte[Header.CodeSize];
-        RageZip.InflateProcess(handle, code, code.Length);
-
-        data1 = new byte[Header.LocalVarCount * 4];
-        RageZip.InflateProcess(handle, data1, data1.Length);
-
-        data2 = new byte[Header.GlobalVarCount * 4];
-        RageZip.InflateProcess(handle, data2, data2.Length);
-
-        RageZip.InflateEnd(handle);
+        byte[][] parts = DataUtil.DecompressZlib(compressedData, Header.CodeSize, Header.LocalVarCount * 4, Header.GlobalVarCount * 4);
+        code = parts[0];
+        data1 = parts[1];
+        data2 = parts[2];
       }
       else
       {

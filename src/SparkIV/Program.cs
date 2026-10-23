@@ -1,7 +1,7 @@
 /**********************************************************************\
 
- RageLib
- Copyright (C) 2008  Arushan/Aru <oneforaru at gmail.com>
+ SparkIV
+ Copyright (C) 2026  reditec
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -18,12 +18,22 @@
 
 \**********************************************************************/
 
-namespace RageLib.Models.Model3DViewer
+using System;
+using Velopack;
+
+namespace SparkIV.WinUI
 {
-  public enum RenderMode
+  public static class Program
   {
-    Solid,
-    Wireframe,
-    SolidNormals,
+    /// <summary>
+    /// The installer and the updater start SparkIV with their own arguments (install, update, uninstall);
+    /// Velopack handles those first and exits. Otherwise the app starts as XAML would start it.
+    /// </summary>
+    [STAThread]
+    static void Main(string[] args)
+    {
+      VelopackApp.Build().Run();
+      XamlGeneratedProgram.XamlGeneratedMain();
+    }
   }
 }

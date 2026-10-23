@@ -20,7 +20,7 @@
 
 using System;
 using System.Runtime.InteropServices;
-using WaveLib;
+using RageLib.Audio.Playback;
 
 namespace RageLib.Audio
 {

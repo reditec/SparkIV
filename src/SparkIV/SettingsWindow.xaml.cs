@@ -1,3 +1,23 @@
+/**********************************************************************\
+
+ SparkIV
+ Copyright (C) 2026  reditec
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+\**********************************************************************/
+
 using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -8,7 +28,7 @@ namespace SparkIV.WinUI
 {
   /// <summary>
   /// SparkIV's settings: where the games are installed (one folder per game and platform), the backups,
-  /// how cutscenes are shown.
+  /// how cutscenes are shown, the update channel, and About (version, license, notices).
   /// </summary>
   public sealed partial class SettingsWindow : Window
   {
@@ -22,7 +42,7 @@ namespace SparkIV.WinUI
       Root.Loaded += (sender, args) => TitleBarColors.Apply(this, Root);
       Root.ActualThemeChanged += (sender, args) => TitleBarColors.Apply(this, Root);
 
-      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "GTAIV.ico");
+      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "SparkIV.ico");
       if (System.IO.File.Exists(icon))
       {
         AppWindow.SetIcon(icon);
@@ -38,10 +58,80 @@ namespace SparkIV.WinUI
       }
       ShowBackupFolder();
       SeeThroughSwitch.IsOn = AppSettings.CutsceneSeeThroughLikeGame;
+      VersionText.Text = "Installed: SparkIV " + Updates.CurrentVersion;
+      ChannelBox.SelectedIndex = (int)Updates.Channel;
+      AboutVersionText.Text = "SparkIV " + Updates.CurrentVersion;
     }
+
+    #region About
+
+    private const string SourceUrl = "https://github.com/reditec/SparkIV";
+
+    private static string LicenseFile(string name) => System.IO.Path.Combine(AppContext.BaseDirectory, name);
+
+    private async void ShowLicense_Click(object sender, RoutedEventArgs e) =>
+      await ShowTextAsync("License", LicenseFile("LICENSE.txt"), null);
+
+    // The notices name further license files (.NET, Windows App SDK, WebView2), too long to show here; they are in the folder.
+    private async void ShowNotices_Click(object sender, RoutedEventArgs e) =>
+      await ShowTextAsync("Third-party notices", LicenseFile(@"licenses\THIRD-PARTY-NOTICES.txt"), LicenseFile("licenses"));
+
+    private void OpenSource_Click(object sender, RoutedEventArgs e) =>
+      System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(SourceUrl) { UseShellExecute = true });
+
+    private async System.Threading.Tasks.Task ShowTextAsync(string title, string file, string? folder)
+    {
+      string text;
+      try
+      {
+        text = System.IO.File.ReadAllText(file);
+      }
+      catch (Exception ex)
+      {
+        text = "Could not read " + file + ": " + ex.Message + "\n\nThe license texts are also at " + SourceUrl + ".";
+      }
+
+      var dialog = new ContentDialog
+      {
+        XamlRoot = Root.XamlRoot,
+        Title = title,
+        CloseButtonText = "Close",
+        DefaultButton = ContentDialogButton.Close,
+        Content = new ScrollViewer
+        {
+          MaxHeight = 420,
+          Content = new TextBlock
+          {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 12,
+          },
+        },
+      };
+      if (folder != null)
+      {
+        dialog.PrimaryButtonText = "Open folder";
+        dialog.PrimaryButtonClick += (s, args) =>
+          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true });
+      }
+      await dialog.ShowAsync();
+    }
+
+    #endregion
 
     private void SeeThroughSwitch_Toggled(object sender, RoutedEventArgs e) =>
       AppSettings.CutsceneSeeThroughLikeGame = SeeThroughSwitch.IsOn;
+
+    private void ChannelBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+      // Only a choice by the user is stored; the default follows the running version.
+      if (ChannelBox.SelectedItem is ComboBoxItem { Tag: string tag } && Enum.TryParse(tag, out UpdateChannel channel) && channel != Updates.Channel)
+      {
+        Updates.Channel = channel;
+      }
+    }
 
     #region Backups
 

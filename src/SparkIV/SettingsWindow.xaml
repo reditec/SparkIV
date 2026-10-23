@@ -1,4 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  SparkIV
+  Copyright (C) 2026  reditec
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-->
 <Window
     x:Class="SparkIV.WinUI.SettingsWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -30,6 +47,12 @@
             </SelectorBarItem>
             <SelectorBarItem Text="Cutscenes" Tag="CutscenesPage">
                 <SelectorBarItem.Icon><FontIcon Glyph="&#xE714;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
+            <SelectorBarItem Text="Updates" Tag="UpdatesPage">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE895;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
+            <SelectorBarItem Text="About" Tag="AboutPage">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE946;" /></SelectorBarItem.Icon>
             </SelectorBarItem>
         </SelectorBar>
 
@@ -95,6 +118,56 @@
                                           OnContent="" OffContent="" MinWidth="0" Toggled="SeeThroughSwitch_Toggled" />
                         </Grid>
                     </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="UpdatesPage" Padding="24,8,24,24" Visibility="Collapsed">
+                <StackPanel Spacing="4">
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="At start, SparkIV checks GitHub for a newer version in the chosen channel and offers to install it. A channel doesn't go back to an older version: after switching from Alpha to Release, the next update is the first release newer than the version installed." />
+                    <Border Padding="16,12,16,12" CornerRadius="4" BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Update channel" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock x:Name="VersionText" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox x:Name="ChannelBox" Grid.Column="1" VerticalAlignment="Center" MinWidth="240"
+                                      SelectionChanged="ChannelBox_SelectionChanged">
+                                <ComboBoxItem Content="Alpha: alpha, beta and releases" Tag="Alpha" />
+                                <ComboBoxItem Content="Beta: beta and releases" Tag="Beta" />
+                                <ComboBoxItem Content="Release: releases only" Tag="Release" />
+                            </ComboBox>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="AboutPage" Padding="24,8,24,24" Visibility="Collapsed">
+                <StackPanel Spacing="12">
+                    <StackPanel Spacing="2">
+                        <TextBlock x:Name="AboutVersionText" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="A file browser, viewer and editor for Grand Theft Auto IV and Episodes from Liberty City (PC)." />
+                    </StackPanel>
+                    <TextBlock TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                               Text="Copyright (C) 2026 reditec. Based on SparkIV and RageLib by aru (2008–2009), continued by Ahmed Walid (ahmed605) and Silent Spud." />
+                    <TextBlock TextWrapping="Wrap"
+                               Text="SparkIV is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE." />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="License (GPLv3)" Click="ShowLicense_Click" />
+                        <Button Content="Third-party notices" Click="ShowNotices_Click" />
+                        <Button Content="Source code" Click="OpenSource_Click" />
+                    </StackPanel>
+                    <TextBlock TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="SparkIV is an unofficial fan project. It is not affiliated with, endorsed or sponsored by Rockstar Games or Take-Two Interactive. Grand Theft Auto, GTA and related names are trademarks of Take-Two Interactive Software, Inc." />
                 </StackPanel>
             </ScrollViewer>
         </Grid>

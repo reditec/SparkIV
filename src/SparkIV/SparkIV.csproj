@@ -7,7 +7,7 @@
     <RootNamespace>SparkIV.WinUI</RootNamespace>
     <AssemblyName>SparkIV</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>..\GTAIV.ico</ApplicationIcon>
+    <ApplicationIcon>..\SparkIV.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -15,19 +15,27 @@
     <!-- A plain exe: no MSIX package, and the Windows App SDK runtime ships next to it. -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Builds SparkIV.pri with the compiled XAML; without it dotnet publish leaves both out and the app can't start. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <!-- File and Directory are also RageLib type names. -->
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Program.cs is the entry point, so the updater (Velopack) runs before the app starts. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\GTAIV.ico" Link="GTAIV.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\SparkIV.ico" Link="SparkIV.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The licenses ship with the program; Settings > About shows them. -->
+    <Content Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\licenses\*.txt" Link="licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <EmbeddedResource Include="Viewers\TextDocumentView.html" LogicalName="SparkIV.TextDocumentView.html" />
     <EmbeddedResource Include="Viewers\HexView.html" LogicalName="SparkIV.HexView.html" />
     <EmbeddedResource Include="Viewers\ModelView.html" LogicalName="SparkIV.ModelView.html" />
