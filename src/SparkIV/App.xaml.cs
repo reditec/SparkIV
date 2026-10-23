@@ -30,8 +30,7 @@ namespace SparkIV.WinUI
 
     public App()
     {
-      InitializeComponent();
-    }
+      InitializeComponent();    }
 
     /// <summary>
     /// Started with a file ("Open with" in Explorer): an archive opens in the main window, any other file

@@ -64,6 +64,13 @@ If there is a newer version it shows "Update available"; one click downloads it 
 - For testing, the environment variable `SPARKIV_UPDATE_SOURCE` names a local folder with packed releases
   (the output of `tools/release.ps1`) instead of GitHub.
 
+## Licenses in the program
+
+The build copies `LICENSE` (as `LICENSE.txt`) and the files in [`licenses/`](../licenses/) into the program folder;
+Settings → About shows the license and the third-party notices. When a shipped component is added or updated,
+update `licenses/THIRD-PARTY-NOTICES.txt` and, for the Microsoft components, copy the license files from their
+NuGet packages again.
+
 ## Release checklist
 
 1. Set `<Version>` in `src/Directory.Build.props`.

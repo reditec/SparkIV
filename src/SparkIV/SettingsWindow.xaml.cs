@@ -28,7 +28,7 @@ namespace SparkIV.WinUI
 {
   /// <summary>
   /// SparkIV's settings: where the games are installed (one folder per game and platform), the backups,
-  /// how cutscenes are shown, the update channel.
+  /// how cutscenes are shown, the update channel, and About (version, license, notices).
   /// </summary>
   public sealed partial class SettingsWindow : Window
   {
@@ -60,7 +60,66 @@ namespace SparkIV.WinUI
       SeeThroughSwitch.IsOn = AppSettings.CutsceneSeeThroughLikeGame;
       VersionText.Text = "Installed: SparkIV " + Updates.CurrentVersion;
       ChannelBox.SelectedIndex = (int)Updates.Channel;
+      AboutVersionText.Text = "SparkIV " + Updates.CurrentVersion;
     }
+
+    #region About
+
+    private const string SourceUrl = "https://github.com/reditec/SparkIV";
+
+    private static string LicenseFile(string name) => System.IO.Path.Combine(AppContext.BaseDirectory, name);
+
+    private async void ShowLicense_Click(object sender, RoutedEventArgs e) =>
+      await ShowTextAsync("License", LicenseFile("LICENSE.txt"), null);
+
+    // The notices name further license files (.NET, Windows App SDK, WebView2), too long to show here; they are in the folder.
+    private async void ShowNotices_Click(object sender, RoutedEventArgs e) =>
+      await ShowTextAsync("Third-party notices", LicenseFile(@"licenses\THIRD-PARTY-NOTICES.txt"), LicenseFile("licenses"));
+
+    private void OpenSource_Click(object sender, RoutedEventArgs e) =>
+      System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(SourceUrl) { UseShellExecute = true });
+
+    private async System.Threading.Tasks.Task ShowTextAsync(string title, string file, string? folder)
+    {
+      string text;
+      try
+      {
+        text = System.IO.File.ReadAllText(file);
+      }
+      catch (Exception ex)
+      {
+        text = "Could not read " + file + ": " + ex.Message + "\n\nThe license texts are also at " + SourceUrl + ".";
+      }
+
+      var dialog = new ContentDialog
+      {
+        XamlRoot = Root.XamlRoot,
+        Title = title,
+        CloseButtonText = "Close",
+        DefaultButton = ContentDialogButton.Close,
+        Content = new ScrollViewer
+        {
+          MaxHeight = 420,
+          Content = new TextBlock
+          {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 12,
+          },
+        },
+      };
+      if (folder != null)
+      {
+        dialog.PrimaryButtonText = "Open folder";
+        dialog.PrimaryButtonClick += (s, args) =>
+          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true });
+      }
+      await dialog.ShowAsync();
+    }
+
+    #endregion
 
     private void SeeThroughSwitch_Toggled(object sender, RoutedEventArgs e) =>
       AppSettings.CutsceneSeeThroughLikeGame = SeeThroughSwitch.IsOn;

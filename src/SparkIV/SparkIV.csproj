@@ -33,6 +33,9 @@
 
   <ItemGroup>
     <Content Include="..\GTAIV.ico" Link="GTAIV.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The licenses ship with the program; Settings > About shows them. -->
+    <Content Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\licenses\*.txt" Link="licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <EmbeddedResource Include="Viewers\TextDocumentView.html" LogicalName="SparkIV.TextDocumentView.html" />
     <EmbeddedResource Include="Viewers\HexView.html" LogicalName="SparkIV.HexView.html" />
     <EmbeddedResource Include="Viewers\ModelView.html" LogicalName="SparkIV.ModelView.html" />
