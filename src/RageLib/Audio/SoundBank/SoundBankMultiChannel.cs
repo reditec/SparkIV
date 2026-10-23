@@ -185,7 +185,7 @@ namespace RageLib.Audio.SoundBank
             }
 
             byte[] buffer = new byte[BlockSize];
-            soundBankStream.Read(buffer, 0, BlockSize);
+            soundBankStream.ReadAtLeast(buffer, BlockSize, throwOnEndOfStream: false);
 
             for (int j = 0; j < BlockSize; j++)
             {
@@ -216,7 +216,7 @@ namespace RageLib.Audio.SoundBank
             for (int j = 0; j < BlockSize / 2; j++)
             {
               byte[] b = new byte[2];
-              soundBankStream.Read(b, 0, 2);
+              soundBankStream.ReadAtLeast(b, 2, throwOnEndOfStream: false);
               block[j] = BitConverter.ToInt16(b, 0);
             }
 

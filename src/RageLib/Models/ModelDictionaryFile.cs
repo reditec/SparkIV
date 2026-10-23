@@ -51,9 +51,35 @@ namespace RageLib.Models
       get { return File.Data.Entries.Count; }
     }
 
+    /// <summary>The textures stored in the entries themselves: each entry may have a dictionary of its own (most have none).</summary>
+    public System.Collections.Generic.List<TextureFile> EmbeddedTextureFiles
+    {
+      get
+      {
+        var files = new System.Collections.Generic.List<TextureFile>();
+        foreach (var entry in File.Data.Entries)
+        {
+          if (entry.ShaderGroup != null && entry.ShaderGroup.TextureDictionary != null)
+          {
+            files.Add(entry.ShaderGroup.TextureDictionary);
+          }
+        }
+        return files;
+      }
+    }
+
     public Drawable GetDataModel(int modelIndex)
     {
       return new Drawable(File.Data.Entries[modelIndex]);
+    }
+
+    /// <summary>
+    /// The hash of the name of an entry (Jenkins one-at-a-time of the lower-case name, e.g. of "head_000_r");
+    /// the names themselves are not in the file.
+    /// </summary>
+    public uint GetNameHash(int modelIndex)
+    {
+      return File.Data.NameHashes[modelIndex];
     }
 
     #region Implementation of IDisposable

@@ -24,7 +24,7 @@ using WaveLib;
 
 namespace RageLib.Audio
 {
-  class AudioPlayer
+  public class AudioPlayer
   {
     private const int FramesPerBuffer = 4096;
     private const int BufferCount = 3;

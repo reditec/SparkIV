@@ -45,6 +45,10 @@ namespace RageLib.Models.Data
       {
         return new MaterialParamTexture(nameHash, obj as ShaderParamTexture);
       }
+      if (obj is ShaderParamVectorArray)
+      {
+        return new MaterialParamVectorArray(nameHash, obj as ShaderParamVectorArray);
+      }
       return null;
     }
   }

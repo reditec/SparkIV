@@ -28,9 +28,17 @@ namespace RageLib.Models.Data
     public string ShaderName { get; private set; }
     public Dictionary<uint, MaterialParam> Parameters { get; private set; }
 
+    /// <summary>The preset the material was made from (gta_spec_decal.sps for a gta_spec decal).</summary>
+    public string Preset { get; private set; }
+
+    /// <summary>How it is drawn: 0 opaque, 1 see-through, 2 decal, 3 cut out, 4 and 5 emissive.</summary>
+    public int DrawBucket { get; private set; }
+
     internal Material(ShaderFx info)
     {
       ShaderName = info.ShaderName;
+      Preset = info.ShaderSPS;
+      DrawBucket = info.DrawBucket;
 
       Parameters = new Dictionary<uint, MaterialParam>(info.ShaderParamCount);
       foreach (var data in info.ShaderParams)

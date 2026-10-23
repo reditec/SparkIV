@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="SparkIV.WinUI.Viewers.ViewerWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="AppTitleBar" Padding="12,0,0,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <FontIcon x:Name="TitleGlyph" FontSize="14" />
+                <TextBlock x:Name="TitleText" Style="{StaticResource CaptionTextBlockStyle}" />
+                <TextBlock x:Name="TitleDetail" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Grid>
+
+        <InfoBar x:Name="Info" Grid.Row="1" Margin="8,0,8,6" IsOpen="False" />
+
+        <Grid Grid.Row="2" Margin="8,0,8,8">
+            <ContentPresenter x:Name="ViewHost" />
+            <ProgressRing x:Name="Loading" IsActive="True" Width="40" Height="40" />
+        </Grid>
+    </Grid>
+</Window>

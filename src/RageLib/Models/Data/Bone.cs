@@ -29,8 +29,13 @@ namespace RageLib.Models.Data
     public string Name { get; private set; }
     public int Index { get; private set; }
 
+    /// <summary>The bone's tag, which animations refer to; not the same as its index.</summary>
+    public int Id { get; private set; }
+
+    // Vectors of four floats: the 4th (W) of a position or Euler rotation is padding and NaN in the files.
     public Vector4 Position { get; private set; }
     public Vector4 Rotation { get; private set; }
+    public Vector4 RotationQuaternion { get; private set; }
 
     public Vector4 AbsolutePosition { get; private set; }
     public Vector4 AbsoluteRotation { get; private set; }
@@ -42,9 +47,11 @@ namespace RageLib.Models.Data
       Parent = parent;
       Name = bone.Name;
       Index = bone.BoneIndex;
+      Id = bone.BoneID;
 
       Position = bone.Position;
       Rotation = bone.RotationEuler;
+      RotationQuaternion = bone.RotationQuaternion;
 
       AbsolutePosition = bone.AbsolutePosition;
       AbsoluteRotation = bone.AbsoluteRotationEuler;

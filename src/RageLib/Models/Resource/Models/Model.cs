@@ -35,6 +35,17 @@ namespace RageLib.Models.Resource.Models
     public SimpleArray<Vector4> UnknownVectors { get; private set; }
     public SimpleArray<ushort> ShaderMappings { get; private set; }
 
+    // What the bytes hold, worked out from map objects with moving parts (e1_lost_g_vent1: the frame on
+    // bone 0, the fan on bone 1) and skinned ones (flags, pigeons): Unknown1 is the number of bones a
+    // skinned part uses (low byte) and 1 when skinned (high byte); Unknown2's high byte the bone a part
+    // that isn't skinned hangs on; Unknown3's high byte 1 when skinned; Unknown4 the number of geometries.
+
+    /// <summary>The bone (index in the skeleton) this part moves with when it isn't skinned.</summary>
+    public int BoneIndex => Unknown2 >> 8;
+
+    /// <summary>Whether the part's vertices carry their own bones and weights.</summary>
+    public bool IsSkinned => (Unknown3 >> 8) != 0;
+
     #region Implementation of IFileAccess
 
     public new void Read(BinaryReader br)

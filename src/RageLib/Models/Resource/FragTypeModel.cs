@@ -29,9 +29,26 @@ namespace RageLib.Models.Resource
   // gtaFragType
   internal class FragTypeModel : IFileAccess, IDataReader, IEmbeddedResourceReader, IDisposable
   {
+    // fragTypeChild: a part of the fragment that can break off (door, bonnet, wheel ...), at a bone of the
+    // skeleton. Only some have a model of their own; a vehicle's wheel is one child's model the game puts
+    // at every wheel bone.
     internal class FragTypeChild : IFileAccess
     {
       public DrawableModel Drawable { get; set; }
+
+      public float PristineMass { get; private set; }
+      public float DamagedMass { get; private set; }
+      public ushort GroupIndex { get; private set; }
+
+      /// <summary>The index of the bone in the skeleton of the fragment's drawable.</summary>
+      public ushort BoneIndex { get; private set; }
+
+      /// <summary>
+      /// Two 4x4 matrices, row by row with the translation in the last row. The translation of the first is
+      /// the negated position of the bone (from the fragment into the bone).
+      /// </summary>
+      public float[] Matrix1 { get; private set; }
+      public float[] Matrix2 { get; private set; }
 
       public FragTypeChild(BinaryReader br)
       {
@@ -42,7 +59,13 @@ namespace RageLib.Models.Resource
 
       public void Read(BinaryReader br)
       {
-        br.BaseStream.Seek(0x90, SeekOrigin.Current);
+        br.ReadUInt32();  // vtable
+        PristineMass = br.ReadSingle();
+        DamagedMass = br.ReadSingle();
+        GroupIndex = br.ReadUInt16();
+        BoneIndex = br.ReadUInt16();
+        Matrix1 = ReadMatrix(br);
+        Matrix2 = ReadMatrix(br);
 
         uint offset = ResourceUtil.ReadOffset(br);
         if (offset != 0)
@@ -60,6 +83,16 @@ namespace RageLib.Models.Resource
       }
 
       #endregion
+
+      private static float[] ReadMatrix(BinaryReader br)
+      {
+        var matrix = new float[16];
+        for (int i = 0; i < 16; i++)
+        {
+          matrix[i] = br.ReadSingle();
+        }
+        return matrix;
+      }
     }
 
     public DrawableModel Drawable { get; set; }

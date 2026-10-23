@@ -35,6 +35,11 @@ namespace RageLib.Models.Resource.Shaders
         case ParamType.Matrix:
           return new ShaderParamMatrix();
         default:
+          // The type byte is the number of vectors (gta_trees: 8 and 16).
+          if ((int)type > 1)
+          {
+            return new ShaderParamVectorArray((int)type);
+          }
           throw new ArgumentOutOfRangeException("type");
       }
     }

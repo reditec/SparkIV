@@ -39,9 +39,12 @@ namespace RageLib.Models.Resource.Models
     public uint FaceCount { get; private set; }
     public ushort VertexCount { get; private set; }
     public ushort PrimitiveType { get; private set; }   // RAGE_PRIMITIVE_TYPE
-    private uint Unknown9 { get; set; }
+    // The bones a skinned mesh's vertices refer to: its blend index i means skeleton bone BoneMapping[i]
+    // (a mesh uses a few of the skeleton's bones, e.g. 25 of a ped's 90).
+    private uint BoneMappingOffset { get; set; }
     public ushort VertexStride { get; private set; }
-    private ushort Unknown10 { get; set; }
+    private ushort BoneMappingCount { get; set; }
+    public ushort[] BoneMapping { get; private set; }
     private uint Unknown11 { get; set; }
     private uint Unknown12 { get; set; }
     private uint Unknown13 { get; set; }
@@ -73,10 +76,10 @@ namespace RageLib.Models.Resource.Models
       VertexCount = br.ReadUInt16();
       PrimitiveType = br.ReadUInt16();
 
-      Unknown9 = br.ReadUInt32();
+      BoneMappingOffset = br.ReadUInt32();
 
       VertexStride = br.ReadUInt16();
-      Unknown10 = br.ReadUInt16();
+      BoneMappingCount = br.ReadUInt16();
 
       Unknown11 = br.ReadUInt32();
       Unknown12 = br.ReadUInt32();
@@ -89,6 +92,16 @@ namespace RageLib.Models.Resource.Models
 
       br.BaseStream.Seek(indexBuffersOffset, SeekOrigin.Begin);
       IndexBuffer = new IndexBuffer(br);
+
+      BoneMapping = new ushort[BoneMappingCount];
+      if (BoneMappingCount > 0 && (BoneMappingOffset & 0xF0000000) == 0x50000000)
+      {
+        br.BaseStream.Seek(BoneMappingOffset & 0x0FFFFFFF, SeekOrigin.Begin);
+        for (int i = 0; i < BoneMappingCount; i++)
+        {
+          BoneMapping[i] = br.ReadUInt16();
+        }
+      }
     }
 
     public new void Write(BinaryWriter bw)

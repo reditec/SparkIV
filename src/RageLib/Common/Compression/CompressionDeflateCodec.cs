@@ -41,7 +41,7 @@ namespace RageLib.Common.Compression
       var def = new Deflater(Deflater.DEFAULT_COMPRESSION, true);
 
       var inputData = new byte[source.Length - source.Position];
-      source.Read(inputData, 0, inputData.Length);
+      source.ReadAtLeast(inputData, inputData.Length, throwOnEndOfStream: false);
 
       var buffer = new byte[CopyBufferSize];
 

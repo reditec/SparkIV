@@ -1,0 +1,3120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: linear-gradient(#68788a, #22252a); }
+  body.black { background: #000; }
+  body.grey { background: #808080; }
+  body.white { background: #fff; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.moving { cursor: grabbing; }
+  #message { position: absolute; left: 0; right: 0; top: 45%; text-align: center; color: rgba(255, 255, 255, 0.8);
+             font: 14px "Segoe UI", sans-serif; }
+  /* A cutscene's fade to and from black. */
+  #fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="fade"></div>
+<div id="message"></div>
+<script>
+  "use strict";
+  // A small WebGL 2 renderer for the meshes of a model: textured, lit from the camera, Z up as in the game.
+  const canvas = document.getElementById("view");
+  const message = document.getElementById("message");
+  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, alpha: true, stencil: true });
+
+  const meshes = new Map();      // id → { vao, count, lines, lineCount, material, min, max }
+  const materials = new Map();   // id → { texture, glass, color }
+  let visible = new Set();
+  let showTextures = true;
+  let wireframe = false;
+  // The model's lights as markers: [{ vao, count, color, meshes }].
+  let lights = [];
+  let showLights = false;
+
+  // --- Camera: orbits around a target ---
+  const camera = { yaw: -0.6, pitch: 0.35, distance: 5, target: [0, 0, 0], fov: 45 * Math.PI / 180 };
+  let sceneRadius = 1;
+  let backgroundReach = 0;
+
+  if (!gl) {
+    message.textContent = "This view needs WebGL 2, which this computer's graphics don't offer.";
+  }
+
+  // Skinned meshes (peds) move with up to four bones per vertex: the bones' matrices (from rest pose to
+  // the pose shown) are in a float texture, four texels (columns) per bone.
+  const VERTEX = `#version 300 es
+    in vec3 position; in vec3 normal; in vec2 uv; in vec4 skinBones; in vec4 skinWeights;
+    // Terrain: the coordinates of layers 1 and 2, of layer 3, how much each layer covers, the vertex colour.
+    in vec4 layerUvA; in vec2 layerUvB; in vec4 layerWeights; in vec3 vertexColor;
+    // See-through materials and decals: how much of each vertex shows.
+    in float vertexAlpha;
+    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor; out float vAlpha;
+    uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
+    // A texture moved by an animation (map objects: signs, screens, flames): its texture matrix's two rows.
+    uniform bool uvAnim; uniform vec3 uvRow0; uniform vec3 uvRow1;
+    // A light's marker: made round the origin, put at the light, as large as the camera is far (the same
+    // size on screen however near).
+    uniform bool marker; uniform vec3 markerAt; uniform float markerScale;
+    out vec3 vNormal; out vec2 vUv; out vec3 vPosition;
+    // The sea near the camera (waterGrid): a grid of points 2 m apart over the window of the game's sea
+    // (dynamicMin, 200 m), lifted to the water's level and its height there (dynamicWater), faded out over
+    // the window's last 10 m as the game does (none at its edge, a tenth more for each metre in). maskPass:
+    // the water's quads drawn from above into the window (where the grid shows; see drawWaterMask).
+    uniform bool waterGrid; uniform bool maskPass; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform float gridLevel;
+    // Floating litter (procedural objects that float): lifted with the sea's height at its centre.
+    uniform bool floating; uniform vec2 floatAt;
+    uniform float zShift;
+    // The mirrored surroundings' map (parabolic: the sky above parabolicAt, the game's file: parabolicPass).
+    uniform bool parabolic; uniform vec3 parabolicAt;
+    // The sun's shadow map (the game's file: shadowVertex, sunShadowCascades): drawing into a cascade of it.
+    uniform bool shadowPass; uniform vec3 shadowU; uniform vec3 shadowV; uniform vec3 shadowH; uniform vec4 shadowCascade; uniform float shadowRef;
+    // A lamp's shadow map (the game's file: lampShadowVertex, lampShadowTarget): drawing into one half of it.
+    uniform bool lampShadowPass; uniform vec3 lampShadowAt; uniform float lampShadowRange; uniform float lampShadowSide;
+    out vec2 vLampShadow;
+    float seaEdge(vec2 inWindow) {
+      float metres = floor(min(min(inWindow.x, 200.0 - inWindow.x), min(inWindow.y, 200.0 - inWindow.y)) + 0.001);
+      return metres < 1.0 ? 0.0 : metres < 10.0 ? (metres + 1.0) * 0.1 : 1.0;
+    }
+    mat4 bone(float i) {
+      int b = int(i);
+      return mat4(texelFetch(boneMatrices, ivec2(0, b), 0), texelFetch(boneMatrices, ivec2(1, b), 0),
+                  texelFetch(boneMatrices, ivec2(2, b), 0), texelFetch(boneMatrices, ivec2(3, b), 0));
+    }
+    void main() {
+      vec4 p = marker ? vec4(markerAt + position * markerScale, 1.0) : vec4(position, 1.0);
+      vLampShadow = vec2(0.0);
+      vec3 n = normal;
+      if (skinned) {
+        mat4 m = bone(skinBones.x) * skinWeights.x + bone(skinBones.y) * skinWeights.y +
+                 bone(skinBones.z) * skinWeights.z + bone(skinBones.w) * skinWeights.w;
+        p = m * p;
+        n = mat3(m) * n;
+      }
+      if (waterGrid) {
+        vec2 at = dynamicMin + position.xy;
+        p = vec4(at, gridLevel + textureLod(dynamicWater, at / 200.0 + 0.005, 0.0).r * seaEdge(position.xy), 1.0);
+      }
+      if (floating) p.z += textureLod(dynamicWater, floatAt / 200.0 + 0.005, 0.0).r * seaEdge(floatAt - dynamicMin);
+      vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
+      // An emissive's glow drawn on its own (glowOnly), pushed back as the game's (its vertex shader's zShift,
+      // added to the clip depth: 0 to w there, -w to w here, so twice).
+      gl_Position.z += 2.0 * zShift;
+      if (parabolic) { ${GameGlsl.parabolicVertex} }
+      if (shadowPass) { ${GameGlsl.shadowVertex} }
+      if (lampShadowPass) { ${GameGlsl.lampShadowVertex} }
+      if (maskPass) gl_Position = vec4((p.xy - dynamicMin) / 100.0 - 1.0, 0.0, 1.0);
+      vUv = uvAnim ? vec2(dot(uvRow0, vec3(uv, 1.0)), dot(uvRow1, vec3(uv, 1.0))) : uv;
+      vUv1 = layerUvA.xy; vUv2 = layerUvA.zw; vUv3 = layerUvB; vWeights = layerWeights; vColor = vertexColor; vAlpha = vertexAlpha;
+    }`;
+
+  const FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
+    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha;
+    in vec2 vLampShadow;
+    uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
+    // A vehicle's paint on its texture (its shader: texture x matDiffuseColor, the vehicle's colour); white else.
+    uniform vec3 paint;
+    // A vehicle's shader (as the game's gta_vehicle_*): its dirt (texture's red x the vehicle's dirt mixes the
+    // colour towards dirtColor), its shine and mirrored surroundings by the shader (see the game's file:
+    // vehicleShine, vehicleSpec).
+    uniform bool vehicle; uniform bool useDirt; uniform sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
+    uniform bool useEnv; uniform sampler2D envTex;
+    // gta_vehicle_paint2's second shine: its colour (the vehicle's third) and the exponent's and strength's
+    // factors (see CutsceneMessages.Scene); none while the strength's is 0.
+    uniform vec3 spec2Color; uniform vec2 spec2Scale;    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout; uniform bool stipple;
+    // Where the camera is (the side of a surface it sees is the one toward it, point by point).
+    uniform vec3 eyeAt;
+    // See-through by the texture's alpha (the see-through and decal buckets).
+    uniform bool textureAlpha;
+    // A dirt decal (gta_decal_dirt): the texture's channels in dirtMask say how much shows, the colour is the vertices'.
+    uniform bool dirtDecal; uniform vec3 dirtMask;
+    // A map object in its place (a cutscene's location): lit mostly by the light baked into its vertex colours
+    // (red: as the game's shaders pass it on to the lighting), the view's own light only a little.
+    uniform bool baked;
+    // How bright the baked light is: the game's light round about indoors is dim (Bernie's flat, whose
+    // vertices hold 0.45 on average: the game's picture of bc_1's hall is 48 of 255 bright on average, at
+    // 0.55 the view's comes out alike), the lamps and the scene's lights do the rest.
+    const float BakedLight = 0.44;
+    // The actors' light round about while a location is shown (the rest is the cutscene's lights).
+    const float ActorAround = 0.3;
+    // A cutscene with its location: graded a little like the game's picture indoors (warmer, less saturated).
+    uniform bool grade;
+    // A cutscene's own lights and its location's lamps (up to 40), three vec4s each (few uniform slots, so
+    // all the lamps of a flat fit): place and range; the way it shines and the cosine of half its cone (-1:
+    // all round); colour times strength and a lamp's cone scale (for a cutscene's own light, no inner angle
+    // known: -(its room + 2), so -1 outside any room).
+    uniform bool forwardLit; uniform float actorAmbient;
+    uniform int sceneLights; uniform vec4 sceneLightAt[40]; uniform vec4 sceneLightDir[40]; uniform vec4 sceneLightColor[40];
+    // The interior room of what is drawn (-1: none). A cutscene's light lights only what is in its own room,
+    // as the game's do (bc_1: the fill light in Bernie's living room lit the hall outside his door through the
+    // wall; the walls of the flat, in none of its rooms, aren't lit by them at all).
+    uniform int meshRoom;
+    // Glowing materials (lamp shades, signs): at full brightness.
+    uniform bool emissive;
+    // gta_ped_skin's light through the skin: SubColor, and SubScatWrap, SubScatWidth (width 0: none).
+    uniform vec3 subColor; uniform vec2 subScatter;
+    // gta_emissivestrong: texture x vertex colour x its emissiveMultiplier (0: the texture as it is).
+    uniform float emissiveScale; uniform float emissiveGlow; uniform bool glowOnly;
+    // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
+    // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
+    uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
+    uniform bool useSpecMap; uniform sampler2D specTex; uniform vec3 specMask; uniform float specPower; uniform float specIntensity;
+    // The normal map's direction turned into the surface: the surface's directions of u and v from how
+    // position and texture coordinates change across the screen (the meshes carry no tangents we read).
+    vec3 bumped(vec3 n, vec3 p, vec2 uv) {
+      vec3 m = texture(normalTex, uv).xyz * 2.0 - 1.0;
+      m.xy *= bumpiness;
+      m.y = -m.y;
+      vec3 dp1 = dFdx(p), dp2 = dFdy(p);
+      vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+      vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
+      vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+      vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+      float scale = inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
+      return normalize(mat3(t * scale, b * scale, n) * m);
+    }
+    // Terrain: how many layers (1 for anything else), their textures, and which of them are there.
+    uniform int layers; uniform sampler2D tex1; uniform sampler2D tex2; uniform sampler2D tex3; uniform vec3 layerOn;
+    // A cutscene outside (its location in no room): lit by the sun and the sky as the game's timecyc.dat has
+    // them at the time and weather, hazy with distance from where its fog starts to how far it draws, the
+    // water the sky's colour the flatter it is seen.
+    uniform bool outdoor; uniform vec3 sunDir; uniform vec3 sunColor; uniform vec3 ambientAbove; uniform vec3 ambientBelow;
+    uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
+    // The scene mirrored in the water (drawn first into reflectTex, what lies below clipBelow left out).
+    uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
+    uniform bool water; uniform bool waterWaves; uniform sampler2D waterSim; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform vec3 waterColor;
+    // The game's sea round the camera (see the vertex shader): drawn as its grid where the water's quads are
+    // (waterMask), the flat quads left out there.
+    uniform bool waterGrid; uniform bool maskPass; uniform bool seaOn; uniform sampler2D waterMask; uniform vec3 skyColor; uniform vec3 skyTopColor;
+    // How far the cutscene's camera sees (0: no limit), see drawReach below.
+    uniform float drawReach;
+    ${GameGlsl.uniforms}
+    layout(location = 0) out vec4 outColor;
+    layout(location = 1) out vec4 outLight;
+    ${GameGlsl.functions}
+    void main() {
+      if (maskPass) { outColor = vec4(1.0); return; }
+      if (vPosition.z < clipBelow) discard;
+      // Beyond the cutscene's draw distance nothing (its [DRAW_DISTANCE] is its camera's far clip, GTAIV.exe
+      // 0xD53280): cut off where it lies, not only whole objects (bc_3, section 3: the bridge's far end against
+      // the sky past 89 m). The water left as it was (the sky draws none below the horizon here yet).
+      if (drawReach > 0.0 && !water && !waterGrid && !shadowPass && !lampShadowPass && !parabolic && length(vPosition - eyeAt) > drawReach) discard;
+      // Lines have no light of their own: none in the light (its alpha 0), so the post effects take their colour
+      // from the picture (lightAt), else the light of the surface behind them showed instead.
+      if (lines) { outColor = vec4(color, 1.0); outLight = vec4(0.0); return; }
+      if (water && seaOn) {
+        vec2 q = (vPosition.xy - dynamicMin) / 200.0;
+        bool inside = q.x > 0.0 && q.y > 0.0 && q.x < 1.0 && q.y < 1.0;
+        float isWater = inside ? texture(waterMask, q).r : 0.0;
+        if (waterGrid ? isWater < 0.5 : isWater >= 0.5) discard;
+      }
+      vec4 base = useTexture ? texture(tex, vUv) * vec4(paint, 1.0) : vec4(color, 1.0);
+      if (vehicle) base.rgb *= vColor;
+      float dirtAmount = 0.0;
+      if (vehicle && useDirt && dirtLevel > 0.0) {
+        float dirt = texture(dirtTex, vUv).r;
+        dirtAmount = dirt * dirtLevel;
+        if (dirt > 0.0) base.rgb = mix(base.rgb, dirtColor, dirtAmount);
+      }
+      if (layers > 1) {
+        // Each layer over the ones below as far as it covers, masked by its own alpha (scrub in tufts over
+        // the sand), as the game's gta_terrain_va_*lyr pixel shader does: lrp(c, layer, layer.a * weight).
+        // The vertex colour doesn't tint them: in the game it only dims the light from around (below).
+        if (useTexture && layerOn.x > 0.5) { vec4 l = texture(tex1, vUv1); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.y, 0.0, 1.0)); }
+        if (useTexture && layers > 2 && layerOn.y > 0.5) { vec4 l = texture(tex2, vUv2); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.z, 0.0, 1.0)); }
+        if (useTexture && layers > 3 && layerOn.z > 0.5) { vec4 l = texture(tex3, vUv3); base.rgb = mix(base.rgb, l.rgb, clamp(l.a * vWeights.w, 0.0, 1.0)); }
+        base.a = 1.0;
+      }
+      if (dirtDecal && useTexture) base = vec4(vColor, dot(base.rgb, dirtMask));
+      if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, hair)
+      // Without normals in the mesh, the face's own normal.
+      vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
+      // Drawn into the mirrored surroundings' map (the game's file: parabolicFragment), by the mesh's own normal.
+      if (parabolic) { vec3 n0 = n; ${GameGlsl.parabolicFragment} }
+      // Drawn into the sun's shadow map (the game's file: shadowFragment).
+      if (shadowPass) { ${GameGlsl.shadowFragment} }
+      // Drawn into a lamp's shadow map (the game's file: lampShadowFragment).
+      if (lampShadowPass) { ${GameGlsl.lampShadowFragment} }
+      // Both sides lit: the normal turned to the camera, then bent by the normal map.
+      if (dot(n, eyeAt - vPosition) < 0.0) n = -n;
+      // A map *_reflect shader's mirrored surroundings, added to its albedo before it is lit (GTA IV (PC):
+      // gta_spec_reflect's G-buffer pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120): its environment
+      // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the vertex's normal (the world's z up), x the
+      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower.
+      if (useEnv && useTexture) {
+        vec3 r = reflect(normalize(vPosition - eyeAt), n);
+        vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
+        base.rgb += texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
+      }
+      if (useNormalMap && useTexture) n = bumped(n, vPosition, vUv);
+      // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
+      // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
+      // from the side.
+      float around = layers > 1 ? vColor.r : 1.0;
+      // With a cutscene's location there is no light from the camera: the map by its baked light and its
+      // lamps, the actors by a little light round about and the cutscene's lights.
+      float shade = baked ? vColor.r * BakedLight
+                  : grade ? ActorAround
+                  : 0.35 * around + 0.65 * max(dot(n, light), 0.0);
+      // Outside: the light from around and the sun, as the game lights it (the game's file: outsideLight).
+      ${GameGlsl.outsideLight}
+      // A cutscene's lights on top: fading to nothing at their range, inside a spot's cone (soft at its edge).
+      // The view's own light dimmed while they are on, so they show (in the game they are much of the light).
+      vec3 lit = outdoor ? outside : vec3(sceneLights > 0 && !baked && !grade ? shade * 0.6 : shade);
+      // As the game's deferred light pass: a cutscene's lights (deferred_lighting.fxc programs 27 to 29) as program
+      // 26, its shine 2 x GB2.x x saturate(L.R)^(GB2.y² x 512) on top of the lit albedo (lampShine, see pedShine for
+      // what GB2.x and .y are by the shader); the location's lamps by programs 30 to 32 (see below).
+      vec3 lampMirrored = reflect(normalize(vPosition - eyeAt), n);
+      vec3 lampShine = vec3(0.0);
+      float lampPower = 0.0;
+      if (outdoor && !vehicle && useSpecMap && useTexture) lampPower = texture(specTex, vUv).a * specPower * (baked ? 1.0 : 0.75);
+      for (int i = 0; i < 40; i++) {
+        if (i >= sceneLights) break;
+        // A cutscene's light only on the peds, whatever room it and they stand in: its pass (deferred_lighting.fxc,
+        // PS 0x25d41500) lights only where the G-buffer's stencil marks a ped. Inside (TLAD trace GTAIV.3, et01_aa
+        // frame 10210) its five lights add nothing to the walls, the curtain or Elizabeta's earrings csElizEarRing,
+        // +2.4 to Malc's arm; outside the same (GTAIV.4, et01_ba frame 9350: BoothLight_0 adds +1 to the toll
+        // keeper's face, nothing to his booth); and from the next room (et01_aa's FillLight1_3, 1.2 m behind the
+        // camera behind the wall) it is what lights the peds in front of the camera in the game's video.
+        float marked = sceneLightColor[i].w;
+        if (marked < 0.0 && baked) continue;
+        vec3 l = sceneLightAt[i].xyz - vPosition;
+        // (A lamp that casts shadows sent with its range negative, see shadowLamp below.)
+        float range = abs(sceneLightAt[i].w);
+        bool shadowLamp = sceneLightAt[i].w < 0.0 && marked >= 0.0 && !forwardLit;
+        // Forward only the location's lamps reaching more than 4 m: GTAIV.exe's choice of an object's lights for
+        // its forward draw (0xAC5670) scores a light only when its radius > 4.0 (0xABD8A0, 0xFE8AB8), and leaves
+        // out a cutscene's (flag 0x80). Elizabeta's sheer curtain: the ceiling lamp (5.2 m) and the spot (5 m),
+        // not the table lamps (2 to 3.5 m).
+        if (forwardLit && (marked < 0.0 || range <= 4.0)) continue;
+        float d = length(l);
+        if (d >= range || d < 1e-4) continue;
+        l /= d;
+        ${GameGlsl.lightFalloff}
+        float spot = 1.0;
+        float cone = sceneLightDir[i].w;
+        if (cone > -1.0) {
+          float c = dot(-l, sceneLightDir[i].xyz);
+          float scale = sceneLightColor[i].w;
+          // (A cutscene's own light, its scale the room it is in: from the outer angle to the inner, half of it.)
+          if (scale < 0.0) scale = 1.0 / max(cos(acos(cone) * 0.5) - cone, 1e-3);
+          spot = clamp((c - cone) * scale, 0.0, 1.0);
+        }
+        // A lamp casting shadows (its 2dfx flag 0x8000 and its object's instance flag 0x100, see
+        // CutsceneLocation.LightsMessage) the game lights by program 35 (the TLAD trace GTAIV.3's ceiling lamp in
+        // Elizabeta's lounge, draw 102287953): reaching 1.5 (a² - 1/3), facing it saturate(1.5 (n.l - 1/3)), no AO,
+        // no shine, x its shadow (the game's file: lampShadow; where its map wasn't drawn, none).
+        if (shadowLamp) {
+          float near = max(1.5 * (a * a - 1.0 / 3.0), 0.0);
+          float slot = sceneLightShadow[i];
+          float past = lampShadowOn && slot >= 0.0 ? lampShadow(slot, sceneLightAt[i].xyz, range, n) : 1.0;
+          lit += sceneLightColor[i].rgb * near * spot * clamp(1.5 * (dot(n, l) - 1.0 / 3.0), 0.0, 1.0) * past;
+          continue;
+        }
+        // The other lamps by programs 30 to 32 (31 where the stencil is 8 or more - an interior's objects and peds -,
+        // 32 elsewhere; the TLAD trace GTAIV.3's table lamps and spots in Elizabeta's lounge, PS 0x25d41c80 at
+        // 102287887, its code program 31's): reaching 1.5 (a² - 1/3), facing it saturate((n.l - 0.2) x 1.25), no
+        // AO, no shine. The hard edge at n.l 0.2 draws the folds of Malc's shirt's normal map as dark patches.
+        if (marked >= 0.0 && !forwardLit) {
+          float near = max(1.5 * (a * a - 1.0 / 3.0), 0.0);
+          lit += sceneLightColor[i].rgb * near * spot * clamp((dot(n, l) - 0.2) * 1.25, 0.0, 1.0);
+          continue;
+        }
+        // (A cutscene's light (PS 0x25d41500, program 29) reads no AO from the G-buffer; drawn forward the lamps
+        // as the game's see-through map materials light them (gta_normal's forward program, PS 0x2493ac20).)
+        vec3 lampLight = sceneLightColor[i].rgb * reach * spot;
+        lit += lampLight * max(dot(n, l), 0.0);
+        if (lampPower > 0.0) lampShine += lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
+      }
+      // The shine, where the surface faces half way between the light and the camera: how bright from the
+      // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
+      float shine = 0.0;
+      // Not with a cutscene's location: the shine would be the camera's light's (Bernie's back wall, shiny,
+      // facing the camera, glared at the same brightness whatever lit it).
+      if (specPower > 0.0 && specIntensity > 0.0 && !grade && !outdoor) {
+        vec4 spec = useSpecMap && useTexture ? texture(specTex, vUv) : vec4(1.0);
+        float where = useSpecMap && useTexture ? dot(spec.rgb, specMask) : 1.0;
+        shine = pow(max(dot(n, normalize(light + toEye)), 0.0), max(specPower * spec.a, 1.0)) * specIntensity * where;
+      }
+      ${GameGlsl.vehicleShine}
+      ${GameGlsl.pedShine}
+      float a = alpha < 1.0 ? alpha : 1.0;
+      if (textureAlpha) {
+        a = base.a * vAlpha;
+        if (a < 0.01) discard;
+        if (stipple) {
+          ${GameGlsl.stipple}
+        }
+      }
+      // Skin (gta_ped_skin's G-buffer pass, program 10): the albedo plus 0.5 x SubColor x the texture's alpha in
+      // a band at the edge of the sun's light: x = max((n.gDirectionalLight + wrap) / (1 + wrap), 0) (the
+      // direction the light goes, -sunDir), smoothstep(0, width, x) x smoothstep(2 width, width, x).
+      if (outdoor && subScatter.y > 0.0) {
+        float x = max((dot(n, -sunDir) + subScatter.x) / (1.0 + subScatter.x), 0.0);
+        float band = smoothstep(0.0, subScatter.y, x) * (1.0 - smoothstep(subScatter.y, 2.0 * subScatter.y, x));
+        base.rgb += 0.5 * band * subColor * base.a;
+      }
+      // A vehicle's glass (gta_vehicle_vehglass, technique draw, program 8): its shine and mirrored surroundings
+      // (vehicleShine) divided by its alpha (1 / alpha, 100 below 0.01) before the blend multiplies them by it
+      // again, so they show whole on clear glass; the glass itself (the lit texture) only by the alpha.
+      float glassShine = vehicleGlass ? (a >= 0.01 ? 1.0 / a : 100.0) : 1.0;
+      vec3 rgb = emissive && !outdoor ? (emissiveScale > 0.0 ? base.rgb * vColor * emissiveScale : base.rgb) : base.rgb * lit + shine + vehicleShine * glassShine + pedShine;
+      if (glowOnly) rgb = base.rgb * vColor * emissiveGlow;
+      else if (emissive && outdoor) rgb += base.rgb * vColor * emissiveGlow;
+      // Outside the light itself goes out too (outLight), for the game's post effects (bloom, its tone mapping,
+      // the eye's adaptation: the game's file, gamePost); the picture (outColor) for the mirrored scene.
+      vec3 lightOut = vec3(0.0);
+      if (outdoor) {
+        // The game's fog on the light, then into the picture as its tone mapping makes it (the game's file:
+        // gameFog, gameToneMap).
+        float distance = length(eyeAt - vPosition);
+        // (An emissive's glow on its own: added to what is there. The game adds its glows before its fog pass
+        // (the TLAD trace GTAIV.3, et01_aa's lamp shades and bulbs at 100730189-212 into the light, the fog over
+        // all of it at 100730258), and the fog is linear: so the glow x (1 - the fog's amount). Elizabeta's lamp
+        // shades, three quarters fogged there, glowed white instead of a dim orange.)
+        lightOut = glowOnly ? rgb * (1.0 - gameFogAmount(distance)) : gameFog(rgb, distance);
+        rgb = gameToneMap(lightOut);
+        if (water) {
+          ${GameGlsl.water}
+        }
+        // SparkIV's own: the last fifth before the end of what it draws (nearer than the game's far clip) faded
+        // into the haze's colour, so the world doesn't stop at an edge.
+        float edge = glowOnly ? 0.0 : clamp((distance - hazeEnd * 0.8) / max(hazeEnd * 0.2, 1.0), 0.0, 1.0);
+        lightOut = mix(lightOut, gameToneUnmap(hazeColor), edge);
+        rgb = mix(rgb, hazeColor, edge);
+      }
+      else if (grade) {
+        float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
+        rgb = mix(vec3(grey), rgb, 0.7) * vec3(1.06, 1.0, 0.9);
+      }
+      outColor = vec4(rgb * a, a);
+      outLight = vec4(lightOut * a, outdoor ? a : 0.0);
+    }`;
+
+  // A uniform set to the value it already has isn't sent again: each mesh sets some forty, most the same
+  // as the mesh before, and with thousands of meshes (a cutscene outside, mirrored in the water) the calls
+  // themselves were what made the picture stutter. Per location (each program has its own).
+  if (gl) {
+    const sent = new Map();
+    const same = (a, b) => { if (a === b) return true; if (!a || !b || a.length !== b.length || typeof a === "number") return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
+    for (const name of ["uniform1i", "uniform1f", "uniform2f", "uniform3fv"]) {
+      const call = gl[name].bind(gl);
+      gl[name] = (where, ...value) => {
+        if (where === null) return;
+        const v = value.length === 1 ? (typeof value[0] === "number" || typeof value[0] === "boolean" ? value[0] : Array.from(value[0])) : value;
+        if (sent.has(where) && same(sent.get(where), v)) return;
+        sent.set(where, v);
+        call(where, ...value);
+      };
+    }
+  }
+  let program, loc;
+  if (gl) {
+    program = createProgram(VERTEX, FRAGMENT);
+    loc = {
+      position: gl.getAttribLocation(program, "position"),
+      normal: gl.getAttribLocation(program, "normal"),
+      uv: gl.getAttribLocation(program, "uv"),
+      skinBones: gl.getAttribLocation(program, "skinBones"),
+      skinWeights: gl.getAttribLocation(program, "skinWeights"),
+      skinned: gl.getUniformLocation(program, "skinned"),
+      boneMatrices: gl.getUniformLocation(program, "boneMatrices"),
+      viewProjection: gl.getUniformLocation(program, "viewProjection"),
+      tex: gl.getUniformLocation(program, "tex"),
+      useTexture: gl.getUniformLocation(program, "useTexture"),
+      hasNormal: gl.getUniformLocation(program, "hasNormal"),
+      color: gl.getUniformLocation(program, "color"),
+      paint: gl.getUniformLocation(program, "paint"),
+      vehicle: gl.getUniformLocation(program, "vehicle"),
+      useDirt: gl.getUniformLocation(program, "useDirt"),
+      dirtTex: gl.getUniformLocation(program, "dirtTex"),
+      dirtColor: gl.getUniformLocation(program, "dirtColor"),
+      dirtLevel: gl.getUniformLocation(program, "dirtLevel"),
+      reflectivePower: gl.getUniformLocation(program, "reflectivePower"),
+      useEnv: gl.getUniformLocation(program, "useEnv"),
+      envTex: gl.getUniformLocation(program, "envTex"),
+      spec2Color: gl.getUniformLocation(program, "spec2Color"),
+      spec2Scale: gl.getUniformLocation(program, "spec2Scale"),      light: gl.getUniformLocation(program, "light"),
+      toEye: gl.getUniformLocation(program, "toEye"),
+      alpha: gl.getUniformLocation(program, "alpha"),
+      lines: gl.getUniformLocation(program, "lines"),
+      cutout: gl.getUniformLocation(program, "cutout"),
+      stipple: gl.getUniformLocation(program, "stipple"),
+      uvAnim: gl.getUniformLocation(program, "uvAnim"),
+      uvRow0: gl.getUniformLocation(program, "uvRow0"),
+      uvRow1: gl.getUniformLocation(program, "uvRow1"),
+      layerUvA: gl.getAttribLocation(program, "layerUvA"),
+      layerUvB: gl.getAttribLocation(program, "layerUvB"),
+      layerWeights: gl.getAttribLocation(program, "layerWeights"),
+      vertexColor: gl.getAttribLocation(program, "vertexColor"),
+      vertexAlpha: gl.getAttribLocation(program, "vertexAlpha"),
+      layers: gl.getUniformLocation(program, "layers"),
+      tex1: gl.getUniformLocation(program, "tex1"),
+      tex2: gl.getUniformLocation(program, "tex2"),
+      tex3: gl.getUniformLocation(program, "tex3"),
+      layerOn: gl.getUniformLocation(program, "layerOn"),
+      outdoor: gl.getUniformLocation(program, "outdoor"),
+      sunDir: gl.getUniformLocation(program, "sunDir"),
+      sunColor: gl.getUniformLocation(program, "sunColor"),
+      ambientAbove: gl.getUniformLocation(program, "ambientAbove"),
+      ambientBelow: gl.getUniformLocation(program, "ambientBelow"),
+      hazeColor: gl.getUniformLocation(program, "hazeColor"),
+      hazeStart: gl.getUniformLocation(program, "hazeStart"),
+      hazeEnd: gl.getUniformLocation(program, "hazeEnd"),
+      water: gl.getUniformLocation(program, "water"),
+      waterColor: gl.getUniformLocation(program, "waterColor"),
+      waterReflect: gl.getUniformLocation(program, "waterReflect"),
+      toneGamma: gl.getUniformLocation(program, "toneGamma"),
+      toneScale: gl.getUniformLocation(program, "toneScale"),
+      toneBloom: gl.getUniformLocation(program, "toneBloom"),
+      toneSaturation: gl.getUniformLocation(program, "toneSaturation"),
+      toneCorrect: gl.getUniformLocation(program, "toneCorrect"),
+      toneShift: gl.getUniformLocation(program, "toneShift"),
+      dayNight: gl.getUniformLocation(program, "dayNight"),
+      pedShineScale: gl.getUniformLocation(program, "pedShineScale"),
+      glassForward: gl.getUniformLocation(program, "glassForward"),
+      vehicleSpec: gl.getUniformLocation(program, "vehicleSpec"),
+      fogNear: gl.getUniformLocation(program, "fogNear"),
+      fogParams: gl.getUniformLocation(program, "fogParams"),
+      skyColor: gl.getUniformLocation(program, "skyColor"),
+      skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
+      waterWaves: gl.getUniformLocation(program, "waterWaves"),
+      waterSim: gl.getUniformLocation(program, "waterSim"),
+      dynamicWater: gl.getUniformLocation(program, "dynamicWater"),
+      dynamicMin: gl.getUniformLocation(program, "dynamicMin"),
+      waterGrid: gl.getUniformLocation(program, "waterGrid"),
+      maskPass: gl.getUniformLocation(program, "maskPass"),
+      seaOn: gl.getUniformLocation(program, "seaOn"),
+      waterMask: gl.getUniformLocation(program, "waterMask"),
+      gridLevel: gl.getUniformLocation(program, "gridLevel"),
+      floating: gl.getUniformLocation(program, "floating"),
+      floatAt: gl.getUniformLocation(program, "floatAt"),
+      reflectOn: gl.getUniformLocation(program, "reflectOn"),
+      reflectTex: gl.getUniformLocation(program, "reflectTex"),
+      screenSize: gl.getUniformLocation(program, "screenSize"),
+      clipBelow: gl.getUniformLocation(program, "clipBelow"),
+      textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
+      dirtDecal: gl.getUniformLocation(program, "dirtDecal"),
+      baked: gl.getUniformLocation(program, "baked"),
+      grade: gl.getUniformLocation(program, "grade"),
+      dirtMask: gl.getUniformLocation(program, "dirtMask"),
+      sceneLights: gl.getUniformLocation(program, "sceneLights"),
+      forwardLit: gl.getUniformLocation(program, "forwardLit"),
+      actorAmbient: gl.getUniformLocation(program, "actorAmbient"),
+      sceneLightAt: gl.getUniformLocation(program, "sceneLightAt"),
+      sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
+      sceneLightColor: gl.getUniformLocation(program, "sceneLightColor"),
+      emissive: gl.getUniformLocation(program, "emissive"),
+      emissiveScale: gl.getUniformLocation(program, "emissiveScale"),
+      emissiveGlow: gl.getUniformLocation(program, "emissiveGlow"),
+      glowOnly: gl.getUniformLocation(program, "glowOnly"),
+      zShift: gl.getUniformLocation(program, "zShift"),
+      subColor: gl.getUniformLocation(program, "subColor"),
+      subScatter: gl.getUniformLocation(program, "subScatter"),
+      eyeAt: gl.getUniformLocation(program, "eyeAt"),
+      marker: gl.getUniformLocation(program, "marker"),
+      markerAt: gl.getUniformLocation(program, "markerAt"),
+      markerScale: gl.getUniformLocation(program, "markerScale"),
+      useNormalMap: gl.getUniformLocation(program, "useNormalMap"),
+      normalTex: gl.getUniformLocation(program, "normalTex"),
+      bumpiness: gl.getUniformLocation(program, "bumpiness"),
+      useSpecMap: gl.getUniformLocation(program, "useSpecMap"),
+      specTex: gl.getUniformLocation(program, "specTex"),
+      specMask: gl.getUniformLocation(program, "specMask"),
+      specPower: gl.getUniformLocation(program, "specPower"),
+      specIntensity: gl.getUniformLocation(program, "specIntensity"),
+      meshRoom: gl.getUniformLocation(program, "meshRoom"),
+      drawReach: gl.getUniformLocation(program, "drawReach"),
+      parabolic: gl.getUniformLocation(program, "parabolic"),
+      parabolicAt: gl.getUniformLocation(program, "parabolicAt"),
+      parabolicMap: gl.getUniformLocation(program, "parabolicMap"),
+      parabolicOn: gl.getUniformLocation(program, "parabolicOn"),
+      shadowPass: gl.getUniformLocation(program, "shadowPass"),
+      shadowU: gl.getUniformLocation(program, "shadowU"),
+      shadowV: gl.getUniformLocation(program, "shadowV"),
+      shadowH: gl.getUniformLocation(program, "shadowH"),
+      shadowCascade: gl.getUniformLocation(program, "shadowCascade"),
+      shadowRef: gl.getUniformLocation(program, "shadowRef"),
+      shadowBias: gl.getUniformLocation(program, "shadowBias"),
+      shadowOn: gl.getUniformLocation(program, "shadowOn"),
+      shadowMap: gl.getUniformLocation(program, "shadowMap"),
+      shadowBox: gl.getUniformLocation(program, "shadowBox"),
+      viewForward: gl.getUniformLocation(program, "viewForward"),
+      lampShadowPass: gl.getUniformLocation(program, "lampShadowPass"),
+      lampShadowAt: gl.getUniformLocation(program, "lampShadowAt"),
+      lampShadowRange: gl.getUniformLocation(program, "lampShadowRange"),
+      lampShadowSide: gl.getUniformLocation(program, "lampShadowSide"),
+      lampShadowMap: gl.getUniformLocation(program, "lampShadowMap"),
+      lampShadowOn: gl.getUniformLocation(program, "lampShadowOn"),
+      sceneLightShadow: gl.getUniformLocation(program, "sceneLightShadow"),
+    };
+  }
+
+  function createProgram(vs, fs) {
+    const p = gl.createProgram();
+    for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      gl.attachShader(p, s);
+    }
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  // --- Scene from SparkIV ---
+
+  function bytes(base64) {
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function buffer(target, data) {
+    const b = gl.createBuffer();
+    gl.bindBuffer(target, b);
+    gl.bufferData(target, data, gl.STATIC_DRAW);
+    return b;
+  }
+
+  // Bones and weights of a skinned mesh, for the vertex array bound now (both the solid and the wire one).
+  function bindSkin(skin) {
+    for (const [attribute, data] of [[loc.skinBones, skin && skin.bones], [loc.skinWeights, skin && skin.weights]]) {
+      if (attribute < 0) continue;
+      if (data) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, data);
+        gl.enableVertexAttribArray(attribute);
+        gl.vertexAttribPointer(attribute, 4, gl.FLOAT, false, 0, 0);
+      } else {
+        gl.disableVertexAttribArray(attribute);
+        gl.vertexAttrib4f(attribute, 0, 0, 0, 0);
+      }
+    }
+  }
+
+  function addMesh(m) {
+    const positions = new Float32Array(bytes(m.positions).buffer);
+    const indices = new Uint16Array(bytes(m.indices).buffer);
+    const skin = m.skinBones && m.skinWeights
+      ? { bones: buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.skinBones).buffer)), weights: buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.skinWeights).buffer)) }
+      : null;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    bindSkin(skin);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    if (m.normals) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.normals).buffer)));
+      gl.enableVertexAttribArray(loc.normal);
+      gl.vertexAttribPointer(loc.normal, 3, gl.FLOAT, false, 0, 0);
+    } else {
+      gl.disableVertexAttribArray(loc.normal);
+      gl.vertexAttrib3f(loc.normal, 0, 0, 1);
+    }
+    if (m.uvs) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.uvs).buffer)));
+      gl.enableVertexAttribArray(loc.uv);
+      gl.vertexAttribPointer(loc.uv, 2, gl.FLOAT, false, 0, 0);
+    } else {
+      gl.disableVertexAttribArray(loc.uv);
+      gl.vertexAttrib2f(loc.uv, 0, 0);
+    }
+    // Terrain's layers: their coordinates (6 floats a vertex: layer 1, 2, 3), cover and the vertex colour.
+    const layerData = m.layerUvs && m.layerWeights && m.colors;
+    const attribute = (location, size, data, stride, offset) => {
+      if (location < 0) return;
+      if (data) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, data);
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+      } else {
+        gl.disableVertexAttribArray(location);
+      }
+    };
+    const layerUvs = layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerUvs).buffer)) : null;
+    attribute(loc.layerUvA, 4, layerUvs, 24, 0);
+    attribute(loc.layerUvB, 2, layerUvs, 24, 16);
+    attribute(loc.layerWeights, 4, layerData ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.layerWeights).buffer)) : null, 0, 0);
+    attribute(loc.vertexColor, 3, m.colors ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
+    // Without its own, every vertex shows fully (the value is set before each draw: it isn't kept in the VAO).
+    attribute(loc.vertexAlpha, 1, m.alphas ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.alphas).buffer)) : null, 0, 0);
+    buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
+    gl.bindVertexArray(null);
+
+    // The edges for the wire frame, each once.
+    const seen = new Set(), edges = [];
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      for (const [a, b] of [[indices[i], indices[i + 1]], [indices[i + 1], indices[i + 2]], [indices[i + 2], indices[i]]]) {
+        const key = a < b ? a * 65536 + b : b * 65536 + a;
+        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
+      }
+    }
+    const lines = gl.createVertexArray();
+    gl.bindVertexArray(lines);
+    bindSkin(skin);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    buffer(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(edges));
+    gl.bindVertexArray(null);
+
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], positions[i + k]);
+        max[k] = Math.max(max[k], positions[i + k]);
+      }
+    }
+    // How far a cutscene's location reaches from the scene's origin: the far plane stays beyond it.
+    if (m.background) backgroundReach = Math.max(backgroundReach, ...[0, 1, 2].map(k => Math.max(Math.abs(min[k]), Math.abs(max[k]))).map(v => v * 1.8));
+    // actor: which of a cutscene's cast it belongs to (0: the one model or ped shown otherwise);
+    // background: around a cutscene (its location), not looked at when fitting. A cutscene's props (a door)
+    // are lit as its location is (baked: no light of the camera, a middling light round about where they have
+    // none of their own).
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null, far: m.far === true, mirrorOnly: m.mirrorOnly === true });
+  }
+
+  function addMaterial(m) {
+    // Without a texture: a quiet colour of its own, so the parts can be told apart.
+    const hue = (m.id * 0.618) % 1;
+    // Cut out where the texture is see-through, unless its alpha means something else (peds: gloss).
+    // Terrain: the textures of the layers laid over the first (null until loaded, or if not found).
+    const layerCount = 1 + (m.layers ? m.layers.length : 0);
+    // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
+    // another surface (decal), or not at all (a vehicle's no-water planes).
+    const material = {
+      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true, noWater: m.noWater === true,
+      color: m.paint || m.color || hsl(hue, 0.25, 0.62), paint: m.paint || [1, 1, 1], layerCount, layers: [null, null, null],
+      vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0, specular2: m.specular2 || null, vehicleShine: m.vehicleShine || null,
+      // Bumps and shine.
+      normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
+      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
+      dirtMask: m.dirtMask || null, emissive: m.emissive === true,
+      // Only gta_emissivestrong's: the night ones' brightness hangs on the time of day (not known here yet).
+      emissiveScale: m.emissiveMultiplier && !m.emissiveAtNight ? m.emissiveMultiplier : 0,
+      // Outside as the game's (see emissiveGlow): its multiplier, and whether it shines only at night.
+      emissiveMultiplier: m.emissiveMultiplier || 0, emissiveNight: m.emissiveAtNight === true,
+      // Skin: SubColor (r, g, b), SubScatWrap, SubScatWidth, or null.
+      subSurface: m.subSurface || null,
+    };
+    materials.set(m.id, material);
+    if (m.texture) loadTexture(m.texture, t => material.texture = t);
+    if (m.normal) loadTexture(m.normal, t => material.normal = t);
+    if (m.specular) loadTexture(m.specular, t => material.specular = t);
+    if (m.environment) loadTexture(m.environment, t => material.environment = t);
+    if (m.dirtTexture && m.dirtLevel > 0) loadTexture(m.dirtTexture, t => material.dirt = t);
+    (m.layers || []).forEach((url, i) => { if (url && i < 3) loadTexture(url, t => material.layers[i] = t); });
+  }
+
+  const anisotropic = gl && gl.getExtension("EXT_texture_filter_anisotropic");
+  const maxAnisotropy = anisotropic ? Math.min(16, gl.getParameter(anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 1;
+
+  // DXT textures as they are (WebGL's S3TC extension, on Windows always there): a cutscene's location
+  // sends its textures as the game has them ("SXT1", see ModelScene.Raw), not as PNG.
+  const s3tc = gl && gl.getExtension("WEBGL_compressed_texture_s3tc");
+
+  function loadTexture(url, done) {
+    texturesLoading++;
+    const inPack = packed.get(url);
+    packed.delete(url);
+    (inPack || fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject()))
+      .then(async buffer => {
+        const head = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        let mipmaps = true;
+        if (head.length === 4 && head[0] === 83 && head[1] === 88 && head[2] === 84 && head[3] === 49) {
+          mipmaps = uploadRaw(buffer);
+        } else {
+          const image = await createImageBitmap(new Blob([buffer]), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          image.close();
+        }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        // Sharp also when seen at a slant (ground, walls towards the horizon), as far as the card allows.
+        if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
+        done(t);
+        draw();
+      })
+      .catch(() => {})
+      .finally(textureDone);
+  }
+
+  // A texture as the game has it into the bound texture: its levels as far as the data holds them (each
+  // level's size in 4x4 blocks: 8 bytes each for DXT1, 16 for DXT3 and 5). DXT straight to the card (or,
+  // without the extension, decoded here); A8R8G8B8 (bytes B G R A) and L8 as RGBA. Whether it has mipmaps.
+  function uploadRaw(buffer) {
+    const v = new DataView(buffer);
+    const format = v.getUint32(4, true), width = v.getUint32(8, true), height = v.getUint32(12, true);
+    const levels = Math.max(1, v.getUint32(16, true));
+    const data = new Uint8Array(buffer, 20);
+    const dxt = format <= 2;
+    const blockBytes = format === 0 ? 8 : 16;
+    const glFormat = s3tc && [s3tc.COMPRESSED_RGBA_S3TC_DXT1_EXT, s3tc.COMPRESSED_RGBA_S3TC_DXT3_EXT, s3tc.COMPRESSED_RGBA_S3TC_DXT5_EXT][format];
+    let offset = 0, done = 0;
+    for (let level = 0; level < levels; level++) {
+      const w = Math.max(1, width >> level), h = Math.max(1, height >> level);
+      const size = dxt ? Math.ceil(w / 4) * Math.ceil(h / 4) * blockBytes : w * h * (format === 3 ? 4 : 1);
+      if (offset + size > data.length) break;
+      const bytes = data.subarray(offset, offset + size);
+      offset += size;
+      if (dxt && glFormat) gl.compressedTexImage2D(gl.TEXTURE_2D, level, glFormat, w, h, 0, bytes);
+      else gl.texImage2D(gl.TEXTURE_2D, level, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, dxt ? decodeDxt(bytes, w, h, format) : toRgba(bytes, w * h, format));
+      done++;
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, Math.max(0, done - 1));
+    return done > 1;
+  }
+
+  function toRgba(bytes, pixels, format) {
+    const out = new Uint8Array(pixels * 4);
+    for (let i = 0; i < pixels; i++) {
+      if (format === 3) { out[i * 4] = bytes[i * 4 + 2]; out[i * 4 + 1] = bytes[i * 4 + 1]; out[i * 4 + 2] = bytes[i * 4]; out[i * 4 + 3] = bytes[i * 4 + 3]; }
+      else { out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = bytes[i]; out[i * 4 + 3] = 255; }
+    }
+    return out;
+  }
+
+  // DXT1, 3 and 5 decoded to RGBA (only where the card's extension is missing).
+  function decodeDxt(bytes, w, h, format) {
+    const out = new Uint8Array(w * h * 4);
+    const bw = Math.ceil(w / 4), bh = Math.ceil(h / 4), blockBytes = format === 0 ? 8 : 16;
+    const c = (v, i) => [((v >> 11) & 31) * 255 / 31, ((v >> 5) & 63) * 255 / 63, (v & 31) * 255 / 31][i];
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      const o = (by * bw + bx) * blockBytes, co = format === 0 ? o : o + 8;
+      const c0 = bytes[co] | bytes[co + 1] << 8, c1 = bytes[co + 2] | bytes[co + 3] << 8;
+      const cols = [0, 1, 2, 3].map(k => [0, 1, 2].map(i => {
+        const a = c(c0, i), b = c(c1, i);
+        if (k === 0) return a; if (k === 1) return b;
+        if (c0 > c1 || format !== 0) return k === 2 ? (2 * a + b) / 3 : (a + 2 * b) / 3;
+        return k === 2 ? (a + b) / 2 : 0;
+      }));
+      const alphas = [];
+      if (format === 2) {
+        const a0 = bytes[o], a1 = bytes[o + 1];
+        for (let k = 0; k < 8; k++) alphas[k] = k === 0 ? a0 : k === 1 ? a1 : a0 > a1 ? ((8 - k) * a0 + (k - 1) * a1) / 7 : k === 6 ? 0 : k === 7 ? 255 : ((6 - k) * a0 + (k - 1) * a1) / 5;
+      }
+      for (let p = 0; p < 16; p++) {
+        const x = bx * 4 + (p & 3), y = by * 4 + (p >> 2);
+        if (x >= w || y >= h) continue;
+        const k = (bytes[co + 4 + (p >> 2)] >> ((p & 3) * 2)) & 3;
+        let alpha = 255;
+        if (format === 0) alpha = c0 <= c1 && k === 3 ? 0 : 255;
+        else if (format === 1) alpha = ((bytes[o + (p >> 1)] >> ((p & 1) * 4)) & 15) * 17;
+        else { const bit = p * 3, idx = Number((BigInt(bytes[o + 2] | bytes[o + 3] << 8 | bytes[o + 4] << 16) | BigInt(bytes[o + 5] | bytes[o + 6] << 8 | bytes[o + 7] << 16) << 24n) >> BigInt(bit) & 7n); alpha = alphas[idx]; }
+        const q = (y * w + x) * 4;
+        out[q] = cols[k][0]; out[q + 1] = cols[k][1]; out[q + 2] = cols[k][2]; out[q + 3] = alpha;
+      }
+    }
+    return out;
+  }
+
+  // Textures still on their way; when the last has come (or failed), SparkIV hears "loaded" (it shows a
+  // spinner until then).
+  let texturesLoading = 0;
+  let sceneSeconds = 0;   // how long the last scene's meshes and materials took to make here (for SparkIV's load log)
+  function textureDone() {
+    if (--texturesLoading === 0) post({ type: "loaded", sceneSeconds });
+  }
+
+  function hsl(h, s, l) {
+    const f = n => { const k = (n + h * 12) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return [f(0), f(8), f(4)];
+  }
+
+  // A marker for each light, as lines: an omni light a small diamond; a spot a small dot (a tiny cross)
+  // and its cone, showing which way and how wide it shines (not how far: et_pierlight05's spots reach 20
+  // to 30 m from lamps 0.7 m big). Different, so a spot with an omni light beside it (each of the club
+  // rig's lamps: 4 to 14 cm apart) shows both even from afar, a diamond at the cone's tip. Made round the
+  // origin, the diamond 2 across; drawn at the light, the same size on screen however near the camera is
+  // (MarkerSize of its distance), so they neither hide a lamp nor vanish on a block.
+  const MarkerSize = 0.012;
+  function setLights(list) {
+    const size = 1;
+    lights = list.map(l => {
+      const [x, y, z] = [0, 0, 0];
+      const lines = [];
+      if (!l.spot) {
+        const corners = [[size, 0, 0], [-size, 0, 0], [0, size, 0], [0, -size, 0], [0, 0, size], [0, 0, -size]];
+        // The diamond: each of the four side corners to top and bottom, and round the middle.
+        for (const [a, b] of [[0, 4], [1, 4], [2, 4], [3, 4], [0, 5], [1, 5], [2, 5], [3, 5], [0, 2], [2, 1], [1, 3], [3, 0]]) {
+          lines.push(x + corners[a][0], y + corners[a][1], z + corners[a][2], x + corners[b][0], y + corners[b][1], z + corners[b][2]);
+        }
+      } else {
+        // The dot: three short lines across each other.
+        const dot = size * 0.35;
+        lines.push(-dot, 0, 0, dot, 0, 0, 0, -dot, 0, 0, dot, 0, 0, 0, -dot, 0, 0, dot);
+      }
+      if (l.spot) {
+        const d = norm(l.direction);
+        const length = size * 5;
+        // Two axes across the direction, for the rim.
+        const side = norm(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+        const up = cross(side, d);
+        const half = Math.max(1, Math.min(89, l.falloff || 30)) * Math.PI / 180;
+        const r = Math.tan(half) * length;
+        const end = [x + d[0] * length, y + d[1] * length, z + d[2] * length];
+        const rim = [];
+        for (let i = 0; i < 12; i++) {
+          const a = i / 12 * Math.PI * 2, c = Math.cos(a) * r, s = Math.sin(a) * r;
+          rim.push([end[0] + side[0] * c + up[0] * s, end[1] + side[1] * c + up[1] * s, end[2] + side[2] * c + up[2] * s]);
+        }
+        lines.push(x, y, z, ...end);
+        for (let i = 0; i < 12; i++) {
+          lines.push(...rim[i], ...rim[(i + 1) % 12]);
+          if (i % 3 === 0) lines.push(x, y, z, ...rim[i]);
+        }
+      }
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      bindSkin(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+      gl.enableVertexAttribArray(loc.position);
+      gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
+      // A light that is black (some are) still shows, grey.
+      const color = l.color.some(c => c > 0.05) ? l.color : [0.6, 0.6, 0.6];
+      return { vao, count: lines.length / 3, color, meshes: l.meshes, position: l.position };
+    });
+    findSpots();
+    draw();
+  }
+
+  // --- Spots: the places of a model whose parts lie far apart (et_pierlight05: seven lamps along 132 m
+  // of pier), to go through one after the other ---
+  //
+  // The triangles shown are put on a grid of cells a 40th of the model across (each into the cells of its
+  // box: a wall's few vertices alone would leave the cells between them empty); cells touching each other
+  // (also corner to corner) are one spot. A light joins the spot it is at, or is a spot of its own (a
+  // light rig: one tiny triangle, its lights metres away). Offered only when the spots are small beside
+  // the model (lamps along a pier; not three blocks of a building) and there are 2 to 80.
+  let spots = [];
+  let spotIndex = -1;
+
+  function findSpots() {
+    spots = [];
+    spotIndex = -1;
+    const shownLights = showLights ? lights.filter(l => l.meshes.some(id => visible.has(id))) : [];
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    let vertices = 0;
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m) continue;
+      vertices += m.positions.length / 3;
+      for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    }
+    for (const l of shownLights) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
+    if (min[0] === Infinity) { reportSpot(); return; }
+    const cell = Math.max(1e-3, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 40);
+    const key = (x, y, z) => x + "," + y + "," + z;
+    // Each cell's box (the part of the triangles' boxes in it); very large models are sampled (every n-th
+    // triangle), which still finds the parts.
+    const cells = new Map();
+    const index = c => Math.min(39, Math.max(0, Math.floor(c)));
+    let triangles = 0;
+    for (const id of visible) { const m = meshes.get(id); if (m) triangles += m.indices.length / 3; }
+    const stride = Math.max(1, Math.floor(triangles / 200000)) * 3;
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m) continue;
+      const p = m.positions, t = m.indices;
+      for (let i = 0; i + 2 < t.length; i += stride) {
+        const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for (let v = 0; v < 3; v++) for (let a = 0; a < 3; a++) {
+          const value = p[t[i + v] * 3 + a];
+          lo[a] = Math.min(lo[a], value); hi[a] = Math.max(hi[a], value);
+        }
+        const from = lo.map((v, a) => index((v - min[a]) / cell)), to = hi.map((v, a) => index((v - min[a]) / cell));
+        for (let ix = from[0]; ix <= to[0]; ix++) for (let iy = from[1]; iy <= to[1]; iy++) for (let iz = from[2]; iz <= to[2]; iz++) {
+          const k = key(ix, iy, iz);
+          const cellLo = [min[0] + ix * cell, min[1] + iy * cell, min[2] + iz * cell];
+          const partLo = lo.map((v, a) => Math.max(v, cellLo[a])), partHi = hi.map((v, a) => Math.min(v, cellLo[a] + cell));
+          let c = cells.get(k);
+          if (!c) cells.set(k, c = { ix, iy, iz, min: partLo, max: partHi, spot: -1 });
+          else for (let a = 0; a < 3; a++) { c.min[a] = Math.min(c.min[a], partLo[a]); c.max[a] = Math.max(c.max[a], partHi[a]); }
+        }
+      }
+    }
+    // Touching cells into spots.
+    const found = [];
+    for (const start of cells.values()) {
+      if (start.spot >= 0) continue;
+      const spot = { min: start.min.slice(), max: start.max.slice() };
+      start.spot = found.length;
+      const queue = [start];
+      while (queue.length) {
+        const c = queue.pop();
+        for (let a = 0; a < 3; a++) { spot.min[a] = Math.min(spot.min[a], c.min[a]); spot.max[a] = Math.max(spot.max[a], c.max[a]); }
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+          const n = cells.get(key(c.ix + dx, c.iy + dy, c.iz + dz));
+          if (n && n.spot < 0) { n.spot = found.length; queue.push(n); }
+        }
+      }
+      found.push(spot);
+      if (found.length > 80) { reportSpot(); return; }
+    }
+    // Lights to the spot they are at, else a spot of their own.
+    for (const l of shownLights) {
+      const near = found.find(s => [0, 1, 2].every(a => l.position[a] >= s.min[a] - cell && l.position[a] <= s.max[a] + cell));
+      if (near) {
+        for (let a = 0; a < 3; a++) { near.min[a] = Math.min(near.min[a], l.position[a]); near.max[a] = Math.max(near.max[a], l.position[a]); }
+      } else {
+        found.push({ min: l.position.map(v => v - cell / 2), max: l.position.map(v => v + cell / 2) });
+      }
+    }
+    // Small beside the model: the middle spot (by size) under a fifth of the model across.
+    const across = s => Math.hypot(s.max[0] - s.min[0], s.max[1] - s.min[1], s.max[2] - s.min[2]);
+    const sizes = found.map(across).sort((a, b) => a - b);
+    const small = sizes.length > 0 && sizes[Math.floor(sizes.length / 2)] < cell * 40 / 5;
+    if (found.length >= 2 && found.length <= 80 && small) {
+      // In order along the model's longest side, then across it.
+      const long = [0, 1, 2].sort((a, b) => (max[b] - min[b]) - (max[a] - min[a]));
+      const centre = s => s.min.map((v, a) => (v + s.max[a]) / 2);
+      spots = found.sort((p, q) => {
+        const a = centre(p), b = centre(q);
+        return Math.abs(a[long[0]] - b[long[0]]) > cell ? a[long[0]] - b[long[0]] : a[long[1]] - b[long[1]];
+      });
+    }
+    reportSpot();
+  }
+
+  function reportSpot() { post({ type: "spot", index: spotIndex, count: spots.length }); }
+
+  // To the next (+1) or previous (-1) spot: looked at from where the camera looks now, filling the view.
+  function goToSpot(step) {
+    if (!spots.length) return;
+    spotIndex = spotIndex < 0 ? (step > 0 ? 0 : spots.length - 1) : (spotIndex + step + spots.length) % spots.length;
+    const s = spots[spotIndex];
+    camera.target = s.min.map((v, a) => (v + s.max[a]) / 2);
+    camera.distance = fitDistance(s.min, s.max, true);
+    reportSpot();
+    draw();
+  }
+
+  // The same meshes with new textures (one was replaced): the old textures go, the new ones are loaded.
+  function setMaterials(list) {
+    for (const material of materials.values()) {
+      for (const t of [material.texture, material.normal, material.specular, material.environment, ...material.layers]) if (t) gl.deleteTexture(t);
+    }
+    materials.clear();
+    for (const m of list) addMaterial(m);
+    draw();
+  }
+
+  function setScene(scene) {
+    const started = performance.now();
+    if (scene.packs) for (const pack of scene.packs) addPack(pack);
+    for (const m of scene.materials) addMaterial(m);
+    for (const m of scene.meshes) addMesh(m);
+    sceneSeconds = (performance.now() - started) / 1000;
+    message.textContent = scene.meshes.length ? "" : "This model has no meshes.";
+    if (texturesLoading === 0) post({ type: "loaded", sceneSeconds });
+  }
+
+  // Textures sent together (a cutscene's location: two thousand one by one took SparkIV and the page
+  // longer than the textures themselves): one request for many, "SXP1", then each texture's length and bytes
+  // in the order of the pack's list of their urls; a url in it is taken from there, not asked for.
+  const packed = new Map();
+  function addPack(pack) {
+    const parts = fetch(pack.url)
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+      .then(buffer => {
+        const v = new DataView(buffer), list = [];
+        let at = 4;
+        while (at + 4 <= buffer.byteLength && list.length < pack.textures.length) {
+          const length = v.getUint32(at, true);
+          list.push(buffer.slice(at + 4, at + 4 + length));
+          at += 4 + length;
+        }
+        return list;
+      });
+    pack.textures.forEach((url, i) => packed.set(url, parts.then(list => list[i] || Promise.reject())));
+  }
+
+  // --- Skeleton and animation (peds) ---
+  //
+  // A bone's place relative to its parent: translate by its offset, turn by its quaternion; down the
+  // chain world = parent * local (column vectors). A vertex moves with world * inverse(rest world).
+  // Checked against OpenIV's .skel: the rest pose built so is the bones' WorldOffset.
+
+  let skeleton = null;      // { parent[], position[] (3 per bone), rotation[] (4 per bone), inverseRest[] (mat4) }
+  let clip = null;          // { frames, fps, tracks: [{ bone, kind: "position"|"rotation", values }], mover, facials }
+  // Moving through the world (the clip's model tracks): the camera follows, a grid on the ground shows it.
+  let moveInWorld = false;
+  // Facial clips started by the clip, playing on the face's bones.
+  let showFacials = true;
+  let lastMover = null;
+  let boneTexture = null;
+  const playback = { playing: false, time: 0, speed: 1, loop: true, last: 0, reportedFrame: -1 };
+
+  function mat4FromQuat(q, t) {
+    const [x, y, z, w] = q;
+    return [
+      1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w), 0,
+      2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w), 0,
+      2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y), 0,
+      t[0], t[1], t[2], 1,
+    ];
+  }
+
+  // Column-major 4x4 product a * b.
+  function mul(a, b) {
+    const r = new Array(16);
+    for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++) {
+      let v = 0;
+      for (let k = 0; k < 4; k++) v += a[k * 4 + rr] * b[c * 4 + k];
+      r[c * 4 + rr] = v;
+    }
+    return r;
+  }
+
+  // Inverse of a rotation + translation.
+  function inverseRigid(m) {
+    const r = [m[0], m[4], m[8], 0, m[1], m[5], m[9], 0, m[2], m[6], m[10], 0, 0, 0, 0, 1];
+    r[12] = -(r[0] * m[12] + r[4] * m[13] + r[8] * m[14]);
+    r[13] = -(r[1] * m[12] + r[5] * m[13] + r[9] * m[14]);
+    r[14] = -(r[2] * m[12] + r[6] * m[13] + r[10] * m[14]);
+    return r;
+  }
+
+  function worldMatrices(position, rotation, s = skeleton) {
+    const n = s.parent.length, world = new Array(n);
+    const of = i => {
+      if (!world[i]) {
+        const local = mat4FromQuat(rotation.slice(i * 4, i * 4 + 4), position.slice(i * 3, i * 3 + 3));
+        const p = s.parent[i];
+        world[i] = p >= 0 && p < n && p !== i ? mul(of(p), local) : local;
+      }
+      return world[i];
+    };
+    for (let i = 0; i < n; i++) of(i);
+    return world;
+  }
+
+  // Quaternions (x, y, z, w).
+  function qmul(a, b) {
+    return [
+      a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+      a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+      a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+      a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ];
+  }
+  const qconj = q => [-q[0], -q[1], -q[2], q[3]];
+  function qnorm(q) { const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return q.map(v => v / l); }
+
+  // Helper bones the game turns itself, not the animations (twist and roll bones): a bone without a track
+  // at the same place under the same parent as one with a track (Char_R_ForeTwist beside Char_R_Forearm,
+  // R_ArmRoll beside Char_R_UpperArm) moves as that one does; the skin of the arm hangs on them. A twist
+  // bone also takes half of the hand's turn about the arm, so the wrist doesn't wring. "The same place"
+  // within 3 cm: Johnny's R_ArmRoll is 7 mm beside his upper arm (Niko's exactly on it); the next bones
+  // of an arm are 15 to 30 cm apart.
+  function findFollowers(sk = skeleton, cl = clip) {
+    sk.followers = [];
+    if (!cl) return;
+    const tracked = new Set(cl.tracks.filter(t => t.kind === "rotation").map(t => t.bone));
+    const n = sk.parent.length;
+    const at = i => sk.position.slice(i * 3, i * 3 + 3);
+    for (let b = 0; b < n; b++) {
+      // Only helper bones (named so): a finger without a track (the little one in many clips) keeps its rest.
+      const helperName = (sk.names && sk.names[b]) || "";
+      // A forearm's twist bone always so, its track or not: in et01_ba (TLAD) the toll booth man's clip turns
+      // Char_L_ForeTwist 40° away from his forearm, and the game shows his sleeve straight to the hand (its
+      // video), so the game turns the twist bone itself; the cutscene peds' tracks keep it on the forearm anyway.
+      if ((tracked.has(b) && !/foretwist/i.test(helperName)) || !/roll|twist/i.test(helperName)) continue;
+      // The nearest tracked sibling, if near enough (and not at the parent itself: then it just moves with it).
+      const pb = at(b);
+      let leader = -1, nearest = 0.03;
+      for (let s = 0; s < n; s++) {
+        if (s === b || !tracked.has(s) || sk.parent[s] !== sk.parent[b]) continue;
+        const ps = at(s);
+        const d = Math.hypot(pb[0] - ps[0], pb[1] - ps[1], pb[2] - ps[2]);
+        if (d <= nearest && Math.hypot(ps[0], ps[1], ps[2]) >= 0.03) { nearest = d; leader = s; }
+      }
+      if (leader < 0) continue;
+      const name = (sk.names && sk.names[b]) || "";
+      let twistFrom = -1;
+      if (/twist/i.test(name)) {
+        for (let c = 0; c < n; c++) if (sk.parent[c] === leader && tracked.has(c)) { twistFrom = c; break; }
+      }
+      sk.followers.push({ bone: b, leader, twistFrom });
+    }
+  }
+
+  // A skeleton from SparkIV, its rest pose worked out once, with a texture for its bone matrices.
+  function makeSkeleton(s) {
+    const sk = { parent: s.parent, position: s.position, rotation: s.rotation, names: s.names, followers: [] };
+    sk.inverseRest = worldMatrices(s.position, s.rotation, sk).map(inverseRigid);
+    sk.texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sk.texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return sk;
+  }
+
+  function setSkeleton(s) {
+    skeleton = makeSkeleton(s);
+    boneTexture = skeleton.texture;
+    findFollowers();
+    pose(clip ? currentFrame() : null);
+  }
+
+  // The bones of a pose: the clip's tracks over the rest, the facial clip playing then, the helper bones.
+  // Returns the local positions and rotations.
+  function sampledPose(sk, cl, frame) {
+    const position = sk.position.slice(), rotation = sk.rotation.slice();
+    if (!cl || frame === null) return { position, rotation };
+    for (const track of cl.tracks) sample(track, frame, cl.frames, track.kind === "position" ? position : rotation, track.bone);
+    // Facial clips: the one started last at or before this frame plays on the face's bones, from its
+    // start, until it ends (over the body clip's face, if it has one).
+    if (showFacials && cl.facials) {
+      let facial = null;
+      for (const f of cl.facials) if (f.start <= frame) facial = f;
+      if (facial) {
+        const local = (frame - facial.start) / cl.fps * facial.fps;
+        if (local <= facial.frames - 1) {
+          for (const track of facial.tracks) sample(track, local, facial.frames, track.kind === "position" ? position : rotation, track.bone);
+        }
+      }
+    }
+    // Helper bones: the leader's turn away from its rest, applied to the helper's rest.
+    const restOf = i => sk.rotation.slice(i * 4, i * 4 + 4);
+    const nowOf = i => rotation.slice(i * 4, i * 4 + 4);
+    for (const f of sk.followers) {
+      let q = qmul(qmul(nowOf(f.leader), qconj(restOf(f.leader))), restOf(f.bone));
+      if (f.twistFrom >= 0) {
+        // The hand's turn away from its rest, about the arm's long axis (x), half of it.
+        const d = qmul(nowOf(f.twistFrom), qconj(restOf(f.twistFrom)));
+        let twist = qnorm([d[0], 0, 0, d[3]]);
+        if (twist[3] < 0) twist = twist.map(v => -v);
+        // Half the angle of a turn q (w >= 0) is normalize(q + 1).
+        q = qmul(q, qnorm([twist[0], 0, 0, twist[3] + 1]));
+      }
+      q = qnorm(q);
+      for (let k = 0; k < 4; k++) rotation[f.bone * 4 + k] = q[k];
+    }
+    return { position, rotation };
+  }
+
+  // The bone matrices of world bones into the skeleton's texture (what skinned vertices move by).
+  function uploadBones(sk, world) {
+    const data = new Float32Array(world.length * 16);
+    for (let i = 0; i < world.length; i++) data.set(mul(world[i], sk.inverseRest[i]), i * 16);
+    gl.bindTexture(gl.TEXTURE_2D, sk.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, world.length, 0, gl.RGBA, gl.FLOAT, data);
+  }
+
+  // --- A cutscene's cast ---
+  //
+  // Every actor (a ped, a prop) has its own skeleton and clip, all on the one timeline (the clip without
+  // tracks the main clip then is). A ped's clip places it in the scene by its model tracks (root); a prop's
+  // root bone holds its place itself.
+  const cast = new Map();   // id → { skeleton, clip, root: { position, rotation } | null }
+
+  // The scene's own lights (cutscenes): per frame place, colour, range, strength, cone and direction.
+  let sceneLights = [];
+  let showSceneLights = true;
+
+  function setSceneLights(list) {
+    const floats = v => v ? new Float32Array(bytes(v).buffer) : null;
+    sceneLights = (list || []).map(l => ({
+      name: l.name, frames: l.frames, fps: l.fps,
+      position: floats(l.position), color: floats(l.color), range: floats(l.range),
+      intensity: floats(l.intensity), cone: floats(l.cone), direction: floats(l.direction),
+    }));
+  }
+
+  // The lights of a cutscene's location (lamps, wall lights in its models: the light the game puts there),
+  // fixed: place, direction, colour, range, cone (cosine of half, -1 all round).
+  let mapLights = [];
+  // How bright a lamp is: its colour (0 to 1) times its strength as the game adds it to the light.
+  const MapLightScale = 0.6;
+  const MaxLights = 40;
+
+  // The rooms of the location's interiors: the interior's place, the turn from the scene into it, the room's
+  // box there. What is in which: a map object by the interior's list (its mesh's room), an actor and a
+  // cutscene's light by where it is, the first room in the list whose box holds it. The boxes overlap (Bernie's
+  // living room's holds the hall outside his door): bc_1's lights at his door (spt_dr, fil_dr, rim_nko_dr,
+  // all at Niko there) and Niko are in the living room so, the hall's trim and walls not lit by them, as in
+  // the game (by the smallest box the spot was in the hall and lit its door frame). Where the boxes of two
+  // interiors hold it, the interior whose room's floor it stands on (the least height over its box's bottom):
+  // et01_aa's camera in TLAD's E1_Elizabeta lounge, a metre over its floor, was also in GTA IV's flat a storey
+  // below (ProjectRM3, its RM3a room's box reaching 1.3 m up into the lounge) and from section 2 on took that
+  // room's time cycle modifier (elizabetas: exposure 1.98 instead of em_4's 1.5), much lighter than the game
+  // (the TLAD trace GTAIV.3 stays as dark there). By the depth in the box instead, Elizabeta and Malc, sitting
+  // 0.6 m over the lounge's floor, fell into RM3a too, where the game has every ped in the lounge (its
+  // globalScalars.z, em_4's AmbientDownMult 0.2, for all of them in frame 10210).
+  let rooms = [];
+
+  function roomOf(p) {
+    let best = -1, bestHeight = Infinity, bestAt = null;
+    rooms.forEach((r, i) => {
+      const d = [p[0] - r.at[0], p[1] - r.at[1], p[2] - r.at[2], 0];
+      const v = qmul(qmul(r.turn, d), qconj(r.turn));
+      for (let k = 0; k < 3; k++) {
+        if (v[k] < r.min[k] || v[k] > r.max[k]) return;
+      }
+      const height = v[2] - r.min[2];
+      // Rooms of the same interior (the same place): the first in the list, as before.
+      const sameInterior = bestAt && bestAt[0] === r.at[0] && bestAt[1] === r.at[1] && bestAt[2] === r.at[2];
+      if (best < 0 || (!sameInterior && height < bestHeight)) { best = i; bestHeight = height; bestAt = r.at; }
+    });
+    return best;
+  }
+
+  // What of the light from around reaches a cutscene's ped or prop at p in room: the room's modifier's
+  // AmbientDownMult (see TimeCycle.ActorAmbient), eased over the room's portals as GTAIV.exe does (0xA0D720): within
+  // a portal's sphere by t = 1 - d²/r², towards 1 where it leads outside, towards the other room's where that is
+  // more. bc_1, section 1 in Bernie's living room: his room's 0.5 (his face 63 there, 62 in the game's video).
+  function actorAmbientAt(p, room) {
+    const own = i => i >= 0 && skyRooms[i] ? (skyRooms[i].actorAmbient ?? 1) : 1;
+    if (room < 0 || !rooms[room]) return 1;
+    const r = rooms[room];
+    let value = own(room);
+    const d = [p[0] - r.at[0], p[1] - r.at[1], p[2] - r.at[2], 0];
+    const v = qmul(qmul(r.turn, d), qconj(r.turn));
+    for (const q of r.portals || []) {
+      const d2 = (v[0] - q.centre[0]) ** 2 + (v[1] - q.centre[1]) ** 2 + (v[2] - q.centre[2]) ** 2;
+      const t = d2 < q.radius * q.radius ? 1 - d2 / (q.radius * q.radius) : 0;
+      if (q.to < 0) value += (1 - value) * t;
+      else if (value < own(q.to)) value += (own(q.to) - value) * t;
+    }
+    return value;
+  }
+
+  // A cutscene outside: the sun and sky of its time and weather (see the "sky" message); null inside.
+  // The sky as the game shows it at noon is a pale blue, whitish towards the horizon: timecyc.dat's sky
+  // colours are its shader's, not the picture's (SUNNY: the top almost black, the bottom deep blue), so the
+  // colours shown are taken from them lighter (a guess, matched by eye to the game's picture of bc_3).
+  let sky = null;
+  // Whether the sky is shown (SparkIV: the location on); off, the background chosen is the view's and the
+  // actors are lit as without a location.
+  let skyOn = true;
+  function showSky() {
+    const css = c => "rgb(" + c.map(v => Math.round(Math.min(1, Math.max(0, v)) * 255)).join(",") + ")";
+    document.body.style.background = sky && skyOn ? "linear-gradient(" + css(sky.zenith) + ", " + css(sky.horizon) + " 55%, " + css(sky.horizon) + ")" : "";
+    draw();
+  }
+  // The time cycle outside, and per room of the location (the list of rooms) as its modifier changes it (null:
+  // none); sky is the one the camera is in, as the game sets the modifier of the room the camera is in.
+  let skyOutside = null, skyRooms = [];
+  function setSky(m) {
+    const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+    // Matched to the game's clear sky in bc_3 (08:18 in the video): 179 227 252 low over the horizon, 163 209
+    // 235 some 30 degrees up.
+    const make = s => ({ ...s, horizon: mix(s.skyBottom, [0.825, 0.959, 0.988], 0.8), zenith: mix(s.skyBottom, [0.747, 0.857, 0.853], 0.75) });
+    skyOutside = make(m);
+    skyRooms = (m.rooms || []).map(r => r ? make({ ...m, ...r }) : null);
+    sky = skyOutside;
+    if (m.clouds && !cloudTex) loadTexture(m.clouds, t => cloudTex = t);
+    if (m.cloudDetail && !cloudDetailTex) loadTexture(m.cloudDetail, t => cloudDetailTex = t);
+    showSky();
+  }
+  function skyAtCamera() {
+    if (!skyOutside) return;
+    const film = filmView();
+    const room = skyRooms.length ? roomOf(film ? film.eye : eye()) : -1;
+    sky = (room >= 0 && skyRooms[room]) || skyOutside;
+  }
+
+  // The sky outside, drawn behind everything: from the horizon's colour up to the top's, the sun, and the
+  // clouds as the game's gta_atmoscatt_clouds.fxc makes them: their noise (red: the shape) and its fine
+  // detail around 0.5 - density = noise + (detail - 0.5) x strength, amount = saturate(threshold x density -
+  // bias), cover = amount ^ thickness x saturate(amount x edge), fading out towards the horizon. The game sets
+  // its numbers while it runs (not in a file we read): these are guessed, matched to its picture of bc_3.
+  const SKY_VERTEX = `#version 300 es
+    in vec2 corner; out vec2 ndc;
+    void main() { ndc = corner; gl_Position = vec4(corner, 0.9999, 1.0); }`;
+  const SKY_FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec2 ndc;
+    layout(location = 0) out vec4 outColor;
+    layout(location = 1) out vec4 outLight;
+    uniform mat4 inverseViewProjection; uniform vec3 eye;
+    uniform vec3 horizon; uniform vec3 zenith; uniform vec3 sunDir; uniform vec3 haze;
+    uniform bool hasClouds; uniform sampler2D clouds; uniform sampler2D detail;
+    // The sky in light, as GTA IV (PC) draws it (the time cycle's skyHdr, see TimeCycle.cs): SkyColor,
+    // AzimuthColor, AzimuthColorEast, (AzimuthHeight, AzimuthStrength), SunColor, (HDRExposure, HDRSunExposure.x,
+    // .y, HDRExposureClamp), the page's exposure; off without them (then the picture alone, as before).
+    uniform bool skyHdrOn; uniform vec3 skyColorH; uniform vec3 azimuthH; uniform vec3 azimuthEastH; uniform vec2 azimuthHS;
+    uniform vec3 sunColorH; uniform vec4 skyHdr; uniform float pageExposure;
+    // Its clouds (TimeCycle.cs: CloudColor, SunsetColor, TopCloudColor, TopCloudBiasDetailThresholdHeight;
+    // CloudThreshold, CloudBias, CloudShadowStrength, CloudInscatteringRange; the thickness, the detail's scale and
+    // strength, CloudFadeOut; CloudShadowOffset), from the noise rage_perlinnoise makes (PERLIN_FRAGMENT) and the
+    // fine detail.
+    uniform bool cloudsOn; uniform sampler2D perlin; uniform vec3 cloudColorH; uniform vec3 sunsetH; uniform vec3 topCloudColorH;
+    uniform vec4 topCloudH; uniform vec4 cloudShapeH; uniform vec4 cloudDetailH; uniform float cloudShadowOffsetH;
+    // The game's sky dome (GTAIV.4's vertex buffer 0x248B51C0, made at call 147965: 992 triangles, drawn x (10000,
+    // 2000, 10000) round the camera, its up the world's z, its z the world's -y): per ring its radius, height and how
+    // far its texture coordinates lie from (0.5, 0.5) - radial, towards the vertex. The lowest ring at -1.8 its
+    // vertex program lowers by another 1 (y - saturate(-y)).
+    const vec3 DOME[17] = vec3[17](vec3(2.0, -2.8, 0.5), vec3(1.990369, 0.160377, 0.476628), vec3(1.961571, 0.319210, 0.455850),
+      vec3(1.913881, 0.474967, 0.435314), vec3(1.847759, 0.626151, 0.414661), vec3(1.763843, 0.771311, 0.391533),
+      vec3(1.662939, 0.909041, 0.369135), vec3(1.546021, 1.038011, 0.343182), vec3(1.414214, 1.156980, 0.313923),
+      vec3(1.268786, 1.264809, 0.281642), vec3(1.111140, 1.360474, 0.246648), vec3(0.942793, 1.443023, 0.209279),
+      vec3(0.765367, 1.511670, 0.169894), vec3(0.580569, 1.565755, 0.128873), vec3(0.390181, 1.604780, 0.086611),
+      vec3(0.196034, 1.628340, 0.043515), vec3(0.0, 1.636219, 0.0));
+    // DetailOffset (the vertex program's c75 in the TLAD trace; it moves with the game's time, here kept).
+    const vec2 DetailOffset = vec2(0.01091306);
+    // Where the dome's meridian through the direction meets it (between two rings, as the card interpolates
+    // there): the direction's slope in the dome's own size 5 z / horizontal; its texture coordinates.
+    vec2 domeUv(vec3 d) {
+      float h = max(length(d.xy), 1e-6);
+      float slope = 5.0 * d.z / h;
+      float uvr = 0.5;
+      for (int k = 0; k < 16; k++) {
+        vec3 a = DOME[k], b = DOME[k + 1];
+        if (slope * b.x <= b.y) {
+          uvr = mix(a.z, b.z, clamp((slope * a.x - a.y) / ((b.y - a.y) - slope * (b.x - a.x)), 0.0, 1.0));
+          break;
+        }
+      }
+      return 0.5 + uvr * vec2(d.x, -d.y) / h;
+    }
+    const float CloudThreshold = 2.2, CloudBias = 0.6, CloudThickness = 1.4, CloudEdge = 3.0, DetailStrength = 0.45, CloudScale = 0.035;
+    // Into the mirrored surroundings' map (the game draws the sky there first, with the pixel shader 0x23CFAE80 in
+    // the TLAD trace: the same sky and clouds, no star field): the direction back from the map's place p =
+    // d.xy / (1 + d.z) (see parabolicVertex), its light written into the map.
+    uniform bool toMap;
+    void main() {
+      vec3 dir;
+      if (toMap) {
+        float q = dot(ndc, ndc);
+        if (q > 1.0) discard;
+        float z = (1.0 - q) / (1.0 + q);
+        dir = normalize(vec3(ndc * (1.0 + z), z));
+      } else {
+        vec4 far = inverseViewProjection * vec4(ndc, 1.0, 1.0);
+        dir = normalize(far.xyz / far.w - eye);
+      }
+      float up = clamp(dir.z, 0.0, 1.0);
+      vec3 rgb = mix(horizon, zenith, sqrt(up));
+      // The sun: a small bright disc and a glow round it.
+      float toSun = max(dot(dir, sunDir), 0.0);
+      rgb += vec3(1.0, 0.97, 0.9) * (pow(toSun, 2000.0) * 2.0 + pow(toSun, 60.0) * 0.12);
+      if (hasClouds && dir.z > 0.005) {
+        vec2 uv = dir.xy / (dir.z + 0.05) * CloudScale;
+        float density = texture(clouds, uv).r + (texture(detail, uv * 4.0).r - 0.5) * DetailStrength;
+        float amount = clamp(CloudThreshold * density - CloudBias, 0.0, 1.0);
+        float cover = pow(amount, CloudThickness) * clamp(amount * CloudEdge, 0.0, 1.0);
+        float fade = clamp(dir.z * 4.0 - 0.05, 0.0, 1.0);
+        // Thin cloud greyish, thick cloud lit white; lighter towards the sun.
+        vec3 cloud = mix(vec3(0.72, 0.75, 0.8), vec3(0.96, 0.96, 0.95), amount) + vec3(0.08) * pow(toSun, 8.0);
+        rgb = mix(rgb, cloud, cover * fade);
+      }
+      // The haze low over the horizon (all of it there and below, as the far world and sea fade into it).
+      rgb = mix(rgb, haze, exp(-max(dir.z, 0.0) * 18.0));
+      outColor = vec4(rgb, 1.0);
+      outLight = vec4(0.0);
+      if (skyHdrOn) {
+        // As gta_atmoscatt_clouds' programs (the TLAD trace GTAIV.4: vertex 0x247ACC40, pixel 0x23CFA160): the sky's
+        // colour SkyColor + lerp(AzimuthColorEast, AzimuthColor, 0.5 d.x + 0.5) x (1 - saturate(d.up x
+        // AzimuthHeight)) x AzimuthStrength; the sun's glow s = saturate((a^32 - b^3 x saturate(0.6 + sun.up) +
+        // (0.5 + 0.5 cos) x SunSize) x 0.5) x 4 (cos to the sun, a = saturate((1 - HDRSunExposure.y) x (12.58 cos -
+        // 11.616)), b = saturate(0.9375 - 0.0625 cos), SunSize 1 in both traces; the disc's term x SunCentre.z, 0
+        // there); then (sun + sun^4) x HDRSunExposure.x + saturate(saturate(1 - s) x HDRSunExposure.x x the sky's
+        // colour), the sun = s x SunColor; x HDRExposure, at most HDRExposureClamp; no haze (the post's fog leaves
+        // the sky out). Here in the page's light (x its exposure). Then the clouds over it, as the pixel program
+        // works them out (below).
+        vec3 skyV = skyColorH + mix(azimuthEastH, azimuthH, 0.5 * dir.x + 0.5) * (1.0 - clamp(dir.z * azimuthHS.x, 0.0, 1.0)) * azimuthHS.y;
+        float c = dot(dir, sunDir);
+        float a = clamp(clamp(1.0 - skyHdr.z, 0.0, 1.0) * (12.58 * c - 11.6163721), 0.0, 1.0);
+        float b = clamp(0.9375 - 0.0625 * c, 0.0, 1.0);
+        float s = clamp((pow(a, 32.0) - b * b * b * clamp(0.6 + sunDir.z, 0.0, 1.0) + clamp(0.5 + 0.5 * c, 0.0, 1.0)) * 0.5, 0.0, 1.0) * 4.0;
+        vec3 sunLight = s * sunColorH;
+        vec3 glow = (sunLight + sunLight * sunLight * sunLight * sunLight) * skyHdr.y + clamp(clamp(1.0 - s, 0.0, 1.0) * skyHdr.y * skyV, 0.0, 1.0);
+        if (cloudsOn) {
+          // The vertex program's texture coordinates (in the dome's x and z: the world's x and -y): the clouds'
+          // (o1), their shadow's, moved towards the sun by 0.1 CloudShadowOffset less towards the edge (o3.xy), the
+          // detail's, n(uv - 0.5) |uv - 0.5|^2 x its scale + DetailOffset (o3.zw), the higher clouds' (o5).
+          vec2 uv = domeUv(dir), fromMiddle = uv - 0.5, edge = uv * 2.0 - 1.0;
+          float r2 = dot(fromMiddle, fromMiddle);
+          vec2 shadowUv = uv + vec2(sunDir.x - dir.x, dir.y - sunDir.y) * 0.1 * cloudShadowOffsetH * (1.0 - dot(edge, edge));
+          vec2 detailUv = fromMiddle * inversesqrt(max(r2, 1e-12)) * r2 * cloudDetailH.y + DetailOffset;
+          vec2 topUv = fromMiddle * topCloudH.w + 0.5;
+          float topFade = 1.0 - length(fromMiddle * topCloudH.w);
+          // The pixel program: the shadow (the noise moved, with a fifth of the detail), the clouds' density (the
+          // noise's red + (detail - 0.5) x strength), amount = saturate(threshold x density - bias), cover = amount ^
+          // thickness (its edge infinite: column 93 is 1 throughout), lit by the noise's blue (the clumps); their
+          // colour CloudColor x (1 + cos^2 x max(1 - cover - shadow / 2, 0) x CloudInscatteringRange) - shadow +
+          // SunsetColor x (0.25 cos + 0.35) x light; the higher clouds from the noise's green; faded towards the
+          // horizon by saturate(4 up - CloudFadeOut).
+          float threshold = cloudShapeH.x, bias = cloudShapeH.y, strength = cloudDetailH.z;
+          float shadow = clamp((threshold * (texture(detail, shadowUv * cloudDetailH.y).r * strength * 0.2 + texture(perlin, shadowUv).r) - bias) * cloudShapeH.z, 0.0, 1.0);
+          vec4 noise = texture(perlin, uv);
+          float fine = texture(detail, detailUv).r - 0.5;
+          float clump = clamp(fine * 0.2 + noise.b, 0.0, 1.0);
+          float amount = clamp(threshold * (fine * strength + noise.r) - bias, 0.0, 1.0);
+          float cover = amount > 0.0 ? pow(amount, cloudDetailH.x) : 0.0;
+          float lit = (c * 0.25 + 0.35) * ((1.0 - shadow) * cover * clump + clump);
+          vec3 cloud = (c * c * max(1.0 - cover - 0.5 * shadow, 0.0) * cloudShapeH.w + 1.0) * cloudColorH - shadow + sunsetH * lit;
+          float top = clamp(topCloudH.z * (fine * strength * topCloudH.y + texture(perlin, topUv).g) - topCloudH.x, 0.0, 1.0) * topFade * (1.0 - cover);
+          float total = (1.0 - cover) * top + cover;
+          glow = mix(glow, mix(cloud, topCloudColorH, top), clamp(dir.z * 4.0 - cloudDetailH.w, 0.0, 1.0) * total);
+        }
+        outLight = vec4(min(glow * skyHdr.x, vec3(skyHdr.w)) * pageExposure, 1.0);
+        if (toMap) outColor = outLight;
+      }
+    }`;
+  // The clouds' noise as GTA IV (PC) makes it every frame (rage_perlinnoise into the 256 x 256 __perlinnoisert__,
+  // the pixel program 0x23C2D220 in the TLAD trace GTAIV.4): around the middle the place warped to n(p) |p|^(2
+  // NoiseWarp) x 12 + 0.5 (p = uv - 0.5), then six octaves of skydome.wtd's baseperlinnoise3channel, each two looks
+  // (Frequency1 and Velocity1, Frequency2 and Velocity2: at uv / 8 x frequency^octave + Phase x velocity), weighed
+  // 0.5 Persistance^octave; red and green their sums', blue twice the higher four's (the clumps), each less Contrast,
+  // x Brightness (blue through ClumpBump). The constants as set in both traces (GTA IV's and TLAD's). Phase grows by
+  // the time cycle's cloud speed per game hour (GTAIV.exe 0x62E110; see TimeCycle.cs CloudSpeed): here from TLAD's
+  // trace's 593.25 on with the cutscene's time, a game hour taken as 120 s (GTA IV's 2 s a game minute: assumed,
+  // not read from the exe).
+  const PERLIN_FRAGMENT = `#version 300 es
+    precision highp float;
+    in vec2 ndc;
+    out vec4 outColor;
+    uniform sampler2D noise;
+    uniform float Phase;
+    const vec2 Velocity1 = vec2(-0.01, 0.01), Velocity2 = vec2(0.005, 0.02);
+    const float Frequency1 = 1.9, Frequency2 = 1.0, Contrast = 1.1, Brightness = 0.76, NoiseWarp = 1.0,
+                Persistance = 0.7692308, ClumpBump = 1.0;
+    void main() {
+      vec2 p = ndc * 0.5;
+      float l2 = max(dot(p, p), 1e-12);
+      vec2 at = p * inversesqrt(l2) * pow(l2, NoiseWarp) * 1.5 + 0.0625;
+      vec2 sum = vec2(0.0);
+      float higher = 0.0, weight = 0.5, f1 = 1.0, f2 = 1.0;
+      for (int k = 0; k < 6; k++) {
+        vec2 both = (texture(noise, at * f1 + Phase * Velocity1).rg + texture(noise, at * f2 + Phase * Velocity2).rg) * weight;
+        sum += both;
+        if (k >= 2) higher += both.x;
+        weight *= Persistance; f1 *= Frequency1; f2 *= Frequency2;
+      }
+      vec3 v = clamp(vec3(sum, 2.0 * higher) - Contrast, 0.0, 1.0) * Brightness;
+      outColor = vec4(clamp(v.xy, 0.0, 1.0), clamp(ClumpBump * (v.z - 1.0) + 1.0, 0.0, 1.0), 1.0);
+    }`;
+  const PhaseStart = 593.2532, SecondsPerGameHour = 120;
+  let perlinPass = null;
+  function perlinNoise(speed) {
+    if (!cloudTex) return null;
+    const drawn = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    if (!perlinPass) {
+      const program = createProgram(SKY_VERTEX, PERLIN_FRAGMENT);
+      const quad = gl.createVertexArray();
+      gl.bindVertexArray(quad);
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyBuffer);
+      const corner = gl.getAttribLocation(program, "corner");
+      gl.enableVertexAttribArray(corner);
+      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+      // (Made on unit 8, the sky's: unit 0 holds the meshes' textures, which aren't bound again where unchanged.)
+      const texture = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE8);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      if (anisotropic) gl.texParameterf(gl.TEXTURE_2D, anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy);
+      const frame = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawn);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+      perlinPass = { program, quad, texture, frame, phase: NaN,
+                     noise: gl.getUniformLocation(program, "noise"), at: gl.getUniformLocation(program, "Phase") };
+    }
+    // Made anew only when its Phase moved (with the cutscene's time).
+    const phase = PhaseStart + (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour;
+    if (phase === perlinPass.phase) return perlinPass.texture;
+    perlinPass.phase = phase;
+    const viewport = gl.getParameter(gl.VIEWPORT), blend = gl.isEnabled(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, perlinPass.frame);
+    gl.viewport(0, 0, 256, 256);
+    gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(perlinPass.program);
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
+    gl.uniform1i(perlinPass.noise, 8);
+    gl.uniform1f(perlinPass.at, phase);
+    gl.bindVertexArray(perlinPass.quad);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawn);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+    gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    if (blend) gl.enable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.activeTexture(gl.TEXTURE0);
+    return perlinPass.texture;
+  }
+
+  let skyProgram = null, skyLoc = null, skyQuad = null, skyBuffer = null, cloudTex = null, cloudDetailTex = null;
+  // toMap: into the mirrored surroundings' map (its light; only with the game's sky).
+  function drawSky(matrix, eyeAt, toMap = false) {
+    if (!skyProgram) {
+      skyProgram = createProgram(SKY_VERTEX, SKY_FRAGMENT);
+      skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "haze", "hasClouds", "clouds", "detail",
+                "skyHdrOn", "skyColorH", "azimuthH", "azimuthEastH", "azimuthHS", "sunColorH", "skyHdr", "pageExposure",
+                "cloudsOn", "perlin", "cloudColorH", "sunsetH", "topCloudColorH", "topCloudH", "cloudShapeH", "cloudDetailH",
+                "cloudShadowOffsetH", "toMap"]
+        .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
+      skyQuad = gl.createVertexArray();
+      gl.bindVertexArray(skyQuad);
+      skyBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, skyBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(skyLoc.corner);
+      gl.vertexAttribPointer(skyLoc.corner, 2, gl.FLOAT, false, 0, 0);
+    }
+    const perlin = sky.skyHdr && sky.skyHdr.cloudShape && cloudDetailTex ? perlinNoise(sky.skyHdr.cloudSpeed) : null;
+    gl.useProgram(skyProgram);
+    gl.uniformMatrix4fv(skyLoc.inverseViewProjection, false, invert4(matrix));
+    gl.uniform3fv(skyLoc.eye, eyeAt);
+    gl.uniform3fv(skyLoc.horizon, sky.horizon);
+    gl.uniform3fv(skyLoc.zenith, sky.zenith);
+    gl.uniform3fv(skyLoc.sunDir, sky.sunDirection);
+    gl.uniform3fv(skyLoc.haze, hazeColour());
+    gl.uniform1i(skyLoc.hasClouds, !!cloudTex && !!cloudDetailTex);
+    const h = sky.skyHdr;
+    gl.uniform1i(skyLoc.skyHdrOn, !!h && h.exposure > 0);
+    if (h) {
+      gl.uniform3fv(skyLoc.skyColorH, h.color);
+      gl.uniform3fv(skyLoc.azimuthH, h.azimuth);
+      gl.uniform3fv(skyLoc.azimuthEastH, h.azimuthEast);
+      gl.uniform2f(skyLoc.azimuthHS, h.height, h.strength);
+      gl.uniform3fv(skyLoc.sunColorH, h.sunColor);
+      gl.uniform4f(skyLoc.skyHdr, h.exposure, h.sunExposure[0], h.sunExposure[1], h.clamp);
+      gl.uniform1f(skyLoc.pageExposure, sky.exposure || 1);
+      if (perlin) {
+        gl.uniform3fv(skyLoc.cloudColorH, h.cloudColor);
+        gl.uniform3fv(skyLoc.sunsetH, h.sunsetColor);
+        gl.uniform3fv(skyLoc.topCloudColorH, h.topCloudColor);
+        gl.uniform4fv(skyLoc.topCloudH, h.topCloud);
+        gl.uniform4fv(skyLoc.cloudShapeH, h.cloudShape);
+        gl.uniform4fv(skyLoc.cloudDetailH, h.cloudDetail);
+        gl.uniform1f(skyLoc.cloudShadowOffsetH, h.cloudShadowOffset);
+      }
+    }
+    gl.uniform1i(skyLoc.cloudsOn, !!perlin);
+    gl.uniform1i(skyLoc.toMap, toMap);
+    // Units 8 and 9: not the meshes' (1 holds the bone matrices); the noise on 7 for the while (the water's
+    // reflection's there, put back after).
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, cloudTex);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, cloudDetailTex);
+    gl.activeTexture(gl.TEXTURE7);
+    const onSeven = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    gl.bindTexture(gl.TEXTURE_2D, perlin);
+    gl.uniform1i(skyLoc.clouds, 8); gl.uniform1i(skyLoc.detail, 9); gl.uniform1i(skyLoc.perlin, 7);
+    gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+    gl.bindVertexArray(skyQuad);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, onSeven);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.useProgram(program);
+  }
+
+  // The game's water simulation and sea: in the game's file (GtaIV\Pc\gtaiv-pc.js for GTA IV (PC)).
+
+  // The haze outside: the sky's colour at the horizon (the game's at noon: no paler band), thick by
+  // the end of what the location has (its far objects, as far as the cutscene's draw distance) or the time
+  // cycle's far clip if nearer, so the world doesn't stop at an edge but fades into it.
+  let hazeReach = null;
+  function hazeEnd() {
+    if (hazeReach === null || hazeReach.meshes !== meshes.size) {
+      let farthest = 0;
+      for (const m of meshes.values()) {
+        if (!m.background || !m.min) continue;
+        const cx = (m.min[0] + m.max[0]) / 2, cy = (m.min[1] + m.max[1]) / 2;
+        farthest = Math.max(farthest, Math.hypot(cx, cy));
+      }
+      hazeReach = { meshes: meshes.size, end: farthest > 0 ? farthest : Infinity };
+    }
+    return Math.min(sky.fogEnd, hazeReach.end);
+  }
+  // How far the game draws now ("drawDistance": [frame, metres] steps of the section; none: no limit).
+  let drawSteps = [];
+  function drawDistanceNow() {
+    if (!drawSteps.length) return Infinity;
+    const f = currentFrame();
+    let metres = Infinity;
+    for (const [frame, m] of drawSteps) { if (frame <= f + 1e-3) metres = m; else break; }
+    return metres;
+  }
+  function hazeColour() {
+    return sky.horizon;
+  }
+
+  // A column-major 4x4 matrix's inverse.
+  function invert4(m) {
+    const a = Array.from(m), inv = new Array(16);
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    const det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    return new Float32Array(inv.map(v => v / (det || 1)));
+  }
+
+  // The six planes (a, b, c, d: inside where ax + by + cz + d >= 0, normalised) of a column-major
+  // view-projection matrix (Gribb and Hartmann).
+  function frustumPlanes(m) {
+    const row = i => [m[i], m[4 + i], m[8 + i], m[12 + i]];
+    const r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    return [[1, r0], [-1, r0], [1, r1], [-1, r1], [1, r2], [-1, r2]].map(([s, r]) => {
+      const p = r3.map((v, k) => v + s * r[k]);
+      const l = Math.hypot(p[0], p[1], p[2]) || 1;
+      return p.map(v => v / l);
+    });
+  }
+
+  // Column-major 4x4 matrices: a times b.
+  function multiply4(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = s;
+    }
+    return out;
+  }
+
+  // The water's level: the height most of its quads lie at (the sea's, not a pond's up in a park); null without water.
+  let waterLevelCache;
+  function waterLevel() {
+    if (waterLevelCache !== undefined) return waterLevelCache;
+    for (const id of visible) {
+      const m = meshes.get(id), mat = m && materials.get(m.material);
+      if (!mat || !mat.water || !m.positions) continue;
+      const count = new Map();
+      for (let i = 2; i < m.positions.length; i += 3) { const z = Math.round(m.positions[i] * 10) / 10; count.set(z, (count.get(z) || 0) + 1); }
+      let best = null, most = 0;
+      for (const [z, n] of count) if (n > most) { most = n; best = z; }
+      return waterLevelCache = best;
+    }
+    return null;
+  }
+
+  // The mirrored scene is drawn smoothed (4 samples a pixel, as the picture itself; without, its edges
+  // in the water were jagged) into a frame of its own, then resolved into the texture the water reads;
+  // made again at another size.
+  let reflection = null;
+  function reflectionTarget(w, h) {
+    if (reflection && reflection.w === w && reflection.h === h) return reflection;
+    if (reflection) {
+      gl.deleteFramebuffer(reflection.frame); gl.deleteTexture(reflection.texture); gl.deleteRenderbuffer(reflection.depth);
+      gl.deleteFramebuffer(reflection.drawFrame); gl.deleteRenderbuffer(reflection.drawColor); gl.deleteRenderbuffer(reflection.drawDepth);
+    }
+    const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
+    const drawColor = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, drawColor);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
+    const drawDepth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, drawDepth);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, w, h);
+    const drawFrame = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, drawFrame);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, drawColor);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, drawDepth);
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const depth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    const frame = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+    return reflection = { w, h, texture, depth, frame, drawFrame, drawColor, drawDepth };
+  }
+
+  function setMapLights(list, roomList) {
+    rooms = roomList || [];
+    mapLights =(list || []).filter(l => l.range > 0).map(l => ({
+      at: l.position, dir: norm(l.direction), range: l.range,
+      // Its colour. Not times _f58 (most likely its strength: 1 for most lamps, 0.4 for Bernie's track
+      // spots): with it the spots stayed far too dark beside the game's pictures of bc_1, without it the
+      // hall, the relief and the rooms come out as bright as there.
+      color: l.color.map(c => c * MapLightScale),
+      // The model's angles are from the spot's axis (bc_1's track spots: 50 outer, 32 inner, so 100° across;
+      // read as the whole cone the grey relief in Bernie's flat stayed dull where the game lights it). The
+      // game fades from the outer to the inner: scale = 1 / (cos inner - cos outer).
+      cone: l.cone > 0 ? Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180) : -1,
+      coneScale: l.cone > 0 ? 1 / Math.max(1e-3, Math.cos(Math.min(l.cone - 0.5, Math.max(0, l.hotSpot || 0)) * Math.PI / 180) - Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180)) : 0,
+      // What the game lights outside by (see the game's file: outdoorLamp).
+      radius: l.radius || 0, strength: l.strength || 0, rgb: l.color, flags: l.flags || 0, shadows: l.shadows === true,
+    }));
+    draw();
+  }
+
+  // The lights now, at most MaxLights: the cutscene's own (whole frames: their values step as the game's
+  // do; the strongest first, up to 8), then the location's lamps nearest to the camera that reach near it.
+  function sceneLightsNow() {
+    if (!showSceneLights) return [];
+    const now = cutLightsNow().slice(0, 8);
+    if (mapLights.length && visible.size) {
+      const film = filmView();
+      const e = film ? film.eye : eye();
+      const near = [];
+      const outside = !!sky && skyOn && backgroundReach > 0;
+      for (const m of mapLights) {
+        const l = outside ? outdoorLamp(m) : m;
+        if (!l) continue;
+        const d = Math.hypot(l.at[0] - e[0], l.at[1] - e[1], l.at[2] - e[2]);
+        // Outside only as near to the camera as the game makes an object's lights (the game's file: LampReach).
+        if (outside ? d < LampReach : d < l.range + 25) near.push({ l, d });
+      }
+      near.sort((a, b) => a.d - b.d);
+      for (const { l } of near) { if (now.length >= MaxLights) break; now.push(l); }
+    }
+    return now;
+  }
+
+  function cutLightsNow() {
+    if (!sceneLights.length || !clip) return [];
+    // Outside the lights add in the game's units as its deferred spot pass adds them (deferred_lighting.fxc
+    // program 26: albedo x colour x strength x falloff x cone x n.l, nothing more), times the exposure as the
+    // time cycle's lights are here (checked against a D3D capture of bc_3: Bernie's face 2.68 there, 2.68 here).
+    const outside = !!sky && skyOn && backgroundReach > 0;
+    const scale = outside ? (sky.exposure || 1) : MapLightScale;
+    const now = [];
+    for (const l of sceneLights) {
+      const f = Math.min(Math.floor(currentFrame() / clip.fps * l.fps + 1e-6), l.frames - 1);
+      const v3 = (a, d) => a ? [a[f * 3], a[f * 3 + 1], a[f * 3 + 2]] : d;
+      const v1 = (a, d) => a ? a[Math.min(f, a.length - 1)] : d;
+      const strength = v1(l.intensity, 1);
+      const range = v1(l.range, 10);
+      if (strength <= 0.15 || range <= 0) continue;
+      // GTAIV.exe hands them to its lights as it does a lamp's (0x9CA7E0 -> 0xABCC50): colour times strength
+      // (inside as bright as the location's lamps, MapLightScale); a spot's outer angle from its axis, at most 89°.
+      const color = v3(l.color, [1, 1, 1]).map(c => c * strength * scale);
+      const dir = v3(l.direction, null);
+      const cone = l.cone && dir ? Math.cos(Math.min(89, Math.max(1, v1(l.cone, 89))) * Math.PI / 180) : -1;
+      const at = v3(l.position, [0, 0, 0]);
+      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, strength, actors: true, room: roomOf(at) });
+    }
+    now.sort((a, b) => b.strength - a.strength);
+    return now;
+  }
+
+  function setCast(list) {
+    const first = cast.size === 0;
+    for (const a of cast.values()) if (a.skeleton) gl.deleteTexture(a.skeleton.texture);
+    cast.clear();
+    for (const a of list) {
+      const track = t => t ? { bone: t.bone, kind: t.kind, values: new Float32Array(bytes(t.values).buffer) } : null;
+      const sk = a.skeleton ? makeSkeleton(a.skeleton) : null;
+      const cl = a.clip ? {
+        frames: a.clip.frames, fps: a.clip.fps, tracks: a.clip.tracks.map(track),
+        facials: (a.clip.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
+      } : null;
+      if (sk) findFollowers(sk, cl);
+      // A removed bone takes the bones below it along (the game's hardtop glass hangs on misc_a, a child of
+      // the boat's extra_1).
+      const removed = new Set(a.removedBones || []);
+      if (sk && removed.size) for (let i = 0; i < sk.parent.length; i++) for (let p = sk.parent[i]; p >= 0; p = sk.parent[p]) if (removed.has(p)) { removed.add(i); break; }
+      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null, removed: [...removed] });
+    }
+    showFrame();
+    // Where the actors are now (the view fitted before their clips were there looked at the origin); the
+    // next section's cast leaves the view where it is.
+    if (list.length && first) fit();
+  }
+
+  const NoBone = new Array(16).fill(0);
+  function poseCast(frame) {
+    for (const a of cast.values()) {
+      if (!a.skeleton) continue;
+      // The actor's clip runs at its own rate on the timeline's time.
+      const f = a.clip && clip ? Math.min(frame / clip.fps * a.clip.fps, a.clip.frames - 1) : null;
+      const p = sampledPose(a.skeleton, a.clip, f);
+      let world = worldMatrices(p.position, p.rotation, a.skeleton);
+      // Its room (for the cutscene's lights): where the actor is, a ped where its clip moves it, a prop where
+      // the game creates it, at the scene's origin (its root bone moves it from there; Bernie's door, at his
+      // door between his flat and the hall, isn't lit by the hall's light on Niko).
+      const at = [0, 0, 0];
+      if (a.root && a.clip && f !== null) {
+        const q = [0, 0, 0, 1];
+        if (a.root.position) sample(a.root.position, f, a.clip.frames, at, 0);
+        if (a.root.rotation) sample(a.root.rotation, f, a.clip.frames, q, 0);
+        const place = mat4FromQuat(q, at);
+        world = world.map(m => mul(place, m));
+      }
+      // A prop without a root track (Bernie's door csDoorBernieA in bc_1, moved by its root bone): where that
+      // bone puts it, not the scene's origin (outside every room there, so his room's AmbientDownMult and the
+      // rule for cutscene lights in interiors missed it: the door lighter than the game's video).
+      if (!(a.root && a.clip && f !== null) && world.length) at.splice(0, 3, world[0][12], world[0][13], world[0][14]);
+      a.room = roomOf(at);
+      a.at = at;
+      a.world = world;
+      // The parts the section's [VEHICLE_REMOVAL] takes off: their bones' matrices nothing, as the game draws
+      // them (what hangs on them shrinks away).
+      uploadBones(a.skeleton, a.removed.length ? world.map((m, i) => a.removed.includes(i) ? NoBone : m) : world);
+    }
+  }
+
+  // --- The cutscene's camera ---
+  //
+  // Its clip: a place and a turn (looking along its y, z up) and the field of view in degrees, per frame
+  // of the timeline. While on, the view is the camera's; turning the view by mouse switches it off.
+  let filmCamera = null;    // { frames, fps, position, rotation, fov } (tracks)
+  let useFilmCamera = false;
+
+  function setFilmCamera(c) {
+    const track = (t, kind) => t ? { bone: 0, kind, values: new Float32Array(bytes(t).buffer) } : null;
+    filmCamera = c ? { frames: c.frames, fps: c.fps, position: track(c.position, "position"), rotation: track(c.rotation, "rotation"), fov: c.fov ? new Float32Array(bytes(c.fov).buffer) : null,
+                       dof: c.dof ? new Float32Array(bytes(c.dof).buffer) : null } : null;
+    draw();
+  }
+
+  // The camera's eye, forward, up and field of view (radians) now, or null.
+  function filmView() { return useFilmCamera ? filmCameraNow() : null; }
+
+  // Where the cutscene's camera is now, whether the view is its or not (or null without one).
+  function filmCameraNow() {
+    if (!filmCamera || !filmCamera.position || !filmCamera.rotation) return null;
+    const f = clip ? Math.min(currentFrame() / clip.fps * filmCamera.fps, filmCamera.frames - 1) : 0;
+    const e = [0, 0, 0], q = [0, 0, 0, 1];
+    // Smoothly between frames, but not across a cut (the camera elsewhere from one frame to the next: more
+    // than 25 cm or 10°), which would swing it across the room for a frame.
+    const whole = Math.floor(f + 1e-6);
+    const a = [0, 0, 0], b = [0, 0, 0], qa = [0, 0, 0, 1], qb = [0, 0, 0, 1];
+    sample(filmCamera.position, whole, filmCamera.frames, a, 0);
+    sample(filmCamera.position, whole + 1, filmCamera.frames, b, 0);
+    sample(filmCamera.rotation, whole, filmCamera.frames, qa, 0);
+    sample(filmCamera.rotation, whole + 1, filmCamera.frames, qb, 0);
+    const cut = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) > 0.25 ||
+                Math.abs(qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3]) < Math.cos(5 * Math.PI / 180);
+    const at = cut ? whole : f;
+    sample(filmCamera.position, at, filmCamera.frames, e, 0);
+    sample(filmCamera.rotation, at, filmCamera.frames, q, 0);
+    const turn = v => qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q)).slice(0, 3);
+    const fov = filmCamera.fov ? filmCamera.fov[Math.min(whole, filmCamera.fov.length - 1)] : 45;
+    // Its depth of field's far (metres): beyond it the game's post effects blur (the game's file: gamePostEnd).
+    const dofFar = filmCamera.dof ? filmCamera.dof[Math.min(whole, filmCamera.dof.length / 3 - 1) * 3 + 1] : null;
+    return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180, dofFar };
+  }
+
+  // Leaving the cutscene's camera: the free view goes on from where it is, looking the same way (fitted to
+  // the cast from the side instead, it stood outside Bernie's building), turning about a point ahead of it,
+  // as far as the nearest actor before it (else 3 m).
+  function leaveFilmCamera() {
+    const film = filmView();
+    if (!film) return;
+    const f = film.forward;
+    let distance = Infinity;
+    for (const a of cast.values()) {
+      if (!a.world || !a.world.length) continue;
+      const w = a.world[0];
+      const along = dot(sub([w[12], w[13], w[14]], film.eye), f);
+      if (along > 0.5) distance = Math.min(distance, along);
+    }
+    camera.distance = Math.min(distance === Infinity ? 3 : distance, 15);
+    camera.target = film.eye.map((v, k) => v + f[k] * camera.distance);
+    camera.yaw = Math.atan2(-f[1], -f[0]);
+    camera.pitch = Math.asin(Math.max(-1, Math.min(1, -f[2])));
+    camera.fov = film.fov;
+  }
+
+  // A track's value between frames: positions linearly, rotations by normalized linear interpolation.
+  function sample(track, frame, frames, out, at) {
+    const v = track.values;
+    const f0 = Math.max(0, Math.min(Math.floor(frame), frames - 1)), f1 = Math.min(f0 + 1, frames - 1), t = Math.max(0, Math.min(1, frame - f0));
+    if (track.kind === "position") {
+      for (let k = 0; k < 3; k++) out[at * 3 + k] = v[f0 * 3 + k] * (1 - t) + v[f1 * 3 + k] * t;
+      return;
+    }
+    let d = 0;
+    for (let k = 0; k < 4; k++) d += v[f0 * 4 + k] * v[f1 * 4 + k];
+    const sign = d < 0 ? -1 : 1;
+    let len = 0;
+    const q = [0, 0, 0, 0];
+    for (let k = 0; k < 4; k++) { q[k] = v[f0 * 4 + k] * (1 - t) + sign * v[f1 * 4 + k] * t; len += q[k] * q[k]; }
+    len = Math.sqrt(len) || 1;
+    for (let k = 0; k < 4; k++) out[at * 4 + k] = q[k] / len;
+  }
+
+  // The pose at a time of the clip.
+  function pose(frame) {
+    if (cast.size) poseCast(frame === null ? 0 : frame);
+    if (!skeleton) { if (cast.size) draw(); return; }
+    const { position, rotation } = sampledPose(skeleton, clip, frame);
+    let mover = null;
+    if (clip && frame !== null && moveInWorld && clip.mover) {
+      const p = [0, 0, 0], q = [0, 0, 0, 1];
+      if (clip.mover.path) sample(clip.mover.path, frame, clip.frames, p, 0);
+      if (clip.mover.rotation) sample(clip.mover.rotation, frame, clip.frames, q, 0);
+      mover = mat4FromQuat(q, p);
+    }
+    let world = worldMatrices(position, rotation);
+    if (mover) {
+      // The whole ped moved through the world; the camera goes along, as far as the ped moved.
+      world = world.map(m => mul(mover, m));
+      const at = [mover[12], mover[13], mover[14]];
+      if (lastMover) for (let k = 0; k < 3; k++) camera.target[k] += at[k] - lastMover[k];
+      lastMover = at;
+    } else if (lastMover) {
+      for (let k = 0; k < 3; k++) camera.target[k] -= lastMover[k];
+      lastMover = null;
+    }
+    uploadBones(skeleton, world);
+    draw();
+  }
+
+  // The mover's position track is not a place in the world: it adds up the steps in the ped's own frame
+  // (walk_turn_r ends at x 0, y 1.84 though it turned 43° right; walk_turn_180_r walks on to +y after
+  // turning round). Each step turns with the heading the ped has while making it, then adds to the path.
+  function moverPath(mover, frames) {
+    const path = new Float32Array(frames * 3);
+    if (!mover.position) return { kind: "position", values: path };
+    const p = mover.position.values, r = mover.rotation ? mover.rotation.values : null;
+    const step = [0, 0, 0, 0], q = [0, 0, 0, 1];
+    for (let f = 1; f < frames; f++) {
+      if (r) sample(mover.rotation, f - 0.5, frames, q, 0);
+      for (let k = 0; k < 3; k++) step[k] = p[f * 3 + k] - p[(f - 1) * 3 + k];
+      step[3] = 0;
+      const turned = qmul(qmul(q, step), qconj(q));
+      for (let k = 0; k < 3; k++) path[f * 3 + k] = path[(f - 1) * 3 + k] + turned[k];
+    }
+    return { kind: "position", values: path };
+  }
+
+  function setClip(c) {
+    const track = t => ({ bone: t.bone, kind: t.kind, values: new Float32Array(bytes(t.values).buffer) });
+    clip = {
+      frames: c.frames, fps: c.fps,
+      tracks: c.tracks.map(track),
+      mover: c.mover ? { position: c.mover.position ? track(c.mover.position) : null, rotation: c.mover.rotation ? track(c.mover.rotation) : null } : null,
+      facials: (c.facials || []).map(f => ({ start: f.start, frames: f.frames, fps: f.fps, tracks: f.tracks.map(track) })),
+      uv: (c.uv || []).map(u => ({
+        material: u.material,
+        row0: { kind: "position", values: new Float32Array(bytes(u.row0).buffer) },
+        row1: { kind: "position", values: new Float32Array(bytes(u.row1).buffer) },
+      })),
+    };
+    if (clip.mover) clip.mover.path = moverPath(clip.mover, clip.frames);
+    playback.time = 0;
+    playback.reportedFrame = -1;
+    if (skeleton) findFollowers();
+    showFrame();
+  }
+
+  function currentFrame() { return clip ? Math.min(playback.time * clip.fps, clip.frames - 1) : 0; }
+
+  // The texture matrices the clip sets now, by material: [row0, row1]. Frame by frame, not in between:
+  // many switch between pictures side by side in one texture (et_emissivegas02_uv_0 between a lit and a
+  // dimmed lamp, offset 0 and 0.5); in between, the texture would slide across the seam.
+  let uvNow = new Map();
+  function updateUv(frame) {
+    uvNow = new Map();
+    if (!clip) return;
+    const whole = Math.floor(frame + 1e-6);
+    for (const u of clip.uv) {
+      const row0 = [0, 0, 0], row1 = [0, 0, 0];
+      sample(u.row0, whole, clip.frames, row0, 0);
+      sample(u.row1, whole, clip.frames, row1, 0);
+      uvNow.set(u.material, [row0, row1]);
+    }
+  }
+
+  // A cutscene's fades in this section, in its frames: from black until inEnd (0: none), to black from
+  // outStart to outEnd (outStart -1: none). Only through the cutscene's camera, as the game shows them.
+  let fade = { inEnd: 0, outStart: -1, outEnd: -1 };
+  const fadeCover = document.getElementById("fade");
+
+  function showFade() {
+    const f = currentFrame();
+    let dark = 0;
+    if (useFilmCamera && clip) {
+      if (fade.inEnd > 0 && f < fade.inEnd) dark = 1 - f / fade.inEnd;
+      if (fade.outStart >= 0 && f > fade.outStart) dark = Math.max(dark, Math.min(1, (f - fade.outStart) / Math.max(1, fade.outEnd - fade.outStart)));
+    }
+    fadeCover.style.opacity = dark.toFixed(3);
+  }
+
+  function showFrame() {
+    const frame = currentFrame();
+    showFade();
+    updateUv(frame);
+    pose(clip ? frame : null);
+    if (!skeleton) draw();
+    const whole = Math.floor(frame + 1e-6);
+    if (whole !== playback.reportedFrame) {
+      playback.reportedFrame = whole;
+      post({ type: "frame", frame: whole, playing: playback.playing });
+    }
+  }
+
+  function tick(now) {
+    if (!playback.playing || !clip) return;
+    const dt = playback.last ? (now - playback.last) / 1000 : 0;
+    playback.last = now;
+    const length = (clip.frames - 1) / clip.fps;
+    playback.time += dt * playback.speed;
+    if (playback.time > length) {
+      if (playback.loop && length > 0) playback.time %= length;
+      else { playback.time = length; playback.playing = false; playback.reportedFrame = -1; }
+    }
+    showFrame();
+    if (playback.playing) requestAnimationFrame(tick);
+  }
+
+  function play(on) {
+    if (!clip) return;
+    if (on && currentFrame() >= clip.frames - 1 && !playback.loop) playback.time = 0;
+    playback.playing = on;
+    playback.last = 0;
+    playback.reportedFrame = -1;
+    if (on) requestAnimationFrame(tick); else showFrame();
+  }
+
+  function seek(frame) {
+    if (!clip) return;
+    playback.time = Math.max(0, Math.min(frame, clip.frames - 1)) / clip.fps;
+    showFrame();
+  }
+
+  // --- Camera ---
+
+  /** Looks at what is shown, from the side and a little above. */
+  function fit() {
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const id of visible) {
+      const m = meshes.get(id);
+      if (!m || m.actor || m.background) continue;
+      for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
+    }
+    // A cutscene's actors where they are now (their meshes are made at the origin): their bones, and a
+    // little room round them for the body about the bones.
+    for (const a of cast.values()) {
+      if (!a.world) continue;
+      for (const w of a.world) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], w[12 + k] - 0.3); max[k] = Math.max(max[k], w[12 + k] + 0.3); }
+    }
+    // The lights shown too (a light rig is a single small triangle with its lights metres away).
+    if (showLights) {
+      for (const l of lights) {
+        if (!l.meshes.some(id => visible.has(id))) continue;
+        for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
+      }
+    }
+    if (min[0] === Infinity) return;
+    camera.target = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+    sceneRadius = Math.max(0.01, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+    // From the side and a little to the front; a long model from its long side, a little turned (et_pierlight05,
+    // 132 by 49 m: half the distance than looking along its diagonal).
+    const lengthX = max[0] - min[0], lengthY = max[1] - min[1];
+    camera.yaw = lengthX > lengthY * 1.5 ? -1.25 : lengthY > lengthX * 1.5 ? -0.3 : -0.6;
+    // Flat things (the far-away LODs of trees and blocks, made to be seen from above) are looked at from
+    // high up; anything else from the side and a little above.
+    const height = max[2] - min[2], width = Math.max(max[0] - min[0], max[1] - min[1]);
+    camera.pitch = height < width * 0.15 ? 1.1 : 0.35;
+    camera.distance = fitDistance(min, max);
+    // The whole model again: no spot is the current one.
+    if (spotIndex >= 0) { spotIndex = -1; reportSpot(); }
+    draw();
+  }
+
+  // How far the camera must be, looking from its yaw and pitch, for the box's eight corners to fit the
+  // view (with a little room): each corner seen from the camera, not a sphere round the box, which left a
+  // lot of empty room round long flat models (et_pierlight05: 132 by 49 m, under a metre high).
+  // A spot (close) may be looked at from much nearer than a 20th of the whole model.
+  function fitDistance(min, max, close) {
+    const c = Math.cos(camera.pitch);
+    const toEye = [c * Math.cos(camera.yaw), c * Math.sin(camera.yaw), Math.sin(camera.pitch)];
+    const forward = toEye.map(v => -v);
+    const side = norm(cross(forward, [0, 0, 1]));
+    const up = cross(side, forward);
+    const tanY = Math.tan(camera.fov / 2) * 0.92;
+    const tanX = tanY * (canvas.clientWidth / Math.max(1, canvas.clientHeight));
+    let distance = 0;
+    for (let i = 0; i < 8; i++) {
+      const corner = [i & 1 ? max[0] : min[0], i & 2 ? max[1] : min[1], i & 4 ? max[2] : min[2]].map((v, k) => v - camera.target[k]);
+      // A corner at x across, y up and z towards the camera is in view while (distance - z) * tan >= |x|, |y|.
+      const z = dot(corner, toEye);
+      distance = Math.max(distance, z + Math.abs(dot(corner, side)) / tanX, z + Math.abs(dot(corner, up)) / tanY);
+    }
+    return Math.max(distance, close ? 0 : sceneRadius * 0.05, 0.05);
+  }
+
+  function eye() {
+    const c = Math.cos(camera.pitch);
+    return [
+      camera.target[0] + camera.distance * c * Math.cos(camera.yaw),
+      camera.target[1] + camera.distance * c * Math.sin(camera.yaw),
+      camera.target[2] + camera.distance * Math.sin(camera.pitch),
+    ];
+  }
+
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+  function viewProjection() {
+    // Through a cutscene's camera (tilted as it is), or the viewer's own looking at its target.
+    const film = filmView();
+    const e = film ? film.eye : eye();
+    const f = film ? film.forward : norm(sub(camera.target, e));
+    const s = norm(cross(f, film ? film.up : [0, 0, 1]));
+    const u = cross(s, f);
+    const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, e), -dot(u, e), dot(f, e), 1];
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    const reach = Math.max(sceneRadius * 4, backgroundReach + camera.distance);
+    const near = Math.max(0.001, camera.distance - sceneRadius * 4) , far = film ? Math.max(sceneRadius * 8 + 100, backgroundReach * 2) : camera.distance + reach;
+    // Not nearer than needed: the nearer it is, the less exact the depth further away, and close surfaces
+    // (a wall and the dirt laid over it) flicker through each other. A cutscene's location reaches far,
+    // so its camera's near limit is 10 cm, the free view's at least a 2000th of the farthest.
+    let nearClip = film ? 0.1 : Math.max(camera.distance / 1000, near * 0.1);
+    if (!film && backgroundReach > 0) nearClip = Math.max(nearClip, Math.min(0.1, far / 2000));
+    const t = 1 / Math.tan((film ? film.fov : camera.fov) / 2);
+    const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + nearClip) / (nearClip - far), -1, 0, 0, 2 * far * nearClip / (nearClip - far), 0];
+    const out = new Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let v = 0;
+      for (let k = 0; k < 4; k++) v += proj[k * 4 + r] * view[c * 4 + k];
+      out[c * 4 + r] = v;
+    }
+    // The light from a little above and to the left of the camera, so bumps and shapes show (straight from
+    // the camera a normal map's bumps hardly change the shade).
+    const toEye = f.map(x => -x);
+    // Through the cutscene's camera its depth of field, with the depth's range to read the distance back.
+    const depthOfField = film && film.dofFar != null ? { near: nearClip, far, focus: film.dofFar } : null;
+    // (Its axes and opening too, for the sun's shadow cascades: the game's file, sunShadowCascades.)
+    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye, eye: e, depthOfField,
+             forward: f, right: s, up: u, fov: film ? film.fov : camera.fov, aspect };
+  }
+
+  // --- Drawing ---
+
+  // Lines every half metre, 40 m across, at the height of the lowest point of the meshes (the feet).
+  let grid = null;
+  function createGrid() {
+    let ground = Infinity;
+    for (const m of meshes.values()) ground = Math.min(ground, m.min[2]);
+    if (ground === Infinity) ground = 0;
+    const lines = [];
+    for (let i = -40; i <= 40; i++) {
+      const v = i * 0.5;
+      lines.push(-20, v, ground, 20, v, ground, v, -20, ground, v, 20, ground);
+    }
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    bindSkin(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    return { vao, count: lines.length / 3 };
+  }
+
+  // The bone matrices on texture unit 1 for a skinned mesh, while there is a skeleton.
+  function useSkin(m) {
+    // A cutscene actor's mesh moves with its own skeleton.
+    const actor = m.actor ? cast.get(m.actor) : null;
+    const texture = m.actor ? actor && actor.skeleton && actor.skeleton.texture : skeleton && boneTexture;
+    const on = !!(m.skinned && texture);
+    gl.uniform1i(loc.skinned, on);
+    if (on) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(loc.boneMatrices, 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+  }
+
+  let pending = false;
+  let waterShown = false;   // the last frame drew water outside (it is drawn again and again, see below)
+  function draw() {
+    if (!gl || pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      skyAtCamera();
+      // Outside the scene goes through the game's post effects (the game's file: gamePostBegin, gamePostEnd).
+      const postOn = !!sky && skyOn && backgroundReach > 0 && gamePostBegin(w, h);
+      gl.viewport(0, 0, w, h);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      // As the game (its render states' ZFUNC 4, less or equal): a surface laid on another with the same
+      // vertices (a vehicle's detail layer on its paint: the tropic's deck) is drawn over it, after it,
+      // instead of flickering through it.
+      gl.depthFunc(gl.LEQUAL);
+      gl.useProgram(program);
+      waterShown = false;
+      const lightsNow = sceneLightsNow();
+      const vp = viewProjection();
+      if (sky && skyOn && backgroundReach > 0) {
+        // (Its light too where the time cycle gives the game's sky: the post effects then tone-map it as the game
+        // does, ColorCorrect and all; else only its picture.)
+        if (postOn && !(sky.skyHdr && sky.skyHdr.exposure > 0)) gamePostLight(false);
+        drawSky(vp.matrix, vp.eye);
+        if (postOn) gamePostLight(true);
+      }
+      gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
+      gl.uniform3fv(loc.light, vp.light);
+      gl.uniform3fv(loc.toEye, vp.toEye);
+      gl.uniform3fv(loc.eyeAt, vp.eye);
+      const reachNow = filmView() ? drawDistanceNow() : Infinity;
+      gl.uniform1f(loc.drawReach, Number.isFinite(reachNow) ? reachNow : 0);
+      const outside = !!sky && skyOn && backgroundReach > 0;
+      gl.uniform1i(loc.grade, backgroundReach > 0 && !outside);
+      gl.uniform1i(loc.outdoor, outside);
+      if (outside) {
+        gl.uniform3fv(loc.sunDir, sky.sunDirection);
+        gl.uniform3fv(loc.sunColor, sky.sun);
+        gl.uniform3fv(loc.ambientAbove, sky.ambientAbove);
+        gl.uniform3fv(loc.ambientBelow, sky.ambientBelow);
+        gl.uniform3fv(loc.hazeColor, hazeColour());
+        gl.uniform1f(loc.hazeStart, Math.min(sky.fogStart, hazeEnd() * 0.5));
+        gl.uniform1f(loc.hazeEnd, hazeEnd());
+        // In the light's units, as the sun's (times the exposure).
+        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3).map(c => c * (sky.exposure || 1)));
+        gl.uniform1f(loc.waterReflect, sky.waterReflection || 1);
+        gl.uniform1f(loc.toneGamma, sky.gamma || 1);
+        setToneUniforms();
+        gl.uniform3fv(loc.skyColor, sky.horizon);
+        gl.uniform3fv(loc.skyTopColor, sky.zenith);
+        // The water's simulation one step on (its texture on unit 10, for the water's waves).
+        if (waterLevel() !== null) {
+          waterSimStep();
+          gl.viewport(0, 0, w, h);
+          gl.useProgram(program);
+          gl.activeTexture(gl.TEXTURE10);
+          gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[waterSim.current]);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.waterSim, 10);
+          // The sea's swell round the camera (its heights on unit 12).
+          dynamicWaterStep(vp.eye);
+          gl.activeTexture(gl.TEXTURE12);
+          gl.bindTexture(gl.TEXTURE_2D, dynamicWater.texture);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.dynamicWater, 12);
+          gl.uniform2f(loc.dynamicMin, dynamicWater.x0, dynamicWater.y0);
+          // Where the water is in its window (unit 13), the grid at the water's level.
+          drawWaterMask();
+          gl.viewport(0, 0, w, h);
+          gl.activeTexture(gl.TEXTURE13);
+          gl.bindTexture(gl.TEXTURE_2D, waterMask.texture);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.waterMask, 13);
+          gl.uniform1f(loc.gridLevel, waterLevel());
+        }
+        gl.uniform1i(loc.seaOn, waterLevel() !== null);
+      }
+      gl.uniform1i(loc.sceneLights, lightsNow.length);
+      if (lightsNow.length) {
+        const pad = f => { const a = new Float32Array(MaxLights * 4); lightsNow.forEach((l, i) => a.set(f(l), i * 4)); return a; };
+        gl.uniform4fv(loc.sceneLightAt, pad(l => [...l.at, !l.actors && l.shadows ? -l.range : l.range]));
+        gl.uniform4fv(loc.sceneLightDir, pad(l => [...l.dir, l.cone]));
+        gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) : (l.coneScale || 0)]));
+      }
+      gl.uniform1i(loc.tex, 0);
+      gl.activeTexture(gl.TEXTURE0);
+
+      // The meshes, solid first, then glass see-through on top; mirrored (reflecting): not the water itself.
+      // mapPass: into the mirrored surroundings' map (the game's file: parabolicTarget) - only the map's solid
+      // objects reaching above the camera, as the game draws it (no people, no vehicles, nothing below the camera).
+      // castBox: into a cascade of the sun's shadow map (the game's file: sunShadowCascades) - whatever is solid
+      // and lies across its box on the light's u and v (people and vehicles too).
+      // castCast: only the cast into it (else only the map's objects).
+      const drawMeshes = (reflecting, matrix, eyeNow, mapPass, castBox, castCast) => {
+      // Only what can be in the picture: a map object (it stands still) whose bounding sphere is inside the
+      // view (the six planes of the view-projection); actors move, they are always drawn. Mirrored, not what
+      // lies under the water nor what would come out smaller than a few pixels (each frame draws the scene twice).
+      const planes = frustumPlanes(matrix);
+      const seen = m => {
+        if (m.actor) return !mapPass && (!castBox || !!castCast);
+        if (castBox && castCast) return false;
+        if (m.radius === undefined) {
+          m.center = [0, 1, 2].map(k => (m.min[k] + m.max[k]) / 2);
+          m.radius = Math.hypot(m.max[0] - m.min[0], m.max[1] - m.min[1], m.max[2] - m.min[2]) / 2;
+        }
+        // Into the map only the far versions, as the game draws it (the location's file: CutsceneLocation; those only
+        // for the map nowhere else), reaching above the camera, not what would be under a pixel of it (its 1024 span
+        // half the sky, ~0.003 rad each).
+        if (m.mirrorOnly && !mapPass) return false;
+        // (And as far as the game's reaches: in the TLAD trace its objects stood up to 321 m off, but for one of a
+        // district's 945 m off; here those reaching within 330 m.)
+        if (mapPass) {
+          if (!m.far || m.max[2] < eyeNow[2] || m.radius < 0.003 * Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2])) return false;
+          if (Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1]) - m.radius > 330) return false;
+        }
+        else if (castBox) {
+          if (Math.abs(dot(m.center, shadowSet.u) - castBox[0]) > 1 / castBox[2] + m.radius) return false;
+          if (Math.abs(dot(m.center, shadowSet.v) - castBox[1]) > 1 / castBox[3] + m.radius) return false;
+        }
+        else for (const p of planes) if (p[0] * m.center[0] + p[1] * m.center[1] + p[2] * m.center[2] + p[3] < -m.radius) return false;
+        if (reflecting) {
+          if (m.max[2] < level) return false;
+          const d = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]);
+          if (m.radius / Math.max(d, 1e-3) < 0.01) return false;
+        }
+        // Outside, nothing wholly in the haze (beyond its end it is all haze), nor beyond how far the game draws
+        // in this shot (the .cut's draw distance: bc_3's last shot from the boat 89 m, the city's towers not there).
+        if (outside) {
+          const away = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]) - m.radius;
+          if (away > hazeEnd() || (away > drawDistanceNow() && !(materials.get(m.material) || {}).water)) return false;
+        }
+        return true;
+      };
+      let noWaterMasked = false;
+      for (const pass of ["solid", "glass"]) {
+        const glassPass = pass === "glass";
+        if (glassPass && (mapPass || castBox)) continue;
+        if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
+        else { gl.disable(gl.BLEND); gl.depthMask(true); }
+        // An interior's glowing see-through parts (drawn only as their glow, below) before the rest of what is
+        // see-through: the game adds those glows to the light before its fog pass and the forward draws (TLAD trace
+        // GTAIV.3, et01_aa: bulbs and shades from 102288252, the fog at 102288312, the sheer curtain at 102288471),
+        // and their depth then keeps what lies behind them out (the curtain behind Elizabeta's table lamp's bulb).
+        const glowFirst = id => {
+          const m = meshes.get(id), mat = m && materials.get(m.material);
+          return m && mat && m.room >= 0 && mat.emissive && mat.blend && mat.emissiveMultiplier > 0 ? 1 : 0;
+        };
+        const order = glassPass ? [...visible].sort((a, b) => glowFirst(b) - glowFirst(a)) : visible;
+        for (const id of order) {
+          const m = meshes.get(id);
+          if (!m) continue;
+          const mat = materials.get(m.material) || { texture: null, glass: false, color: [0.7, 0.7, 0.7] };
+          if (mat.hidden) continue;
+          if ((reflecting || mapPass || castBox) && mat.water) continue;
+          if ((mapPass || castBox) && m.floatAt) continue;
+          if (!seen(m)) continue;
+          // A cutscene's actor not in this section (of another part of the file): not there.
+          if (m.actor && cast.size && !cast.has(m.actor)) continue;
+          // Floating litter only near the camera, as the game makes procedural objects: within 30 m (GTAIV.exe
+          // 0xC87760: its detail setting, 20 by default, x 0.5 + 20 m), lifted with the sea there.
+          if (m.floatAt && Math.hypot(m.floatAt[0] - eyeNow[0], m.floatAt[1] - eyeNow[1], m.floatAt[2] - eyeNow[2]) > FloatingRadius) continue;
+          // Nor where a vehicle of the cast is (the game's litter is pushed away by it; ours isn't: bc_3's lay in
+          // the boat, under its seat).
+          if (m.floatAt && insideVehicle(m.floatAt)) continue;
+          gl.uniform1i(loc.floating, !!m.floatAt && outside);
+          if (m.floatAt) gl.uniform2f(loc.floatAt, m.floatAt[0], m.floatAt[1]);
+          // Glass and what is see-through by its texture after everything solid, without writing depth.
+          // Outside the water is drawn whole (its overlapping quads see-through came out lighter where two lay).
+          const seeThrough = (mat.glass && !(mat.water && outside)) || (mat.blend && showTextures && !!mat.texture);
+          if (seeThrough !== glassPass) continue;
+          // Into the mirrored surroundings' map: only what its shader reads (texture or colour, terrain layers, the
+          // vertex colours' AO; the rest is the same throughout that pass, set before it).
+          if (mapPass) {
+            const textured = showTextures && !!mat.texture;
+            gl.uniform1i(loc.useTexture, textured);
+            gl.uniform1i(loc.cutout, mat.cutout === true);
+            gl.uniform1i(loc.hasNormal, m.hasNormal);
+            gl.uniform3fv(loc.color, mat.color);
+            gl.uniform1i(loc.baked, m.baked && !mat.vehicle);
+            const layered = m.layered && textured && mat.layerCount > 1;
+            gl.uniform1i(loc.layers, layered ? mat.layerCount : 1);
+            if (layered) {
+              gl.uniform3fv(loc.layerOn, mat.layers.map(t => t ? 1 : 0));
+              mat.layers.forEach((t, i) => {
+                gl.uniform1i([loc.tex1, loc.tex2, loc.tex3][i], 2 + i);
+                if (t) { gl.activeTexture(gl.TEXTURE2 + i); gl.bindTexture(gl.TEXTURE_2D, t); }
+              });
+              gl.activeTexture(gl.TEXTURE0);
+            }
+            if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 0.45, 0.45, 0.45);
+            else if (!m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
+            useSkin(m);
+            if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
+            if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+            gl.bindVertexArray(m.vao);
+            gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+            continue;
+          }
+          // Into the sun's shadow map: only its shape and where its texture cuts it out (the rest is the same
+          // throughout that pass, set before it).
+          if (castBox) {
+            const cut = mat.cutout === true && showTextures && !!mat.texture;
+            gl.uniform1i(loc.useTexture, cut);
+            gl.uniform1i(loc.cutout, cut);
+            if (cut) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+            useSkin(m);
+            if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
+            gl.bindVertexArray(m.vao);
+            gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+            continue;
+          }
+          // No water inside a boat: before the first water, its no-water planes (draw bucket 30: the tropic's
+          // over its cockpit, above the water's level) where they are in sight into the stencil, unseen, and the
+          // water (and the sea's grid) only outside them, as the game masks it.
+          if (mat.water && !reflecting && !noWaterMasked) {
+            noWaterMasked = true;
+            gl.enable(gl.STENCIL_TEST);
+            gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+            gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+            gl.colorMask(false, false, false, false);
+            gl.depthMask(false);
+            gl.disable(gl.CULL_FACE);
+            gl.uniform1i(loc.useTexture, false); gl.uniform1i(loc.cutout, false); gl.uniform1i(loc.textureAlpha, false);
+            gl.uniform1i(loc.floating, false); gl.uniform1i(loc.waterGrid, false); gl.uniform1f(loc.alpha, 1.0);
+            for (const other of visible) {
+              const plane = meshes.get(other);
+              const planeMat = plane && materials.get(plane.material);
+              if (!planeMat || !planeMat.noWater || (plane.actor && cast.size && !cast.has(plane.actor))) continue;
+              useSkin(plane);
+              gl.bindVertexArray(plane.vao);
+              gl.drawElements(gl.TRIANGLES, plane.count, gl.UNSIGNED_SHORT, 0);
+            }
+            gl.colorMask(true, true, true, true);
+            gl.depthMask(!glassPass);
+            gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+            gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+            gl.uniform1i(loc.floating, !!m.floatAt && outside);
+          }
+          if (mat.water && noWaterMasked && !reflecting) gl.enable(gl.STENCIL_TEST); else gl.disable(gl.STENCIL_TEST);
+          const textured = showTextures && !!mat.texture;
+          gl.uniform1i(loc.useTexture, textured);
+          gl.uniform1i(loc.cutout, mat.cutout === true);
+          gl.uniform1i(loc.stipple, mat.stipple === true);
+          // A vehicle's glass as see-through as the game draws it (gta_vehicle_vehglass, technique draw, program 8:
+          // alpha = texture alpha x vertex alpha x globalScalars.x (1); render states AlphaBlend and AlphaTest on).
+          // A map's glass the same where its vertices' alpha came (GTA IV PC's gta_glass_spec, program 20: alpha =
+          // texture alpha x vertex alpha x globalScalars.x, blended SRCALPHA / INVSRCALPHA; ModelScene.AddMesh).
+          // Other glass, or without its texture, at the page's 0.45 as before.
+          const vehicleGlass = glassPass && mat.glass && mat.vehicle && textured && !!(mat.vehicleShine && mat.vehicleShine[2] > 0.5);
+          const mapGlass = glassPass && mat.glass && !mat.vehicle && textured && m.hasAlpha;
+          gl.uniform1i(loc.textureAlpha, (glassPass && !mat.glass) || vehicleGlass || mapGlass);
+          // Nor the lamps and a cutscene's lights on it: that program has none (its registers: the sun, the light
+          // from around, the fog, the shadow; the game's lights go onto the G-buffer, which glass isn't in), so
+          // the booth's panes in front of et01_ba's fill lights stayed clear instead of milky.
+          // A map's other see-through materials (not decals, which the game writes into the G-buffer) are drawn
+          // forward, after the deferred lights, with only the lamps the game hands such a draw (see forwardLit:
+          // et01_aa's sheer curtain ab_comclub_curttl_projcurtain2_a by Elizabeta's table lamp took its 66 and
+          // glowed pink; without any lamps it was too dark).
+          const forwardMap = glassPass && m.baked && !m.actor && !mat.vehicle && !mat.decal && !mat.emissive && outside;
+          gl.uniform1i(loc.sceneLights, mapGlass ? 0 : lightsNow.length);
+          gl.uniform1i(loc.forwardLit, forwardMap && !mapGlass);
+          gl.uniform1i(loc.glassForward, mapGlass);
+          // Decals a little in front of the surface they lie on, so they don't flicker into it.
+          // See-through layers over a surface (dirt, wear, posters in the interiors) a little less, so they
+          // don't flicker into it either; glass stays where it is. Little by the slope: at a steep angle a whole
+          // offset pulled a decal through what stands a few millimetres before it (bc_1: the shell's dark dirt
+          // decal over the hall's wall panels, flickering as the camera moved).
+          if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -4); }
+          else if (mat.blend && !mat.glass) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -2); }
+          else gl.disable(gl.POLYGON_OFFSET_FILL);
+          gl.uniform1i(loc.hasNormal, m.hasNormal);
+          gl.uniform3fv(loc.color, mat.color);
+          gl.uniform3fv(loc.paint, mat.paint || [1, 1, 1]);
+          gl.uniform1i(loc.vehicle, mat.vehicle === true);
+          gl.uniform1i(loc.useDirt, !!mat.dirt);
+          if (mat.dirt) {
+            gl.uniform3fv(loc.dirtColor, mat.dirtColor);
+            gl.uniform1f(loc.dirtLevel, mat.dirtLevel);
+            gl.uniform1i(loc.dirtTex, 14);
+            gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, mat.dirt); gl.activeTexture(gl.TEXTURE0);
+          }
+          gl.uniform1f(loc.reflectivePower, mat.reflectivePower || 0);
+          // A map *_reflect shader's environment texture: on unit 4 (the third terrain layer's, which it hasn't).
+          gl.uniform1i(loc.useEnv, textured && !!mat.environment && !mat.vehicle);
+          if (textured && mat.environment && !mat.vehicle) {
+            gl.uniform1i(loc.envTex, 4);
+            gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, mat.environment); gl.activeTexture(gl.TEXTURE0);
+          }
+          const spec2 = mat.specular2;
+          gl.uniform3fv(loc.spec2Color, spec2 ? spec2.slice(0, 3) : [0, 0, 0]);
+          gl.uniform2f(loc.spec2Scale, spec2 ? spec2[3] : 0, spec2 ? spec2[4] : 0);          gl.uniform1f(loc.alpha, glassPass && mat.glass && !vehicleGlass && !mapGlass ? 0.45 : 1.0);
+          // The vehicle shader's shine numbers (paint's for vehicle shaders not read; see vehicleShine).
+          const vehicleSpec = mat.vehicleShine || [0.15, 190, 0];
+          gl.uniform3fv(loc.vehicleSpec, vehicleSpec);
+          gl.uniform1i(loc.water, mat.water === true);
+          gl.uniform1i(loc.waterWaves, mat.water === true && !!mat.normal);
+          if (mat.water && outside && !reflecting) waterShown = true;
+          gl.uniform1i(loc.lines, false);
+          // Terrain's layers on texture units 2 to 4 (1 holds the bone matrices).
+          const layered = m.layered && textured && mat.layerCount > 1;
+          gl.uniform1i(loc.layers, layered ? mat.layerCount : 1);
+          if (layered) {
+            gl.uniform3fv(loc.layerOn, mat.layers.map(t => t ? 1 : 0));
+            mat.layers.forEach((t, i) => {
+              gl.uniform1i([loc.tex1, loc.tex2, loc.tex3][i], 2 + i);
+              if (t) { gl.activeTexture(gl.TEXTURE2 + i); gl.bindTexture(gl.TEXTURE_2D, t); }
+            });
+            gl.activeTexture(gl.TEXTURE0);
+          }
+          // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
+          gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
+          gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
+          // Map objects in their place show their bumps softer (under their baked light they looked harsh).
+          gl.uniform1f(loc.specPower, mat.specularPower || 0);
+          gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
+          gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
+          gl.uniform1i(loc.dirtDecal, !!mat.dirtMask);
+          // A vehicle of the cast lit as the cast is (its vertex colours are its paint's, not baked light).
+          gl.uniform1i(loc.baked, m.baked && !mat.vehicle);
+          const actorNow = m.actor ? cast.get(m.actor) : null;
+          gl.uniform1i(loc.meshRoom, actorNow ? (actorNow.room ?? -1) : m.room);
+          // A cutscene's cast takes its room's AmbientDownMult on the light from around (the map doesn't).
+          gl.uniform1f(loc.actorAmbient, actorNow && actorNow.at ? actorAmbientAt(actorNow.at, actorNow.room ?? -1) : 1);
+          // A map object without baked light (some walls): a middling one, not the view's bright light.
+          if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45);
+          // A part of the cast without vertex colours: nothing taken off the light from around (its AO 1).
+          else if (!m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
+          gl.uniform1i(loc.emissive, mat.emissive === true && textured);
+          gl.uniform1f(loc.emissiveScale, mat.emissiveScale || 0);
+          // Outside, as the game's gta_emissive, gta_emissivestrong and gta_emissivenight (programs 14 and 12): lit
+          // as any surface (its texture the albedo), plus texture x vertex colour x emissiveMultiplier, a night
+          // one's x gDayNightEffects.w (1 - the day/night factor: none at noon); in light, so x the exposure as
+          // the time cycle's lights are.
+          const sub = mat.subSurface;
+          gl.uniform3f(loc.subColor, sub ? sub[0] : 0, sub ? sub[1] : 0, sub ? sub[2] : 0);
+          gl.uniform2f(loc.subScatter, sub ? sub[3] : 0, sub ? sub[4] : 0);
+          // In an interior's room the game draws no glow for one in its G-buffer (the TLAD trace GTAIV.3, et01_aa:
+          // its solid gta_emissive lit only, program 14), but for a see-through or glass one, drawn forward (PS
+          // 0x24B6EE60: texture x vertex colour x emissiveMultiplier), whatever the hour (bc_1 by day: Bernie's fabric
+          // lamp shade dim, the glass bowl in his hall glowing white in the game's video).
+          const inRoom = m.room >= 0;
+          const glow = sky && mat.emissive && !(inRoom && !mat.blend && !mat.glass) ? (mat.emissiveMultiplier || 0) * (sky.exposure || 1) * (mat.emissiveNight && !inRoom ? 1 - (sky.dayNight ?? 1) : 1) : 0;
+          // A see-through one's glow (the alpha buckets) the game draws apart, forward, added (SRCALPHA / ONE) and
+          // pushed back by its vertex shader's zShift (0.0004 in the TLAD trace GTAIV.4, depth test LESSEQUAL): where
+          // it lies on something (the toll booth's price sign on its panel) that hides it, only the lit texture shows.
+          const glowApart = glow > 0 && mat.blend && outside;
+          gl.uniform1f(loc.emissiveGlow, glowApart ? 0 : glow);
+          // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
+          if ((mat.emissiveScale > 0 || mat.emissive) && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
+          if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);
+          gl.uniform1i(loc.normalTex, 5);
+          gl.uniform1i(loc.specTex, 6);
+          if ((textured || mat.water) && mat.normal) { gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, mat.normal); }
+          if (textured && mat.specular) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, mat.specular); }
+          gl.activeTexture(gl.TEXTURE0);
+          const uvMatrix = uvNow.get(m.material);
+          gl.uniform1i(loc.uvAnim, !!uvMatrix);
+          if (uvMatrix) { gl.uniform3fv(loc.uvRow0, uvMatrix[0]); gl.uniform3fv(loc.uvRow1, uvMatrix[1]); }
+          useSkin(m);
+          if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
+          if (textured) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+          // A cutscene's vehicles and props only from the front, as the game draws them (culling back faces):
+          // bc_3's camera sits in the boat looking out past its side, whose inside face hid Niko and Bernie.
+          // Mirrored in the water the winding turns round. A vehicle's glass as well (the TLAD trace GTAIV.4's
+          // vehglass draws: CULLMODE CW): its rear window seen from inside through a side window doesn't show (its
+          // heating wire's orange edge did, in et01_ba). A map's glass the same (the trace's gta_glass_spec draws of
+          // et01_ba's toll booth panes from 145517152: CULLMODE CW): through the booth only its near pane shows, the
+          // far one facing away. A map's other see-through materials drawn forward as well (TLAD trace GTAIV.3,
+          // et01_aa's forward draws from 102288359: CULLMODE CW): Elizabeta's sheer curtain darkened what lay
+          // behind it twice, by its near and its far side.
+          if (((m.actor && m.baked && (!glassPass || (mat.glass && mat.vehicle))) || mapGlass || forwardMap) && !castBox) {
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(gl.BACK);
+            gl.frontFace(reflecting ? gl.CW : gl.CCW);
+          } else {
+            gl.disable(gl.CULL_FACE);
+          }
+          gl.bindVertexArray(m.vao);
+          // A vehicle's glass writes its depth, as the game's vehglass draws do (ZWRITEENABLE TRUE in the TLAD trace
+          // GTAIV.4): glass behind glass already drawn stays out (et01_ba: the rear window's inner layer, its heating
+          // wire's orange edge, behind the near side window). A map's glass too (its draws there: ZWRITEENABLE TRUE).
+          const glassDepth = glassPass && mat.glass && (mat.vehicle || mapGlass);
+          if (glassDepth) gl.depthMask(true);
+          // A see-through glowing material in an interior only as its glow: in the TLAD trace GTAIV.3 (et01_aa,
+          // Elizabeta's flat, frame 9900) the lamp shades' and bulbs' textures are bound only for their glow draws
+          // (SRCALPHA / ONE, from 100730189), never for a lit one; outside (et01_ba's price sign, GTAIV.4) both are
+          // drawn. Lit here, the shades took the lamps' light and showed red instead of a pale glow.
+          if (!(glowApart && m.room >= 0)) gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+          if (glassDepth) gl.depthMask(false);
+          if (glowApart) {
+            const blendFuncs = [gl.BLEND_SRC_RGB, gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(p => gl.getParameter(p));
+            const blendWas = gl.isEnabled(gl.BLEND), offsetWas = gl.isEnabled(gl.POLYGON_OFFSET_FILL), cullWas = gl.isEnabled(gl.CULL_FACE);
+            const depthMaskWas = gl.getParameter(gl.DEPTH_WRITEMASK), depthFuncWas = gl.getParameter(gl.DEPTH_FUNC);
+            gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+            gl.disable(gl.POLYGON_OFFSET_FILL);
+            // Only its near faces, once: the glow draws cull back faces and write their depth (TLAD trace GTAIV.3,
+            // et01_aa's bulbs from 102288252: CULLMODE CW, ZWRITEENABLE TRUE, ZFUNC LESSEQUAL). Without, a bulb's
+            // far side added its glow again (Elizabeta's table lamp: 15 light units after the fog, the game's 10).
+            gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.frontFace(reflecting ? gl.CW : gl.CCW);
+            gl.depthMask(true); gl.depthFunc(gl.LEQUAL);
+            gl.uniform1i(loc.glowOnly, true); gl.uniform1f(loc.zShift, 0.0004); gl.uniform1f(loc.emissiveGlow, glow);
+            gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+            gl.uniform1i(loc.glowOnly, false); gl.uniform1f(loc.zShift, 0);
+            gl.blendFuncSeparate(blendFuncs[0], blendFuncs[1], blendFuncs[2], blendFuncs[3]);
+            if (!blendWas) gl.disable(gl.BLEND);
+            if (offsetWas) gl.enable(gl.POLYGON_OFFSET_FILL);
+            if (!cullWas) gl.disable(gl.CULL_FACE);
+            gl.depthMask(depthMaskWas); gl.depthFunc(depthFuncWas);
+          }
+          // The water near the camera: the sea's grid too, with the same material (the quads leave it out).
+          if (mat.water && outside && !reflecting && dynamicWater && waterMask) {
+            const grid = seaGridVao();
+            gl.uniform1i(loc.waterGrid, true); gl.uniform1i(loc.floating, false);
+            gl.uniform1i(loc.hasNormal, false);
+            gl.bindVertexArray(grid.vao);
+            gl.drawElements(gl.TRIANGLES, grid.count, gl.UNSIGNED_SHORT, 0);
+            gl.uniform1i(loc.waterGrid, false);
+          }
+        }
+      }
+      gl.disable(gl.BLEND);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+      gl.disable(gl.STENCIL_TEST);
+      };
+      // Outside: the mirrored surroundings' map first, from the camera's place (the game's file: parabolicTarget),
+      // its smaller levels made from it; then read by the shine of vehicles and people (on unit 15, not bound
+      // while it is drawn into).
+      const mapTarget = outside ? parabolicTarget() : null;
+      gl.uniform1i(loc.parabolicOn, false);
+      gl.uniform1i(loc.parabolicMap, 15);
+      // (Without people and vehicles it changes only with the camera's place and the light: drawn again only then.)
+      const mapKey = mapTarget ? [vp.eye.map(v => v.toFixed(3)).join(), visible.size, drawDistanceNow(), hazeEnd()].join("|") : null;
+      if (mapTarget && (mapKey !== mapTarget.key || sky !== mapTarget.sky)) {
+        mapTarget.key = mapKey; mapTarget.sky = sky;
+        gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, mapTarget.frame);
+        gl.viewport(0, 0, mapTarget.size, mapTarget.size);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        // The sky first, as the game's (where no map object is, it is what is mirrored).
+        if (sky && sky.skyHdr && sky.skyHdr.exposure > 0) drawSky(vp.matrix, vp.eye, true);
+        gl.uniform1i(loc.parabolic, true);
+        gl.uniform3fv(loc.parabolicAt, vp.eye);
+        // What the pass doesn't set per mesh (see drawMeshes).
+        for (const u of ["water", "waterGrid", "uvAnim", "dirtDecal", "lines", "marker", "textureAlpha", "stipple", "emissive", "useNormalMap", "useSpecMap", "vehicle", "useDirt", "floating"]) gl.uniform1i(loc[u], false);
+        gl.uniform3fv(loc.paint, [1, 1, 1]);
+        gl.uniform1f(loc.alpha, 1.0);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.POLYGON_OFFSET_FILL);
+        // Blended over the sky by their alpha, as the game's pass (SRCALPHA / INVSRCALPHA; see parabolicFragment),
+        // the map's own alpha kept 1.
+        const blendWas = gl.isEnabled(gl.BLEND);
+        const blendFuncs = [gl.BLEND_SRC_RGB, gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(p => gl.getParameter(p));
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+        drawMeshes(false, vp.matrix, vp.eye, true);
+        gl.blendFuncSeparate(blendFuncs[0], blendFuncs[1], blendFuncs[2], blendFuncs[3]);
+        if (!blendWas) gl.disable(gl.BLEND);
+        gl.uniform1i(loc.parabolic, false);
+        gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, mapTarget.texture);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+        gl.viewport(0, 0, w, h);
+      }
+      if (mapTarget) {
+        gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, mapTarget.texture); gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(loc.parabolicOn, true);
+      }
+      // Outside: the sun's shadow, its four cascades drawn into their quarters of the map (the game's file:
+      // sunShadowCascades, shadowTarget), then read by the light from the sun (on unit 11, not bound while drawn into).
+      const shadowSet = outside && sky.sunDirection ? sunShadowCascades(vp, sky.sunDirection) : null;
+      const shadowMapNow = shadowSet ? shadowTarget() : null;
+      gl.uniform1i(loc.shadowOn, false);
+      gl.uniform1i(loc.shadowMap, 11);
+      if (shadowMapNow) {
+        gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+        const full = shadowMapNow.size * 4, size = shadowMapNow.size;
+        gl.uniform3fv(loc.shadowU, shadowSet.u);
+        gl.uniform3fv(loc.shadowV, shadowSet.v);
+        gl.uniform3fv(loc.shadowH, shadowSet.h);
+        gl.uniform1f(loc.shadowRef, shadowSet.ref);
+        gl.uniform1i(loc.shadowPass, true);
+        // What the pass doesn't set per mesh (only shape and cut-outs count; see drawMeshes).
+        for (const u of ["water", "waterGrid", "uvAnim", "dirtDecal", "lines", "marker", "textureAlpha", "stipple", "emissive", "useNormalMap", "useSpecMap", "vehicle", "useDirt", "baked", "floating"]) gl.uniform1i(loc[u], false);
+        gl.uniform1i(loc.layers, 1);
+        gl.uniform1f(loc.alpha, 1.0);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.POLYGON_OFFSET_FILL);
+        const cascades = cast => shadowSet.boxes.forEach((box, k) => {
+          gl.viewport(k * size, 0, size, size);
+          gl.uniform4fv(loc.shadowCascade, box);
+          gl.uniform1f(loc.shadowBias, ShadowBias[k]);
+          drawMeshes(false, vp.matrix, vp.eye, false, box, cast);
+        });
+        gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapNow.frame);
+        gl.viewport(0, 0, full, size);
+        gl.clearColor(-1e9, -1e9, 0, 0);
+        // The map's objects (red) only when the cascades or what is shown change (nothing there: lower than anything).
+        const shadowKey = [shadowSet.boxes.flat().map(v => v.toFixed(3)).join(), shadowSet.h.join(), shadowSet.ref.toFixed(3), visible.size, drawDistanceNow(), hazeEnd()].join("|");
+        if (shadowKey !== shadowMapNow.key) {
+          shadowMapNow.key = shadowKey;
+          gl.colorMask(true, false, false, false);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          cascades(false);
+        }
+        // The cast (green) each frame, with a depth of its own.
+        gl.colorMask(false, true, false, false);
+        gl.viewport(0, 0, full, size);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        cascades(true);
+        gl.colorMask(true, true, true, true);
+        gl.uniform1i(loc.shadowPass, false);
+        gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, shadowMapNow.texture); gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+        gl.viewport(0, 0, w, h);
+        gl.uniform4fv(loc.shadowBox, shadowSet.boxes.flat());
+        gl.uniform3fv(loc.viewForward, vp.forward);
+        gl.uniform1i(loc.shadowOn, true);
+      }
+      // The lamps casting shadows (the game's file: lampShadowTarget, lampShadow): the nearest to the camera, as many
+      // as there are slots, their maps drawn each frame from the cast (in the game's the peds and nothing else).
+      gl.uniform1i(loc.lampShadowOn, false);
+      const lampSlots = new Float32Array(MaxLights).fill(-1);
+      const shadowLamps = lightsNow.map((l, i) => ({ l, i })).filter(({ l }) => !l.actors && l.shadows);
+      const lampMapNow = shadowLamps.length && cast.size ? lampShadowTarget() : null;
+      if (lampMapNow) {
+        const away = l => Math.hypot(l.at[0] - vp.eye[0], l.at[1] - vp.eye[1], l.at[2] - vp.eye[2]) - l.range;
+        const chosen = shadowLamps.sort((a, b) => away(a.l) - away(b.l)).slice(0, LampShadowSlots);
+        const size = lampMapNow.size;
+        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, lampMapNow.frame);
+        gl.viewport(0, 0, size * 2, size * LampShadowSlots);
+        gl.clearColor(1, 1, 1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.uniform1i(loc.lampShadowPass, true);
+        // What the pass doesn't set per mesh (only shape and cut-outs count; see drawMeshes).
+        for (const u of ["water", "waterGrid", "uvAnim", "dirtDecal", "lines", "marker", "textureAlpha", "stipple", "emissive", "useNormalMap", "useSpecMap", "vehicle", "useDirt", "baked", "floating", "shadowPass", "parabolic"]) gl.uniform1i(loc[u], false);
+        gl.uniform1i(loc.layers, 1);
+        gl.uniform1f(loc.alpha, 1.0);
+        // Only the faces towards the lamp, as the game culls them (the red half CULL_CCW, the green CULL_CW: the same
+        // faces, the green half drawn mirrored). Here set the other way round, as measured: culled as the game's
+        // literally, Malc in et01_aa had his back in the map (0.61 where his front is 0.55); so, the map's values at
+        // his shirt are the game's (the TLAD trace GTAIV.3's atlas) to 4 decimals.
+        gl.enable(gl.CULL_FACE);
+        gl.frontFace(gl.CCW);
+        chosen.forEach(({ l, i }, slot) => {
+          lampSlots[i] = slot;
+          gl.uniform3fv(loc.lampShadowAt, l.at);
+          gl.uniform1f(loc.lampShadowRange, l.range);
+          [-1, 1].forEach((side, k) => {
+            gl.viewport(k * size, slot * size, size, size);
+            gl.uniform1f(loc.lampShadowSide, side);
+            gl.cullFace(side < 0 ? gl.FRONT : gl.BACK);
+            drawMeshes(false, vp.matrix, vp.eye, false, true, true);
+          });
+        });
+        gl.disable(gl.CULL_FACE);
+        gl.cullFace(gl.BACK);
+        gl.uniform1i(loc.lampShadowPass, false);
+        gl.clearColor(0, 0, 0, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+        gl.viewport(0, 0, w, h);
+      }
+      gl.uniform1fv(loc.sceneLightShadow, lampSlots);
+      // Outside with water: the scene mirrored in the water's level first, into a texture the water shows
+      // (as the game's water.fxc its ReflectTextureSampler), what is under the water left out.
+      var level = outside ? waterLevel() : null;
+      gl.uniform1i(loc.reflectOn, level !== null);
+      if (level !== null) {
+        const target = reflectionTarget(Math.max(1, w >> 1), Math.max(1, h >> 1));
+        // Not bound for reading while it is drawn into (WebGL refuses a feedback loop).
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.drawFrame);
+        gl.viewport(0, 0, target.w, target.h);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        // p' = (x, y, 2 level - z): the view-projection times that mirror.
+        const mirror = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 2 * level, 1]);
+        const mirrored = multiply4(vp.matrix, mirror), mirroredEye = [vp.eye[0], vp.eye[1], 2 * level - vp.eye[2]];
+        drawSky(mirrored, mirroredEye);
+        gl.uniformMatrix4fv(loc.viewProjection, false, mirrored);
+        gl.uniform3fv(loc.eyeAt, mirroredEye);
+        gl.uniform1f(loc.clipBelow, level - 0.05);
+        // (Without the sun's shadow: its cascades are the camera's, not the mirrored one's.)
+        gl.uniform1i(loc.shadowOn, false);
+        drawMeshes(true, mirrored, mirroredEye);
+        gl.uniform1i(loc.shadowOn, !!shadowMapNow);
+        // The samples resolved into the texture.
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.drawFrame);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.frame);
+        gl.blitFramebuffer(0, 0, target.w, target.h, 0, 0, target.w, target.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+        gl.viewport(0, 0, w, h);
+        gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
+        gl.uniform3fv(loc.eyeAt, vp.eye);
+        gl.uniform1f(loc.clipBelow, -1e9);
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, target.texture);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(loc.reflectTex, 7);
+        gl.uniform2f(loc.screenSize, w, h);
+      }
+      gl.uniform1f(loc.clipBelow, -1e9);
+      // The lamps' shadow maps on unit 9 (the sky's while it is drawn, also for the water's reflection above: bound
+      // only now, for the scene).
+      if (lampMapNow) {
+        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lampMapNow.texture); gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(loc.lampShadowMap, 9);
+        gl.uniform1i(loc.lampShadowOn, true);
+      }
+      drawMeshes(false, vp.matrix, vp.eye);
+      gl.depthMask(true);
+      // What follows (markers, grids, the cutscene's camera) has no light of its own: lines write none into the
+      // light (see the fragment shader), which they must reach, else the surface's light behind hid them.
+      if (postOn) gamePostLight(true);
+
+      // A grid on the ground while the ped moves through the world, so the movement can be seen.
+      if (moveInWorld && skeleton) {
+        if (!grid) grid = createGrid();
+        gl.uniform1i(loc.lines, true);
+        gl.uniform1i(loc.skinned, false);
+        gl.uniform3fv(loc.color, [0.55, 0.6, 0.68]);
+        gl.bindVertexArray(grid.vao);
+        gl.drawArrays(gl.LINES, 0, grid.count);
+      }
+
+      if (wireframe) {
+        gl.uniform1i(loc.lines, true);
+        gl.uniform3fv(loc.color, [0.95, 0.75, 0.25]);
+        for (const id of visible) {
+          const m = meshes.get(id);
+          if (!m || m.mirrorOnly || (m.actor && cast.size && !cast.has(m.actor))) continue;
+          useSkin(m);
+          gl.bindVertexArray(m.lines);
+          gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
+        }
+      }
+      // The lights, while a mesh of their drawable is shown: faint where the model hides them (inside a
+      // lamp's housing they would be gone), in their full colour where they are in sight.
+      if (showLights && lights.length) {
+        gl.uniform1i(loc.lines, true);
+        gl.uniform1i(loc.skinned, false);
+        gl.uniform1i(loc.marker, true); gl.uniform1i(loc.floating, false);
+        const e = eye();
+        for (const hidden of [true, false]) {
+          if (hidden) gl.disable(gl.DEPTH_TEST); else { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); }
+          for (const l of lights) {
+            if (!l.meshes.some(id => visible.has(id))) continue;
+            gl.uniform3fv(loc.color, hidden ? l.color.map(c => c * 0.3 + 0.12) : l.color);
+            gl.uniform3fv(loc.markerAt, l.position);
+            gl.uniform1f(loc.markerScale, Math.hypot(l.position[0] - e[0], l.position[1] - e[1], l.position[2] - e[2]) * MarkerSize);
+            gl.bindVertexArray(l.vao);
+            gl.drawArrays(gl.LINES, 0, l.count);
+          }
+        }
+        gl.depthFunc(gl.LEQUAL);
+        gl.uniform1i(loc.marker, false);
+      }
+      // The cutscene's camera while the view isn't its (and it is to be shown): where it is and what it sees.
+      if (!useFilmCamera && showFilmCamera) drawFilmCamera();
+      gl.bindVertexArray(null);
+      // Outside: the eye's adaptation to this picture, for the next (the game's file: adaptTone); stopped,
+      // drawn again at once with it.
+      if (postOn ? gamePostEnd(w, h, playback.playing, vp.depthOfField) : outside && adaptTone(w, h, playback.playing)) draw();
+      // Water in the picture moves all the time, also while the cutscene stands still: the next frame then.
+      if (waterShown && !playback.playing) draw();
+    });
+  }
+
+  // The cutscene's camera as lines: a body behind its eye, the edges of what it sees (its field of view,
+  // 16:9, 60 cm long) and a triangle on the top edge for which way is up. Faint where something hides it.
+  let filmCameraLines = null;
+  let showFilmCamera = true;
+  function drawFilmCamera() {
+    const c = filmCameraNow();
+    if (!c) return;
+    const f = c.forward, u = c.up, s = norm(cross(f, u));
+    const at = (o, a, b, d) => [0, 1, 2].map(k => c.eye[k] + s[k] * a + u[k] * b + f[k] * d + o[k]);
+    const zero = [0, 0, 0];
+    const L = 0.6, h = L * Math.tan(c.fov / 2), w = h * 16 / 9;
+    const lines = [];
+    const line = (p, q) => lines.push(...p, ...q);
+    // The body: a box 12 by 10 cm, 20 cm deep behind the eye.
+    const box = [];
+    for (const d of [0, -0.2]) for (const [a, b] of [[-0.06, -0.05], [0.06, -0.05], [0.06, 0.05], [-0.06, 0.05]]) box.push(at(zero, a, b, d));
+    for (let i = 0; i < 4; i++) { line(box[i], box[(i + 1) % 4]); line(box[4 + i], box[4 + (i + 1) % 4]); line(box[i], box[4 + i]); }
+    // What it sees.
+    const corners = [[-w, -h], [w, -h], [w, h], [-w, h]].map(([a, b]) => at(zero, a, b, L));
+    for (let i = 0; i < 4; i++) { line(c.eye, corners[i]); line(corners[i], corners[(i + 1) % 4]); }
+    const top = [at(zero, -w * 0.3, h * 1.08, L), at(zero, w * 0.3, h * 1.08, L), at(zero, 0, h * 1.45, L)];
+    line(top[0], top[1]); line(top[1], top[2]); line(top[2], top[0]);
+    if (!filmCameraLines) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      bindSkin(null);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.enableVertexAttribArray(loc.position);
+      gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+      filmCameraLines = { vao, vbo };
+    }
+    gl.bindVertexArray(filmCameraLines.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, filmCameraLines.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
+    gl.uniform1i(loc.lines, true);
+    gl.uniform1i(loc.skinned, false);
+    for (const hidden of [true, false]) {
+      if (hidden) gl.disable(gl.DEPTH_TEST); else { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); }
+      gl.uniform3fv(loc.color, hidden ? [0.45, 0.32, 0.12] : [1.0, 0.62, 0.15]);
+      gl.drawArrays(gl.LINES, 0, lines.length / 3);
+    }
+    gl.depthFunc(gl.LEQUAL);
+  }
+
+  new ResizeObserver(draw).observe(canvas);
+
+  // --- Mouse: left drag turns, middle (or right) drag moves, wheel zooms, double-click fits ---
+
+  let drag = null;
+  canvas.addEventListener("pointerdown", e => {
+    drag = { x: e.clientX, y: e.clientY, button: e.button };
+    // Looking round by hand leaves the cutscene's camera.
+    if (useFilmCamera) { leaveFilmCamera(); useFilmCamera = false; showFade(); post({ type: "filmCamera", on: false }); }
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add("moving");
+    if (e.button === 1) e.preventDefault();
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.button === 0 && !e.shiftKey) {
+      // A cutscene (one with a camera): looking round from where the eye is, as a free camera; a model:
+      // turning round it.
+      const before = filmCamera ? eye() : null;
+      camera.yaw -= dx * 0.008;
+      camera.pitch = Math.max(-1.55, Math.min(1.55, camera.pitch + dy * 0.008));
+      if (before) {
+        const c = Math.cos(camera.pitch);
+        const toEye = [c * Math.cos(camera.yaw), c * Math.sin(camera.yaw), Math.sin(camera.pitch)];
+        camera.target = before.map((v, k) => v - toEye[k] * camera.distance);
+      }
+    } else {
+      // Move the target in the plane of the screen, as far as the mouse moved there.
+      const e3 = eye();
+      const f = norm(sub(camera.target, e3));
+      const s = norm(cross(f, [0, 0, 1]));
+      const u = cross(s, f);
+      const perPixel = 2 * camera.distance * Math.tan(camera.fov / 2) / Math.max(1, canvas.clientHeight);
+      for (let k = 0; k < 3; k++) camera.target[k] += (-s[k] * dx + u[k] * dy) * perPixel;
+    }
+    draw();
+  });
+  const endDrag = () => { drag = null; canvas.classList.remove("moving"); };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("auxclick", e => e.preventDefault());
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    // Close enough for a small part of a large model (a lamp of a 132 m pier).
+    camera.distance = Math.max(Math.min(0.02, sceneRadius * 0.02), sceneRadius * 0.002, Math.min(sceneRadius * 50, camera.distance * Math.pow(1.15, Math.sign(e.deltaY))));
+    draw();
+  }, { passive: false });
+  canvas.addEventListener("dblclick", fit);
+
+  // --- Keys: W/S forward and back (where the view looks), A/D to the sides, Q/E down and up; Shift faster ---
+
+  const held = new Set();
+  let walkTime = null, shiftDown = false;
+  const walkKeys = { KeyW: [0, 1], KeyS: [0, -1], KeyA: [1, -1], KeyD: [1, 1], KeyQ: [2, -1], KeyE: [2, 1] };
+  document.addEventListener("keydown", e => {
+    shiftDown = e.shiftKey;
+    if (e.ctrlKey || e.altKey || e.metaKey || !walkKeys[e.code]) return;
+    e.preventDefault();
+    if (held.has(e.code)) return;
+    held.add(e.code);
+    // Walking is the free view's: the cutscene's camera is left.
+    if (useFilmCamera) { leaveFilmCamera(); useFilmCamera = false; showFade(); post({ type: "filmCamera", on: false }); }
+    if (walkTime === null) { walkTime = performance.now(); requestAnimationFrame(walk); }
+  });
+  document.addEventListener("keyup", e => { shiftDown = e.shiftKey; held.delete(e.code); });
+  window.addEventListener("blur", () => { held.clear(); shiftDown = false; });
+  function walk(now) {
+    if (!held.size) { walkTime = null; return; }
+    const dt = Math.min(0.1, (now - walkTime) / 1000);
+    walkTime = now;
+    // 3 m a second (a brisk walk; Shift: 12), slower in a model smaller than that.
+    const speed = Math.min(3, Math.max(0.05, sceneRadius)) * (shiftDown ? 4 : 1);
+    const f = norm(sub(camera.target, eye()));
+    const s = norm(cross(f, [0, 0, 1]));
+    const axes = [f, s, [0, 0, 1]];
+    const step = [0, 0, 0];
+    for (const code of held) {
+      const k = walkKeys[code];
+      if (k) for (let i = 0; i < 3; i++) step[i] += axes[k[0]][i] * k[1];
+    }
+    for (let i = 0; i < 3; i++) camera.target[i] += step[i] * speed * dt;
+    draw();
+    requestAnimationFrame(walk);
+  }
+
+  // --- Messages from and to SparkIV ---
+
+  function post(m) { if (window.chrome && chrome.webview) chrome.webview.postMessage(m); }
+
+  if (window.chrome && chrome.webview) {
+    chrome.webview.addEventListener("message", e => { if (gl) handle(e.data); });
+  }
+
+  function handle(m) {
+      // Several at once (a cutscene's next section: its clip, cast, camera, frame), all before the next
+      // picture: one by one, a picture came between them (the new clip with the old cast and camera).
+      if (m.type === "batch") { for (const one of m.messages) handle(one); }
+      else if (m.type === "scene") { setScene(m); }
+      else if (m.type === "materials") { setMaterials(m.materials); }
+      else if (m.type === "drawDistance") { drawSteps = m.steps || []; draw(); }
+      else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); findSpots(); if (first || m.fit) fit(); else draw(); }
+      else if (m.type === "options") {
+        showTextures = m.textures; wireframe = m.wireframe;
+        const lightsChanged = showLights !== (m.lights === true);
+        showLights = m.lights === true;
+        if (lightsChanged) findSpots();
+        draw();
+      }
+      else if (m.type === "spot") { goToSpot(m.step); }
+      else if (m.type === "lights") { setLights(m.lights); }
+      else if (m.type === "background") { document.body.className = m.name; }
+      else if (m.type === "fit") { fit(); }
+      else if (m.type === "skeleton") { setSkeleton(m); }
+      else if (m.type === "clip") { play(false); setClip(m); if (m.play) play(true); }
+      else if (m.type === "play") { play(m.on); }
+      else if (m.type === "seek") { play(false); seek(m.frame); }
+      // To a frame without stopping: a cutscene follows its sound, which keeps the time.
+      else if (m.type === "time") { if (clip) { playback.time = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps; if (!playback.playing) showFrame(); } }
+      // The sound's time (a frame, with its fraction) while playing: followed gently, a few hundredths of
+      // a second at a time (a jump only when far off), so the picture doesn't stutter.
+      else if (m.type === "sync") {
+        if (clip && playback.playing) {
+          const d = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps - playback.time;
+          if (Math.abs(d) > 0.4) playback.time += d; else playback.time += d * 0.2;
+        }
+      }
+      else if (m.type === "speed") { playback.speed = m.value; }
+      else if (m.type === "loop") { playback.loop = m.on; }
+      else if (m.type === "move") { moveInWorld = m.on; showFrame(); }
+      else if (m.type === "facials") { showFacials = m.on; showFrame(); }
+      else if (m.type === "cast") { setSceneLights(m.lights); setCast(m.actors); }
+      else if (m.type === "sceneLights") { showSceneLights = m.on; draw(); }
+      else if (m.type === "mapLights") { setMapLights(m.lights, m.rooms); }
+      else if (m.type === "sky") { setSky(m); }
+      else if (m.type === "useSky") { skyOn = m.on; showSky(); }
+      else if (m.type === "camera") { setFilmCamera(m.camera); }
+      else if (m.type === "useCamera") { if (!m.on) leaveFilmCamera(); useFilmCamera = m.on; showFade(); draw(); }
+      else if (m.type === "showCamera") { showFilmCamera = m.on; draw(); }
+      else if (m.type === "fade") { fade = { inEnd: m.inEnd, outStart: m.outStart, outEnd: m.outEnd }; showFade(); }
+  }
+  post({ type: "ready", webgl: !!gl });
+</script>
+</body>
+</html>

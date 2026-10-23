@@ -20,18 +20,31 @@
 
 using System.Collections.Generic;
 using RageLib.Models.Resource;
+using RageLib.GtaIV.Pc.Models;
 
 namespace RageLib.Models.Data
 {
   public class Drawable
   {
     public List<Model> Models { get; private set; }
+
+    /// <summary>The level of detail of each entry of Models: 0 high, 1 medium, 2 low, 3 very low (slots may be empty).</summary>
+    public List<int> LevelsOfDetail { get; private set; }
     public List<Material> Materials { get; private set; }
     public Skeleton Skeleton { get; private set; }
     public Textures.TextureFile AttachedTexture { get; private set; }
 
+    /// <summary>The model's lights (street lamps, neon, spots); empty for most.</summary>
+    public List<Light> Lights { get; private set; }
+
     internal Drawable(DrawableModel drawableModel)
     {
+      Lights = new List<Light>();
+      foreach (var light in drawableModel.Lights)
+      {
+        Lights.Add(new Light(light));
+      }
+
       if (drawableModel.ShaderGroup != null)
       {
         Materials = new List<Material>(drawableModel.ShaderGroup.Shaders.Count);
@@ -55,6 +68,7 @@ namespace RageLib.Models.Data
       {
         Models.Add(new Model(info));
       }
+      LevelsOfDetail = new List<int>(drawableModel.LevelsOfDetail);
 
       AttachedTexture = drawableModel.ShaderGroup.TextureDictionary;
     }

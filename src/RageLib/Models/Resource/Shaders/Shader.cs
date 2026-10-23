@@ -50,6 +50,16 @@ namespace RageLib.Models.Resource.Shaders
 
     public Dictionary<ParamNameHash, IShaderParam> ShaderParams { get; private set; }
 
+    /// <summary>
+    /// The draw bucket (Unknown1's high byte): 0 opaque, 1 alpha, 2 decal, 3 cutout, 4 and 5 for emissive
+    /// shaders. Per material, not per shader: gta_default occurs in 0 to 3. Worked out from the shaders of
+    /// eleven map archives (all glass 1, all decals 2, gta_cutout_fence and gta_trees 3, terrain 0).
+    /// </summary>
+    public int DrawBucket => Unknown1 >> 8;
+
+    /// <summary>The number of the shader's preset (Unknown4_1: gta_default 1, gta_normal 2 ... gta_terrain_va_2lyr 0x26).</summary>
+    public int PresetIndex => Unknown4_1;
+
     public T GetInfoData<T>(ParamNameHash hash) where T : class, IShaderParam
     {
       IShaderParam value;

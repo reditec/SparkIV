@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="SparkIV.WinUI.Viewers.ResourceHexView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid RowSpacing="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- The file as it is stored, and the two parts of the resource, decompressed when first chosen -->
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <SelectorBar x:Name="Parts" SelectionChanged="Parts_SelectionChanged">
+                <SelectorBarItem x:Name="FileItem" Tag="file" ToolTipService.ToolTip="The file as it is in the archive: the resource header (RSC) and the compressed data">
+                    <SelectorBarItem.Icon><FontIcon Glyph="&#xE7C3;" /></SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Name="SystemItem" Tag="system" ToolTipService.ToolTip="System (virtual) memory: the structures, pointers and names of the resource">
+                    <SelectorBarItem.Icon><FontIcon Glyph="&#xE950;" /></SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Name="GraphicsItem" Tag="graphics" ToolTipService.ToolTip="Graphics (physical) memory: the pixels of textures, the vertices and indices of models">
+                    <SelectorBarItem.Icon><FontIcon Glyph="&#xE7F4;" /></SelectorBarItem.Icon>
+                </SelectorBarItem>
+            </SelectorBar>
+            <TextBlock x:Name="Summary" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                       Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Grid>
+
+        <ContentPresenter x:Name="PartHost" Grid.Row="1" />
+    </Grid>
+</UserControl>

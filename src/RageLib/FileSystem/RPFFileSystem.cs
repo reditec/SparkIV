@@ -68,14 +68,16 @@ namespace RageLib.FileSystem
       BuildFS();
     }
 
+    /// <summary>Writes the archive anew (packed) and puts it in place of the old file.</summary>
     public override void Save()
     {
-      _rpfFile.Save();
+      SaveByReplacing(_rpfFile.Filename);
     }
 
+    /// <summary>The same as <see cref="Save"/>: saving always writes the archive packed.</summary>
     public override void Rebuild()
     {
-      throw new NotImplementedException();
+      Save();
     }
 
     public override void Close()
@@ -85,7 +87,32 @@ namespace RageLib.FileSystem
 
     public override bool SupportsRebuild
     {
-      get { return false; }
+      get { return true; }
+    }
+
+    public override bool SupportsWriteTo
+    {
+      get { return true; }
+    }
+
+    public override void WriteTo(string path)
+    {
+      _rpfFile.WriteTo(path);
+    }
+
+    public override void Release()
+    {
+      _rpfFile.Close();
+    }
+
+    public override void Commit(string path)
+    {
+      _rpfFile.Commit(path);
+    }
+
+    public override void Revert()
+    {
+      _rpfFile.Revert();
     }
 
     public override bool HasDirectoryStructure

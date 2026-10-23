@@ -18,6 +18,7 @@
 
 \**********************************************************************/
 
+using System;
 using System.IO;
 using RageLib.Textures;
 using File = RageLib.HyperText.Resource.File;
@@ -48,7 +49,16 @@ namespace RageLib.HyperText
 
     public void WriteHTML(TextWriter writer)
     {
-      HyperTextExport.Export(File.Data.RootElement, writer);
+      WriteHTML(writer, null);
+    }
+
+    /// <summary>
+    /// Writes the page as HTML. <paramref name="findText"/> looks up the game texts the page shows by key
+    /// (from the .gxt text table); without it the keys are shown.
+    /// </summary>
+    public void WriteHTML(TextWriter writer, Func<string, string> findText)
+    {
+      HyperTextExport.Export(File.Data.RootElement, writer, findText);
     }
 
   }

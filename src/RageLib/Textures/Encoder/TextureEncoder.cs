@@ -30,67 +30,62 @@ namespace RageLib.Textures.Encoder
   {
     internal static void Encode(Texture texture, Image image, int level)
     {
-      var width = texture.GetWidth(level);
-      var height = texture.GetHeight(level);
-      var data = new byte[width * height * 4];  // R G B A
+      var width = (int)texture.GetWidth(level);
+      var height = (int)texture.GetHeight(level);
 
-      var bitmap = new Bitmap((int)width, (int)height);
+      // The picture scaled to the level's size, as B G R A (how GDI+ keeps 32 bit ARGB in memory).
+      var bgra = new byte[width * height * 4];
+      using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+      {
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+          g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+          g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+          g.DrawImage(image, 0, 0, width, height);
+        }
 
-      Graphics g = Graphics.FromImage(bitmap);
-      g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-      g.DrawImage(image, 0, 0, (int)width, (int)height);
-      g.Dispose();
+        // Row by row: the rows of a locked bitmap may be longer than its pixels (stride). The pixels are
+        // only read from the copy, as reading them one by one while locked fails.
+        var rect = new Rectangle(0, 0, width, height);
+        BitmapData bmpdata = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+          for (var y = 0; y < height; y++)
+          {
+            Marshal.Copy(bmpdata.Scan0 + y * bmpdata.Stride, bgra, y * width * 4, width * 4);
+          }
+        }
+        finally
+        {
+          bitmap.UnlockBits(bmpdata);
+        }
+      }
 
-      var rect = new Rectangle(0, 0, (int)width, (int)height);
-      BitmapData bmpdata = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-
+      byte[] data;
       if (texture.TextureType == TextureType.A8R8G8B8)
       {
-        Marshal.Copy(bmpdata.Scan0, data, 0, (int)width * (int)height * 4);
+        data = bgra;  // A8R8G8B8 is B G R A in memory too.
       }
       else if (texture.TextureType == TextureType.L8)
       {
-        var newData = new byte[width * height];
-
-        // Convert to L8
-        for (var y = 0; y < bitmap.Height; y++)
+        data = new byte[width * height];
+        for (var i = 0; i < data.Length; i++)
         {
-          for (var x = 0; x < bitmap.Width; x++)
-          {
-            var pixel = bitmap.GetPixel(x, y);
-            var grayValue = (byte)((pixel.R + pixel.G + pixel.B) / 3);
-            var dataOffset = y * width + x;
-
-            newData[dataOffset] = grayValue;
-          }
+          data[i] = (byte)((bgra[i * 4] + bgra[i * 4 + 1] + bgra[i * 4 + 2]) / 3);
         }
-
-        data = newData;
       }
       else
       {
-        // Convert from the B G R A format stored by GDI+ to R G B A
-        var imgWidth = bitmap.Width;
-        var imgHeight = bitmap.Height;
-        var imgData = new byte[width * height * 4];
-
-        for (var y = 0; y < imgHeight; y++)
+        // The DXT encoder takes R G B A.
+        data = new byte[width * height * 4];
+        for (var i = 0; i < width * height; i++)
         {
-          for (var x = 0; x < imgWidth; x++)
-          {
-            var pixel = bitmap.GetPixel(x, y);
-            var dataOffset = y * width * 4 + x * 4;
-            imgData[dataOffset + 0] = pixel.R; // R
-            imgData[dataOffset + 1] = pixel.G; // G
-            imgData[dataOffset + 2] = pixel.B; // B
-            imgData[dataOffset + 3] = pixel.A; // A
-          }
+          data[i * 4 + 0] = bgra[i * 4 + 2];
+          data[i * 4 + 1] = bgra[i * 4 + 1];
+          data[i * 4 + 2] = bgra[i * 4 + 0];
+          data[i * 4 + 3] = bgra[i * 4 + 3];
         }
       }
-
-      bitmap.UnlockBits(bmpdata);
-
-      bitmap.Dispose();
 
       switch (texture.TextureType)
       {

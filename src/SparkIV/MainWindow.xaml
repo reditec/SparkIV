@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="SparkIV.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:model="using:SparkIV.WinUI.Model"
+    Title="SparkIV">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="Root">
+        <Grid.Resources>
+            <CollectionViewSource x:Name="GroupedEntries" IsSourceGrouped="True" />
+
+            <Style x:Key="ToolButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="8,6" />
+                <Setter Property="Margin" Value="0,0,2,0" />
+            </Style>
+        </Grid.Resources>
+
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Title bar (the window content extends into it) -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="12,0,0,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <Image x:Name="TitleIcon" Width="16" Height="16" />
+                <TextBlock Text="SparkIV" Style="{StaticResource CaptionTextBlockStyle}" />
+                <TextBlock x:Name="TitleDetail" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Commands -->
+        <CommandBar Grid.Row="1" HorizontalAlignment="Left" DefaultLabelPosition="Right" Background="Transparent" Margin="4,0">
+            <AppBarButton x:Name="OpenGameButton" Label="GTA IV" Click="OpenGame_Click" ToolTipService.ToolTip="Browse the GTA IV game folder">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE7FC;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="OpenEpisodesButton" Label="Episodes" Click="OpenEpisodes_Click" ToolTipService.ToolTip="Browse the Episodes from Liberty City (also the Complete Edition)">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE7FC;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="OpenArchiveButton" Label="Open archive" Click="OpenArchive_Click" ToolTipService.ToolTip="Open an RPF or IMG archive">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8E5;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton x:Name="ExportButton" Label="Export" Click="Export_Click" IsEnabled="False" ToolTipService.ToolTip="Export the selected files and folders">
+                <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="ExportAllButton" Label="Export all" Click="ExportAll_Click" IsEnabled="False" ToolTipService.ToolTip="Export everything in this folder">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8B7;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarToggleButton x:Name="EditModeButton" Label="Edit mode" Click="EditMode_Click" ToolTipService.ToolTip="Turn on changing game files (import, replace, save)">
+                <AppBarToggleButton.Icon><FontIcon Glyph="&#xE70F;" /></AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarButton x:Name="ImportButton" Label="Import" Click="Import_Click" IsEnabled="False" ToolTipService.ToolTip="Replace files in this folder with files of the same name">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE898;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton x:Name="SaveButton" Label="Save" Click="Save_Click" IsEnabled="False" ToolTipService.ToolTip="Write the imported files">
+                <AppBarButton.Icon><FontIcon x:Name="SaveGlyph" Glyph="&#xE74E;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton Label="Settings" Click="Settings_Click" ToolTipService.ToolTip="Game folders and other settings">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE713;" /></AppBarButton.Icon>
+            </AppBarButton>
+        </CommandBar>
+
+        <!-- Navigation, address and filter -->
+        <Grid Grid.Row="2" Margin="8,0,8,6" ColumnSpacing="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="BackButton" Style="{StaticResource ToolButtonStyle}" Click="Back_Click" IsEnabled="False" ToolTipService.ToolTip="Back (Alt+Left)">
+                    <Button.KeyboardAccelerators><KeyboardAccelerator Modifiers="Menu" Key="Left" /></Button.KeyboardAccelerators>
+                    <FontIcon Glyph="&#xE72B;" FontSize="14" />
+                </Button>
+                <Button x:Name="ForwardButton" Style="{StaticResource ToolButtonStyle}" Click="Forward_Click" IsEnabled="False" ToolTipService.ToolTip="Forward (Alt+Right)">
+                    <Button.KeyboardAccelerators><KeyboardAccelerator Modifiers="Menu" Key="Right" /></Button.KeyboardAccelerators>
+                    <FontIcon Glyph="&#xE72A;" FontSize="14" />
+                </Button>
+                <Button x:Name="UpButton" Style="{StaticResource ToolButtonStyle}" Click="Up_Click" IsEnabled="False" ToolTipService.ToolTip="Up (Alt+Up)">
+                    <Button.KeyboardAccelerators><KeyboardAccelerator Modifiers="Menu" Key="Up" /></Button.KeyboardAccelerators>
+                    <FontIcon Glyph="&#xE74A;" FontSize="14" />
+                </Button>
+            </StackPanel>
+
+            <Border Grid.Column="1" CornerRadius="{ThemeResource ControlCornerRadius}" Padding="8,4"
+                    Background="{ThemeResource ControlFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                <BreadcrumbBar x:Name="Breadcrumb" VerticalAlignment="Center" ItemClicked="Breadcrumb_ItemClicked" />
+            </Border>
+
+            <AutoSuggestBox x:Name="FilterBox" Grid.Column="2" Width="260" PlaceholderText="Filter" QueryIcon="Find"
+                            IsEnabled="False" TextChanged="FilterBox_TextChanged" />
+        </Grid>
+
+        <InfoBar x:Name="Info" Grid.Row="3" Margin="8,0,8,6" IsOpen="False" />
+
+        <!-- Folders and files -->
+        <Grid Grid.Row="4" Margin="8,0,8,0" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="280" MinWidth="160" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <TreeView x:Name="FolderTree" SelectionMode="Single" CanDragItems="False" AllowDrop="False"
+                          ItemInvoked="FolderTree_ItemInvoked" Expanding="FolderTree_Expanding">
+                    <TreeView.ItemTemplate>
+                        <DataTemplate x:DataType="TreeViewNode">
+                            <TreeViewItem>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="{x:Bind ((model:TreeEntry)Content).Glyph}" FontSize="14" />
+                                    <TextBlock Text="{x:Bind ((model:TreeEntry)Content).Name}" />
+                                </StackPanel>
+                            </TreeViewItem>
+                        </DataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Border>
+
+            <Border Grid.Column="1" CornerRadius="{ThemeResource OverlayCornerRadius}" Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Column headers; click to sort -->
+                    <Grid Padding="12,4,24,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" MinWidth="200" />
+                            <ColumnDefinition Width="170" />
+                            <ColumnDefinition Width="90" />
+                            <ColumnDefinition Width="170" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="SortName" Grid.Column="0" Style="{StaticResource ColumnHeaderStyle}" Content="Name" Tag="Name" Click="SortColumn_Click" />
+                        <Button x:Name="SortType" Grid.Column="1" Style="{StaticResource ColumnHeaderStyle}" Content="Type" Tag="Type" Click="SortColumn_Click" />
+                        <Button x:Name="SortSize" Grid.Column="2" Style="{StaticResource ColumnHeaderStyle}" Content="Size" Tag="Size" Click="SortColumn_Click" HorizontalContentAlignment="Right" />
+                        <Button x:Name="SortResource" Grid.Column="3" Style="{StaticResource ColumnHeaderStyle}" Content="Resource" Tag="Resource" Click="SortColumn_Click" />
+                    </Grid>
+
+                    <ListView x:Name="FileList" Grid.Row="1" SelectionMode="Extended" IsItemClickEnabled="False"
+                              DoubleTapped="FileList_DoubleTapped" KeyDown="FileList_KeyDown"
+                              SelectionChanged="FileList_SelectionChanged"
+                              AllowDrop="True" DragOver="FileList_DragOver" Drop="FileList_Drop">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+                                <Setter Property="MinHeight" Value="32" />
+                                <Setter Property="Padding" Value="12,0" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.GroupStyle>
+                            <GroupStyle>
+                                <GroupStyle.HeaderTemplate>
+                                    <DataTemplate x:DataType="model:EntryGroup">
+                                        <TextBlock Text="{x:Bind Header}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                    </DataTemplate>
+                                </GroupStyle.HeaderTemplate>
+                            </GroupStyle>
+                        </ListView.GroupStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="model:EntryItem">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" MinWidth="200" />
+                                        <ColumnDefinition Width="170" />
+                                        <ColumnDefinition Width="90" />
+                                        <ColumnDefinition Width="170" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Orientation="Horizontal" Spacing="10" Padding="8,0">
+                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" />
+                                        <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <!-- Changed, not saved yet -->
+                                        <Border Visibility="{x:Bind UnsavedVisibility}" VerticalAlignment="Center" Padding="6,0,6,1" CornerRadius="8"
+                                                Background="{ThemeResource AccentFillColorDefaultBrush}"
+                                                ToolTipService.ToolTip="Changed and not saved yet: Save writes it into the game files">
+                                            <TextBlock Text="changed" FontSize="11" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="{x:Bind TypeName}" Padding="8,0" VerticalAlignment="Center"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="2" Text="{x:Bind SizeText}" Padding="8,0" VerticalAlignment="Center" HorizontalAlignment="Right"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="3" Text="{x:Bind Resource}" Padding="8,0" VerticalAlignment="Center"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                        <ListView.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Open" Click="ContextOpen_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8E5;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem x:Name="OpenBinaryItem" Text="Open as binary" Click="ContextOpenBinary_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE943;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Edit externally…" Click="ContextEditExternally_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8A7;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Export…" Click="Export_Click">
+                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xEDE1;" /></MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </ListView.ContextFlyout>
+                    </ListView>
+
+                    <!-- Shown before anything is open -->
+                    <StackPanel x:Name="Welcome" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="420">
+                        <FontIcon Glyph="&#xE7FC;" FontSize="40" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="Open the game folder or an archive" Style="{StaticResource SubtitleTextBlockStyle}" HorizontalAlignment="Center" />
+                        <TextBlock Text="GTA IV, the Episodes from Liberty City or the Complete Edition, or any RPF or IMG file."
+                                   TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Status bar -->
+        <Grid Grid.Row="5" Padding="16,6" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusItems" Style="{StaticResource CaptionTextBlockStyle}" />
+            <TextBlock x:Name="StatusSelection" Grid.Column="1" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <ProgressRing x:Name="Busy" Grid.Column="2" Width="16" Height="16" IsActive="False" />
+        </Grid>
+    </Grid>
+</Window>

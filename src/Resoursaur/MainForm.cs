@@ -208,7 +208,7 @@ namespace Resoursaur
 
     private void lnkWebsite_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
     {
-      Process.Start("http://www.quackler.com");
+      Process.Start(new ProcessStartInfo("http://www.quackler.com") { UseShellExecute = true });
     }
   }
 }

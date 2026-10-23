@@ -43,6 +43,24 @@ namespace RageLib.FileSystem
       BuildFS();
     }
 
+    /// <summary>The files on disk that Save will write (full paths).</summary>
+    public IEnumerable<string> ModifiedFiles
+    {
+      get { return _customData.Keys; }
+    }
+
+    /// <summary>The new content of a file of <see cref="ModifiedFiles"/>.</summary>
+    public byte[] GetChange(string path)
+    {
+      return _customData[path];
+    }
+
+    /// <summary>A changed file was written by someone else (SparkIV with administrator rights): it is saved.</summary>
+    public void MarkSaved(string path)
+    {
+      _customData.Remove(path);
+    }
+
     public override void Save()
     {
       foreach (var pair in _customData)

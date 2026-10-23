@@ -19,6 +19,7 @@
 \**********************************************************************/
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace RageLib.FileSystem.RPF
@@ -36,9 +37,20 @@ namespace RageLib.FileSystem.RPF
     public Header Header { get; private set; }
     public TOC TOC { get; private set; }
 
+    private string _filename;
+
+    public string Filename
+    {
+      get { return _filename; }
+    }
+
     public bool Open(string filename)
     {
-      _stream = new FileStream(filename, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+      _filename = filename;
+
+      // Only read: archives in protected folders (Program Files) open without administrator rights too.
+      // Saving writes a new file (WriteTo).
+      _stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
       var br = new BinaryReader(_stream);
       Header.Read(br);
@@ -63,80 +75,96 @@ namespace RageLib.FileSystem.RPF
       }
     }
 
-    public void Save()
+    // Where each file entry is in the file written by WriteTo, until Commit.
+    private (FileEntry Entry, int Offset, int SizeUsed)[] _written;
+
+    /// <summary>
+    /// Writes the archive with all changes into a new file, packed: the header, the table of contents at
+    /// 0x800, then the files one after the other. Unencrypted (the game reads that too). This file and its
+    /// entries stay as they are until <see cref="Commit"/>.
+    /// </summary>
+    public void WriteTo(string path)
     {
-      if (Header.EntryCount > 0)
+      const int tocOffset = 0x800;
+      var written = new List<(FileEntry, int, int)>();
+      using (var output = new FileStream(path, FileMode.Create, FileAccess.Write))
       {
-        _stream.Position = 0;
+        var bw = new BinaryWriter(output);
 
-        var bw = new BinaryWriter(_stream);
+        int dataOffset = (tocOffset + Header.TOCSize + FileEntry.BlockSize - 1) / FileEntry.BlockSize * FileEntry.BlockSize;
+        output.Position = dataOffset;
 
+        foreach (var entry in TOC)
+        {
+          if (entry is not FileEntry fileEntry)
+          {
+            continue;
+          }
+          // Custom data is already padded to whole blocks; the stored data is taken as it is (compressed or not).
+          byte[] data = fileEntry.CustomData ?? ReadData(fileEntry.Offset, fileEntry.SizeUsed);
+          int sizeUsed = (data.Length + FileEntry.BlockSize - 1) / FileEntry.BlockSize * FileEntry.BlockSize;
+          bw.Write(data);
+          if (sizeUsed > data.Length)
+          {
+            bw.Write(new byte[sizeUsed - data.Length]);
+          }
+          written.Add((fileEntry, dataOffset, sizeUsed));
+          dataOffset += sizeUsed;
+        }
+
+        // The table with the new places, then the entries as they were again until Commit.
+        var old = new List<int>();
+        foreach (var (entry, offset, _) in written)
+        {
+          old.Add(entry.Offset);
+          entry.Offset = offset;
+        }
+        output.Position = 0;
         Header.Write(bw);
-
-        // Recalculate the offset/sizes of the TOC entries
-        var tocOffset = 0x800;
-
-        // Find the max value here
-        var dataOffset = int.MinValue;
-        foreach (var entry in TOC)
+        output.Position = tocOffset;
+        bw.Write(TableBytes());
+        for (int i = 0; i < written.Count; i++)
         {
-          var fileEntry = entry as FileEntry;
-          if (fileEntry != null)
-          {
-            var offset = fileEntry.Offset + fileEntry.SizeUsed;
-            if (offset > dataOffset)
-            {
-              dataOffset = offset;
-            }
-          }
+          written[i].Item1.Offset = old[i];
         }
+      }
+      _written = written.ToArray();
+    }
 
-        foreach (var entry in TOC)
-        {
-          var fileEntry = entry as FileEntry;
-          if (fileEntry != null && fileEntry.CustomData != null)
-          {
-            var blockCount = (int)Math.Ceiling((float)fileEntry.CustomData.Length / FileEntry.BlockSize);
-            var blockSize = blockCount * FileEntry.BlockSize;
+    /// <summary>The table of contents, exactly as long as the header says.</summary>
+    private byte[] TableBytes()
+    {
+      var ms = new MemoryStream();
+      TOC.Write(new BinaryWriter(ms));
+      var table = new byte[Header.TOCSize];
+      Array.Copy(ms.ToArray(), table, Math.Min(table.Length, (int)ms.Length));
+      return table;
+    }
 
-            if (blockSize <= fileEntry.SizeUsed)
-            {
-              // Clear up the old data
-              _stream.Seek(fileEntry.Offset, SeekOrigin.Begin);
-              bw.Write(new byte[fileEntry.SizeUsed]);
+    /// <summary>The file written by <see cref="WriteTo"/> took the place of this one at <paramref name="path"/>.</summary>
+    public void Commit(string path)
+    {
+      Close();
+      foreach (var (entry, offset, sizeUsed) in _written)
+      {
+        entry.Offset = offset;
+        entry.SizeUsed = sizeUsed;
+        entry.SetCustomData(null);
+      }
+      _written = null;
+      // As written: not encrypted any more.
+      Header.Encrypted = false;
+      _filename = path;
+      _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
 
-              // We can fit it in the existing block... so lets do that.
-              _stream.Seek(fileEntry.Offset, SeekOrigin.Begin);
-            }
-            else
-            {
-              // Clear up the old data
-              _stream.Seek(fileEntry.Offset, SeekOrigin.Begin);
-              bw.Write(new byte[fileEntry.SizeUsed]);
-
-              // Fit it at the end of the stream
-              fileEntry.Offset = dataOffset;
-              _stream.Seek(dataOffset, SeekOrigin.Begin);
-              dataOffset += blockSize;
-            }
-
-            fileEntry.SizeUsed = blockSize;
-
-            bw.Write(fileEntry.CustomData);
-
-            if ((fileEntry.CustomData.Length % FileEntry.BlockSize) != 0)
-            {
-              var padding = new byte[blockSize - fileEntry.CustomData.Length];
-              bw.Write(padding);
-            }
-
-            fileEntry.SetCustomData(null);
-          }
-        }
-
-        _stream.Seek(tocOffset, SeekOrigin.Begin);
-
-        TOC.Write(bw);
+    /// <summary>The written file couldn't take its place: on with this one, changes kept.</summary>
+    public void Revert()
+    {
+      _written = null;
+      if (_stream == null || !_stream.CanRead)
+      {
+        _stream = new FileStream(_filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
       }
     }
 
@@ -144,7 +172,7 @@ namespace RageLib.FileSystem.RPF
     {
       var buffer = new byte[length];
       _stream.Seek(offset, SeekOrigin.Begin);
-      _stream.Read(buffer, 0, length);
+      _stream.ReadAtLeast(buffer, length, throwOnEndOfStream: false);
       return buffer;
     }
 
