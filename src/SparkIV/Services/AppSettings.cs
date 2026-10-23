@@ -38,6 +38,19 @@ namespace SparkIV.WinUI.Services
       public string? BackupFolder { get; set; }
 
       public bool CutsceneSeeThroughLikeGame { get; set; } = true;
+
+      public string? UpdateChannel { get; set; }
+    }
+
+    /// <summary>The update channel chosen ("Alpha", "Beta", "Release"); null for the one of the running version.</summary>
+    public static string? UpdateChannel
+    {
+      get => Load().UpdateChannel;
+      set
+      {
+        Load().UpdateChannel = value;
+        Save();
+      }
     }
 
     /// <summary>

@@ -28,7 +28,7 @@ namespace SparkIV.WinUI
 {
   /// <summary>
   /// SparkIV's settings: where the games are installed (one folder per game and platform), the backups,
-  /// how cutscenes are shown.
+  /// how cutscenes are shown, the update channel.
   /// </summary>
   public sealed partial class SettingsWindow : Window
   {
@@ -58,10 +58,21 @@ namespace SparkIV.WinUI
       }
       ShowBackupFolder();
       SeeThroughSwitch.IsOn = AppSettings.CutsceneSeeThroughLikeGame;
+      VersionText.Text = "Installed: SparkIV " + Updates.CurrentVersion;
+      ChannelBox.SelectedIndex = (int)Updates.Channel;
     }
 
     private void SeeThroughSwitch_Toggled(object sender, RoutedEventArgs e) =>
       AppSettings.CutsceneSeeThroughLikeGame = SeeThroughSwitch.IsOn;
+
+    private void ChannelBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+      // Only a choice by the user is stored; the default follows the running version.
+      if (ChannelBox.SelectedItem is ComboBoxItem { Tag: string tag } && Enum.TryParse(tag, out UpdateChannel channel) && channel != Updates.Channel)
+      {
+        Updates.Channel = channel;
+      }
+    }
 
     #region Backups
 

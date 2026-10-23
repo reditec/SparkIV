@@ -49,7 +49,14 @@ The episodes (The Lost and Damned, The Ballad of Gay Tony) are not part of 1.0; 
 An installed SparkIV checks the GitHub releases at start ([Velopack](https://velopack.io/), `Services/Updates.cs`).
 If there is a newer version it shows "Update available"; one click downloads it and restarts SparkIV.
 
-- An alpha or beta installation also gets alpha and beta releases; a release installation only releases.
+- The update channel is chosen in Settings → Updates:
+  - **Alpha** gets alpha, beta and release versions;
+  - **Beta** gets beta and release versions;
+  - **Release** gets release versions only.
+
+  Without a choice, the channel of the installed version applies (0.9.0-alpha.1: Alpha). GitHub only marks
+  pre-releases, so alpha and beta are told apart by the version in the package names. A channel never goes back to
+  an older version.
 - The package id is `reditec.SparkIV`; it names the install folder `%LocalAppData%\reditec.SparkIV`. It must never
   change, or installed versions no longer find their updates. It is not `SparkIV`, because the settings are kept in
   `%LocalAppData%\SparkIV` and an uninstall removes the install folder.

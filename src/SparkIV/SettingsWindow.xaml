@@ -48,6 +48,9 @@
             <SelectorBarItem Text="Cutscenes" Tag="CutscenesPage">
                 <SelectorBarItem.Icon><FontIcon Glyph="&#xE714;" /></SelectorBarItem.Icon>
             </SelectorBarItem>
+            <SelectorBarItem Text="Updates" Tag="UpdatesPage">
+                <SelectorBarItem.Icon><FontIcon Glyph="&#xE895;" /></SelectorBarItem.Icon>
+            </SelectorBarItem>
         </SelectorBar>
 
         <InfoBar x:Name="Info" Grid.Row="2" Margin="16,0,16,8" IsOpen="False" Severity="Error" />
@@ -110,6 +113,34 @@
                             </StackPanel>
                             <ToggleSwitch x:Name="SeeThroughSwitch" Grid.Column="1" VerticalAlignment="Center"
                                           OnContent="" OffContent="" MinWidth="0" Toggled="SeeThroughSwitch_Toggled" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <ScrollViewer x:Name="UpdatesPage" Padding="24,8,24,24" Visibility="Collapsed">
+                <StackPanel Spacing="4">
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="At start, SparkIV checks GitHub for a newer version in the chosen channel and offers to install it. A channel doesn't go back to an older version: after switching from Alpha to Release, the next update is the first release newer than the version installed." />
+                    <Border Padding="16,12,16,12" CornerRadius="4" BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Update channel" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock x:Name="VersionText" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox x:Name="ChannelBox" Grid.Column="1" VerticalAlignment="Center" MinWidth="240"
+                                      SelectionChanged="ChannelBox_SelectionChanged">
+                                <ComboBoxItem Content="Alpha: alpha, beta and releases" Tag="Alpha" />
+                                <ComboBoxItem Content="Beta: beta and releases" Tag="Beta" />
+                                <ComboBoxItem Content="Release: releases only" Tag="Release" />
+                            </ComboBox>
                         </Grid>
                     </Border>
                 </StackPanel>
