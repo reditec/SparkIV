@@ -26,6 +26,10 @@ This fork rebuilds SparkIV as a **WinUI 3 app on .NET 10**. Its viewers render t
   - The key the game uses to encrypt its archives is read at run time from your game's executable.
   - No game data and no key is part of this repository.
 
+## Installing
+
+Download `reditec.SparkIV-win-Setup.exe` from the [releases](https://github.com/reditec/SparkIV/releases) and run it. SparkIV checks for new versions at start and updates itself with one click.
+
 ## Building
 
 1. Install the [.NET 10 SDK](https://dotnet.microsoft.com/download). Visual Studio with the Windows App SDK (WinUI) tools is optional.
@@ -48,6 +52,7 @@ Third-party components:
 - [SharpZipLib](https://github.com/icsharpcode/SharpZipLib) (MIT)
 - [Ookii.Dialogs](https://github.com/ookii-dialogs/ookii-dialogs-winforms) (BSD-3-Clause)
 - [Windows App SDK](https://github.com/microsoft/WindowsAppSDK) (MIT)
+- [Velopack](https://github.com/velopack/velopack) (MIT), installer and updates
 - zlib, through .NET's `System.IO.Compression`
 
 ## Changelog
@@ -57,6 +62,8 @@ Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first
 ### v0.9.0-alpha.1 (WinUI version, reditec)
 
 * New WinUI 3 app on .NET 10.
+
+* Installer; SparkIV updates itself from the GitHub releases.
 
 * New viewers for models, animations, cutscenes and collision; the audio viewer can play and export multichannel banks.
 

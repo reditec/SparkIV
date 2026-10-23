@@ -44,8 +44,24 @@ On GitHub, alpha and beta releases are marked as "Pre-release".
 
 The episodes (The Lost and Damned, The Ballad of Gay Tony) are not part of 1.0; their full support follows in 1.x.
 
+## Updates
+
+An installed SparkIV checks the GitHub releases at start ([Velopack](https://velopack.io/), `Services/Updates.cs`).
+If there is a newer version it shows "Update available"; one click downloads it and restarts SparkIV.
+
+- An alpha or beta installation also gets alpha and beta releases; a release installation only releases.
+- The package id is `reditec.SparkIV`; it names the install folder `%LocalAppData%\reditec.SparkIV`. It must never
+  change, or installed versions no longer find their updates. It is not `SparkIV`, because the settings are kept in
+  `%LocalAppData%\SparkIV` and an uninstall removes the install folder.
+- SparkIV run from its build folder (Visual Studio) doesn't check for updates.
+- For testing, the environment variable `SPARKIV_UPDATE_SOURCE` names a local folder with packed releases
+  (the output of `tools/release.ps1`) instead of GitHub.
+
 ## Release checklist
 
 1. Set `<Version>` in `src/Directory.Build.props`.
-2. Turn the "Unreleased" heading in the README changelog into the version.
-3. Commit, tag `v<version>`, publish the release on GitHub (pre-release for alpha and beta).
+2. Turn the newest changelog heading in the README into the version.
+3. Commit and merge into `master`.
+4. Run `tools/release.ps1`. It builds SparkIV (x64, self-contained) and packs it into `release/out`.
+5. On GitHub, create a release with the tag `v<version>` on that commit (mark alpha and beta as "Pre-release")
+   and upload every file from `release/out`. Users install with `reditec.SparkIV-win-Setup.exe`.

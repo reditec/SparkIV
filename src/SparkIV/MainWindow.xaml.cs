@@ -84,6 +84,31 @@ namespace SparkIV.WinUI
 
       UpdateSortHeaders();
       UpdateEditModeButton();
+
+      CheckForUpdate();
+    }
+
+    private async void CheckForUpdate()
+    {
+      string? version = await Updates.CheckAsync();
+      if (version != null)
+      {
+        ShowMessage(InfoBarSeverity.Informational, "Update available", "SparkIV " + version + " is ready to install.",
+                    "Install and restart", async () => await InstallUpdateAsync());
+      }
+    }
+
+    private async Task InstallUpdateAsync()
+    {
+      ShowMessage(InfoBarSeverity.Informational, "Updating", "Downloading the update; SparkIV restarts when it is done.");
+      try
+      {
+        await Updates.InstallAndRestartAsync();
+      }
+      catch (Exception ex)
+      {
+        ShowMessage(InfoBarSeverity.Error, "Update failed", ex.Message);
+      }
     }
 
     #region Opening

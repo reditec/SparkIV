@@ -15,15 +15,20 @@
     <!-- A plain exe: no MSIX package, and the Windows App SDK runtime ships next to it. -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Builds SparkIV.pri with the compiled XAML; without it dotnet publish leaves both out and the app can't start. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <!-- File and Directory are also RageLib type names. -->
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Program.cs is the entry point, so the updater (Velopack) runs before the app starts. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
 
   <ItemGroup>
