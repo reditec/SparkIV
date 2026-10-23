@@ -11,7 +11,7 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <ApplicationIcon>..\GTAIV.ico</ApplicationIcon>
+    <ApplicationIcon>..\SparkIV.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

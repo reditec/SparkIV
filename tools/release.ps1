@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 # The id names the install folder (%LocalAppData%\<id>), which an uninstall removes; it must not be "SparkIV",
 # where the settings are kept. It can't change later, or installed versions no longer find their updates.
 dotnet vpk pack --packId reditec.SparkIV --packVersion $Version --packTitle SparkIV --packAuthors reditec `
-  --packDir $publish --mainExe SparkIV.exe --icon src\GTAIV.ico --outputDir $out
+  --packDir $publish --mainExe SparkIV.exe --icon src\SparkIV.ico --outputDir $out
 if ($LASTEXITCODE -ne 0) { throw 'vpk pack failed' }
 
 "Release $Version is in $out"

@@ -12,7 +12,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationIcon>..\GTAIV.ico</ApplicationIcon>
+    <ApplicationIcon>..\SparkIV.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

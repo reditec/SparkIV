@@ -7,7 +7,7 @@
     <RootNamespace>SparkIV.WinUI</RootNamespace>
     <AssemblyName>SparkIV</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>..\GTAIV.ico</ApplicationIcon>
+    <ApplicationIcon>..\SparkIV.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -32,7 +32,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\GTAIV.ico" Link="GTAIV.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\SparkIV.ico" Link="SparkIV.ico" CopyToOutputDirectory="PreserveNewest" />
     <!-- The licenses ship with the program; Settings > About shows them. -->
     <Content Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\licenses\*.txt" Link="licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

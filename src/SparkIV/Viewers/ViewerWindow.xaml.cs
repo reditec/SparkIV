@@ -55,7 +55,7 @@ namespace SparkIV.WinUI.Viewers
       Root.Loaded += (sender, args) => TitleBarColors.Apply(this, Root);
       Root.ActualThemeChanged += (sender, args) => TitleBarColors.Apply(this, Root);
 
-      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "GTAIV.ico");
+      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "SparkIV.ico");
       if (System.IO.File.Exists(icon))
       {
         AppWindow.SetIcon(icon);

@@ -61,7 +61,7 @@ namespace SparkIV.WinUI
       Root.Loaded += (sender, args) => ApplyCaptionButtonColors();
       Root.ActualThemeChanged += (sender, args) => ApplyCaptionButtonColors();
 
-      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "GTAIV.ico");
+      string icon = System.IO.Path.Combine(AppContext.BaseDirectory, "SparkIV.ico");
       if (System.IO.File.Exists(icon))
       {
         AppWindow.SetIcon(icon);

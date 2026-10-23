@@ -1,3 +1,5 @@
+<img src="assets/logo/sparkiv-icon-256.png" alt="SparkIV logo" width="96" align="right">
+
 # SparkIV
 
 A file browser, viewer and editor for **Grand Theft Auto IV** and **Episodes from Liberty City** (PC).
@@ -64,6 +66,8 @@ Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first
 * New WinUI 3 app on .NET 10.
 
 * Installer; SparkIV updates itself from the GitHub releases.
+
+* New logo, replacing the GTA IV icon.
 
 * New viewers for models, animations, cutscenes and collision; the audio viewer can play and export multichannel banks.
 

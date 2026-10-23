@@ -71,6 +71,12 @@ Settings → About shows the license and the third-party notices. When a shipped
 update `licenses/THIRD-PARTY-NOTICES.txt` and, for the Microsoft components, copy the license files from their
 NuGet packages again.
 
+## Logo
+
+The logo is drawn as a vector in [`assets/logo/sparkiv-icon.svg`](../assets/logo/sparkiv-icon.svg).
+`tools/make-icon.ps1` turns it into `src/SparkIV.ico` (16 to 256 px) and `assets/logo/sparkiv-icon-256.png`;
+run it again after changing the SVG.
+
 ## Release checklist
 
 1. Set `<Version>` in `src/Directory.Build.props`.
