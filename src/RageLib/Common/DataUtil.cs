@@ -19,6 +19,8 @@
 \**********************************************************************/
 
 using System;
+using System.IO;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using ICSharpCode.SharpZipLib.Zip.Compression;
 
@@ -67,6 +69,22 @@ namespace RageLib.Common
       inflater.Inflate(decompData);
 
       return decompData;
+    }
+
+    /// <summary>
+    /// Inflates a zlib stream (with its header and Adler-32, as the old native ragezip.dll took it) into parts of
+    /// the given sizes, one after the other: a compressed script's code, its locals and its globals.
+    /// </summary>
+    public static byte[][] DecompressZlib(byte[] data, params int[] partSizes)
+    {
+      var parts = new byte[partSizes.Length][];
+      using var inflater = new ZLibStream(new MemoryStream(data), CompressionMode.Decompress);
+      for (int i = 0; i < partSizes.Length; i++)
+      {
+        parts[i] = new byte[partSizes[i]];
+        inflater.ReadExactly(parts[i]);
+      }
+      return parts;
     }
 
     public static uint SwapEndian(uint v)
