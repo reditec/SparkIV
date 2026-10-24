@@ -337,8 +337,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return texture.Substring(0, at) + letter + texture.Substring(at + 1);
     }
 
-    /// <summary>A ped (placed in the scene by its clip's model tracks) rather than a prop (by its root bone).</summary>
-    public bool IsPed => Scene != null && Scene.Bones.Count > 40;
+    /// <summary>
+    /// A ped (placed in the scene by its clip's model tracks) rather than a prop (by its root bone). Never a vehicle,
+    /// whatever its bones: et01_ba's Presidente has 55 and so was taken for one, which left its glass unculled (the
+    /// page culls a vehicle's back faces only when it isn't a ped) - the side windows' inner shell drawn over the outer
+    /// one, which the game's vehglass draws (CULLMODE CW) never show from outside.
+    /// </summary>
+    public bool IsPed => Scene != null && Scene.Bones.Count > 40 && !Scene.Materials.Any(m => m.Vehicle);
 
     /// <summary>
     /// A vehicle's six colours (RGB 0 to 1) its materials' paint slots take (see SceneMaterial.PaintSlot), or null.

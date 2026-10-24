@@ -116,3 +116,13 @@ Transparent map parts, such as a sheer curtain, are drawn individually after the
 - **Evidence:** et01_aa: The curtain got only the ceiling lamp (5.2 m) and the spot (5 m), not the table lamps (2–3.5 m).
 
 In SparkIV: uniform `forwardLit` in `ModelView.html`.
+
+## Which lamps a frame draws: the camera's interior
+
+With the camera inside an interior, the game draws the deferred lamps of that interior only, not those of other interiors in reach (other floors).
+
+- **Evidence:** TLAD trace GTAIV.3, frame 10210 (et01_aa section 2, frame 119.5, camera in `E1elizaLounge_MloRoom`). The frame draws 7 lamps (pixel shaders 0x25d41c80 and the shadow lamp's 0x25d413c0), all in E1_Elizabeta's lounge. Their positions match SparkIV's lamps to 0.01 m (scene offset 353.82 / 1518.52 / 24.69).
+- Within reach SparkIV had 35 lamps, 20 of them in GTA IV's interiors below (`RM3a`, `ProjectF1`, `ProjectF1B`). None of these is drawn by the game; here they lit through the floor.
+- Not explained yet: 6 further lamps of the same interior (hall, kitchen, two in the lounge) are not drawn in that frame either. Probably visibility culling of the light volumes (frustum, portals); **unconfirmed**, the exe's selection is not traced.
+
+In SparkIV: `sceneLightsNow` in `ModelView.html` skips lamps whose room (`roomOf`) belongs to another interior than the camera's room. Status: **used** (the interior rule); the further culling is **unclear**.
