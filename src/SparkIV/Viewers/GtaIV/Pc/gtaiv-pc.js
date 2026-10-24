@@ -292,11 +292,19 @@ const GameGlsl = Object.freeze({
     // map: at 1 - (r.xy / (2 (1 + saturate(r.z))) + 0.5) - here the same place in this page's own orientation of
     // it -, the map's level lod (its four: 1024, 512, 256, 128). Where no map object is, the sky (which the game
     // draws into the map first): its colours back in light. Without the map the sky everywhere.
+    // The game's map has four levels only, each made from the one above by its own pass (TLAD trace GTAIV.4 frame
+    // 10070, draws 158466112 / 158466153 / ...: pixel shader 0x23c2bd80, one filtered read of level c66.z, times
+    // |c66.w|^0.25 with c66.w = 1/2, 1/3, 1/4): level n is the mean of the one above x (1 / (n + 1))^0.25, so
+    // 1, 0.841, 0.639, 0.452 of the plain mean. Here the plain means (generateMipmap) times those, a lod past 3
+    // held at 3. (Without them a toll booth panel at et01_ba f906, reading lod 2.78 near the map's rim, mirrored
+    // twice the game's sky: game 3.7/5.2/6.7 there, the plain mean 7.3/10.8/14.4.)
     vec3 mirroredAround(vec3 r, float lod) {
       vec3 skyLight = gameToneUnmap(mix(skyColor, skyTopColor, clamp(r.z * 2.5, 0.0, 1.0)));
       if (!parabolicOn) return skyLight;
-      vec4 m = textureLod(parabolicMap, 0.5 + r.xy / (2.0 * (1.0 + clamp(r.z, 0.0, 1.0))), lod);
-      return m.rgb + (1.0 - m.a) * skyLight;
+      float level = clamp(lod, 0.0, 3.0);
+      vec4 m = textureLod(parabolicMap, 0.5 + r.xy / (2.0 * (1.0 + clamp(r.z, 0.0, 1.0))), level);
+      float darker = level < 1.0 ? mix(1.0, 0.8409, level) : level < 2.0 ? mix(0.8409, 0.6389, level - 1.0) : mix(0.6389, 0.4518, level - 2.0);
+      return m.rgb * darker + (1.0 - m.a) * skyLight;
     }
     // How much of the sun reaches the point P (0 to 1), as deferred_lighting.fxc's sun pass (program 21) and
     // gta_vehicle_vehglass (program 8) read the game's shadow: the cascade by the point's depth along the view

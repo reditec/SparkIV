@@ -2661,7 +2661,11 @@
           // A vehicle's glass writes its depth, as the game's vehglass draws do (ZWRITEENABLE TRUE in the TLAD trace
           // GTAIV.4): glass behind glass already drawn stays out (et01_ba: the rear window's inner layer, its heating
           // wire's orange edge, behind the near side window). A map's glass too (its draws there: ZWRITEENABLE TRUE).
-          const glassDepth = glassPass && mat.glass && (mat.vehicle || mapGlass);
+          // And a map's other see-through materials drawn forward (forwardMap; TLAD trace GTAIV.3 frame 13868, et01_aa's
+          // pendant shade, gta_normal draw 120952817: ZWRITEENABLE TRUE): the shade is a double shell, and its near
+          // outer layer, drawn first, keeps out the inner layer behind it that faces the bulb - without the depth that
+          // inner layer showed through, lit by the bulb, and the shade glowed cream where the game's stays dim.
+          const glassDepth = glassPass && ((mat.glass && (mat.vehicle || mapGlass)) || forwardMap);
           if (glassDepth) gl.depthMask(true);
           // A see-through glowing material in an interior only as its glow: in the TLAD trace GTAIV.3 (et01_aa,
           // Elizabeta's flat, frame 9900) the lamp shades' and bulbs' textures are bound only for their glow draws
