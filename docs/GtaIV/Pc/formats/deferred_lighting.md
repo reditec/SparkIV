@@ -70,3 +70,16 @@ In SparkIV: cutscene lights in a room hit only characters; without AO factor.
 | c41 | (3, 1500, 0, 0.784) | Fog: start, end, –, near share |
 | c45 (VS) | (0.94, 0.06, 0.94, 0.06) | Day factor |
 | c51 | (1, 1, 1, 1) | `colorize` |
+
+## The mirrored surroundings' map (paraboloid map) and its levels
+
+The sun pass (program 21) and the forward vehicle shaders read the map of the surroundings that the game draws each frame (the sky first, then map objects above the camera). Its smaller levels are not plain averages.
+
+- **The map:** 1024 × 1024 A16B16G16R16F with **four levels only** (1024, 512, 256, 128). The sun pass reads it with `texldl` at lod = 4 − 4·saturate(power·512·dReflectionParams.x), dReflectionParams.x = 1/230; a lod above 3 is held at level 3.
+- **Its levels** (TLAD trace GTAIV.4 frame 10070, draws 158466112, 158466153 and the next): a full-screen quad per level, vertex shader 0x24770cc0, pixel shader 0x23c2bd80:
+  - one filtered read of the level above (`texldl` at lod `gDeferredLightColourAndIntensity.z`), i.e. the mean of 2 × 2;
+  - times |c66.w|^0.25, with c66 = (1, 1, 0, 1/2) for level 1, (1, 1, 1, 1/3) for level 2 and, by the sequence, 1/4 for level 3.
+  - So level n = mean × (1/(n+1)!)^0.25: **1, 0.841, 0.639, 0.452**. Measured in the dump's levels: the sky 7.4 / 6.2 / 4.8 / 3.4 at the same place.
+- **Evidence:** et01_ba f906 (= trace frame 10070), the toll booth's green panel in shade (gta_spec, GB2.x ≈ 0.085, lod 2.78): with plain means SparkIV mirrored twice the game's sky there (7.3/10.8/14.4 against 3.7/5.2/6.7) and the panel came out 10–30 % too bright; with the factors it matches the game's HDR after the sun pass within ~3 %.
+
+In SparkIV: `mirroredAround` in `gtaiv-pc.js` (the plain means from generateMipmap times these factors, lod held at 3). Status: **used**.
