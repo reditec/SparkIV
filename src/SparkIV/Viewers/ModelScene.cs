@@ -1144,6 +1144,7 @@ namespace SparkIV.WinUI.Viewers
         VehicleShine = vehicle ? GtaIVPcMaterials.VehicleShineOf(shader) : null,
         EmissiveMultiplier = GtaIVPcMaterials.IsEmissive(shader) ? VectorParameter(material, GtaIVPcMaterials.EmissiveMultiplier)?.X : null,
         EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
+        EmissiveStrong = GtaIVPcMaterials.IsEmissiveStrong(shader),
         SubSurface = VectorParameter(material, GtaIVPcMaterials.SubColor) is { } sub && VectorParameter(material, GtaIVPcMaterials.SubScatWidth) is { } width
           ? new[] { sub.X, sub.Y, sub.Z, VectorParameter(material, GtaIVPcMaterials.SubScatWrap)?.X ?? 0, width.X }
           : null,
@@ -1398,10 +1399,12 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>
     /// An emissive shader's brightness (gta_emissive*: texture x vertex colour x emissiveMultiplier, unlit), or
-    /// null; and whether it only shines at night (gta_emissivenight: x the time cycle's day/night effects).
+    /// null; whether it only shines at night (gta_emissivenight: x the time cycle's day/night effects); and whether
+    /// it is gta_emissivestrong (its glow pushed back by zShift, the others' pulled forward).
     /// </summary>
     public float? EmissiveMultiplier { get; init; }
     public bool EmissiveAtNight { get; init; }
+    public bool EmissiveStrong { get; init; }
 
     /// <summary>gta_ped_skin's light through the skin: SubColor (r, g, b), SubScatWrap, SubScatWidth; or null.</summary>
     public float[]? SubSurface { get; init; }
@@ -1420,6 +1423,7 @@ namespace SparkIV.WinUI.Viewers
       emissive = Emissive,
       emissiveMultiplier = EmissiveMultiplier,
       emissiveAtNight = EmissiveAtNight,
+      emissiveStrong = EmissiveStrong,
       subSurface = SubSurface,
       texture = TextureKey == null ? null : url(TextureKey),
       color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),

@@ -118,8 +118,8 @@
       }
       if (floating) p.z += textureLod(dynamicWater, floatAt / 200.0 + 0.005, 0.0).r * seaEdge(floatAt - dynamicMin);
       vNormal = n; vPosition = p.xyz; gl_Position = viewProjection * p;
-      // An emissive's glow drawn on its own (glowOnly), pushed back as the game's (its vertex shader's zShift,
-      // added to the clip depth: 0 to w there, -w to w here, so twice).
+      // An emissive's glow drawn on its own (glowOnly), moved in depth as the game's (its vertex shader's zShift,
+      // added to the clip depth: 0 to w there, -w to w here, so twice). Its sign is the shader's (see glowShift).
       gl_Position.z += 2.0 * zShift;
       if (parabolic) { ${GameGlsl.parabolicVertex} }
       if (shadowPass) { ${GameGlsl.shadowVertex} }
@@ -721,6 +721,8 @@
       emissiveScale: m.emissiveMultiplier && !m.emissiveAtNight ? m.emissiveMultiplier : 0,
       // Outside as the game's (see emissiveGlow): its multiplier, and whether it shines only at night.
       emissiveMultiplier: m.emissiveMultiplier || 0, emissiveNight: m.emissiveAtNight === true,
+      // gta_emissivestrong: its glow pushed back by zShift, the other emissives' pulled forward (see glowShift).
+      emissiveStrong: m.emissiveStrong === true,
       // Skin: SubColor (r, g, b), SubScatWrap, SubScatWidth, or null.
       subSurface: m.subSurface || null,
     };
@@ -2623,8 +2625,11 @@
           const inRoom = m.room >= 0;
           const glow = sky && mat.emissive && !(inRoom && !mat.blend && !mat.glass) ? (mat.emissiveMultiplier || 0) * (sky.exposure || 1) * (mat.emissiveNight && !inRoom ? 1 - (sky.dayNight ?? 1) : 1) : 0;
           // A see-through one's glow (the alpha buckets) the game draws apart, forward, added (SRCALPHA / ONE) and
-          // pushed back by its vertex shader's zShift (0.0004 in the TLAD trace GTAIV.4, depth test LESSEQUAL): where
-          // it lies on something (the toll booth's price sign on its panel) that hides it, only the lit texture shows.
+          // moved in depth by its vertex shader's zShift (0.0004 in the TLAD trace GTAIV.4, depth test LESSEQUAL):
+          // gta_emissivestrong's pushed back (+c210, its glow stays behind a caged lamp's bars, bc_3 in GTAIV.1),
+          // gta_emissive's and gta_emissivenight's pulled forward (-c210, a spot's lens shows over its housing,
+          // bc_1 in GTAIV.2, #9). So in its vertex programs in win32_30, all of them.
+          const glowShift = mat.emissiveStrong ? 0.0004 : -0.0004;
           const glowApart = glow > 0 && mat.blend && outside;
           gl.uniform1f(loc.emissiveGlow, glowApart ? 0 : glow);
           // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
@@ -2684,7 +2689,7 @@
             // far side added its glow again (Elizabeta's table lamp: 15 light units after the fog, the game's 10).
             gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.frontFace(reflecting ? gl.CW : gl.CCW);
             gl.depthMask(true); gl.depthFunc(gl.LEQUAL);
-            gl.uniform1i(loc.glowOnly, true); gl.uniform1f(loc.zShift, 0.0004); gl.uniform1f(loc.emissiveGlow, glow);
+            gl.uniform1i(loc.glowOnly, true); gl.uniform1f(loc.zShift, glowShift); gl.uniform1f(loc.emissiveGlow, glow);
             gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
             gl.uniform1i(loc.glowOnly, false); gl.uniform1f(loc.zShift, 0);
             gl.blendFuncSeparate(blendFuncs[0], blendFuncs[1], blendFuncs[2], blendFuncs[3]);
