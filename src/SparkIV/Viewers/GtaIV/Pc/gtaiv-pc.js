@@ -978,6 +978,8 @@ function parabolicTarget() {
   return parabolicMapState;
 }
 
+function compile(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+
 function gamePostShader(fragment) {
   const vs = `#version 300 es
     in vec2 corner; out vec2 uv;
@@ -1005,7 +1007,6 @@ function gamePostShader(fragment) {
       return all(lessThan(abs(v), vec3(65000.0))) ? v : vec3(0.0);
     }
   ` + fragment;
-  const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; };
   const p = gl.createProgram();
   gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
   gl.attachShader(p, compile(gl.FRAGMENT_SHADER, common));
@@ -1186,7 +1187,8 @@ function gameGrainTexture() {
 // misc.DOFBlurMultiplier of visualSettings.dat (its HD one, 1, at the reference videos' settings: x32dbg, 23.10.):
 // sharp to far, from half a metre beyond fully blurred. Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game
 // recorded) turns it off.
-function gamePostEnd(w, h, playing, depthOfField) {
+// volumes: the lamps' light volumes to add (see gameLightVolumes), or null.
+function gamePostEnd(w, h, playing, depthOfField, volumes) {
   const post = gamePost;
   sceneFramebuffer = null;
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, post.ms);
@@ -1195,8 +1197,9 @@ function gamePostEnd(w, h, playing, depthOfField) {
   gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
   gl.readBuffer(gl.COLOR_ATTACHMENT1); gl.drawBuffers([gl.NONE, gl.COLOR_ATTACHMENT1]);
   gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-  if (depthOfField) gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+  if (depthOfField || volumes) gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.STENCIL_TEST); gl.disable(gl.CULL_FACE);
+  if (volumes) gameLightVolumes(post, w, h, volumes);
   gl.bindVertexArray(post.vao);
   const pass = (shader, frame, vw, vh, textures, set) => {
     gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
@@ -1225,6 +1228,179 @@ function gamePostEnd(w, h, playing, depthOfField) {
   gl.enable(gl.DEPTH_TEST);
   gl.useProgram(program);
   return changed;
+}
+
+// Lamps' light volumes (2dfx flag 0x80000: a cone of light in the air), added to the light after the scene as the
+// game's deferred_lighting draws them (GTAIV.exe 0xAC2270; TLAD trace GTAIV.3 frame 13868, et01_aa's spot, draws
+// 120953037 and 120953053, PS 0x25d425e0 / 0x25d418c0, ONE / ONE, no depth test):
+// - its shape: the game's own unit mesh (made at its start, see gameLightVolumeMesh), mapped as deferred_lighting's
+//   vs07 maps it: a point lamp's normalised; a spot's xy round its axis (x along its tangent, y along tangent x
+//   direction), z -1 on the axis to 0 at the outer angle: the angle (1 + z) x the outer angle, across x sin x c213,
+//   along x cos; xy 0 and z 0 the lamp itself. All x c213 x radius x 0.662, the radius the lamp's x the volume's size;
+// - per pixel, along the ray from the eye to the shape's face, cut where the scene's depth is nearer: the part of it
+//   within a sphere of 0.66 x that radius round the lamp (s from the ray's point nearest the lamp, half-chord c),
+//   f = (clamp(s at the face) - clamp(s at the eye))² / (3 x (0.66 r)²), each clamped to -c..c;
+// - lightShafts' passes 4 and 5 (programs vs07 + ps20 / ps21): the first culls CCW and adds f, the second culls CW
+//   and takes f off - in the trace +0.833 then -0.092 at (912,253) (state dumps at calls 120953036, 038, 054), as f
+//   at the far and the near face of the game's mesh come out there (0.093 near, recomputed): the far faces add, the
+//   near ones take off. Here by the faces' winding: drawn with WebGL's default (CCW front), the game's strips show
+//   their near faces as front faces (taking f off), the far ones as back faces (adding it);
+// - x the lamp's colour x the volume's strength (its own x the lamp's Range) x 0.25; here x Exposure (the page's
+//   light is the game's x Exposure).
+// That for lamps with flag 0x100000; those without it take passes 0 and 1 (ps18 / ps19), the same mesh and passes
+// with another f: the lookup texture (lights_occluders.wtd's "volume") at the angle the eye and the point make
+// seen from the lamp (see the fragment program) - recomputed at four pixels of the bc_1 trace GTAIV.2, draw 1539854,
+// to 0.0001.
+// volumes: { list: [{ at, dir, tangent, rgb, radius, strength, cone (outer angle in degrees, 0 a point lamp),
+// lookup (without flag 0x100000) }], lookup (the texture), matrix, eye, near, far, exposure }.
+
+// The light volumes' unit meshes as GTAIV.exe makes them at its start (0xABE3A0): a spot's by 0xAC1C00 with n 5, the
+// lower half of an octahedron in steps of 1/n (its four quarters, z < 0) and a fan from the middle to its rim at z 0;
+// a point lamp's by 0xAC0B20 with n 4, the whole octahedron (its eight eighths). Triangle strips (degenerate
+// triangles between the rows); the spot's 256 vertices equal those the game filled its buffer with (TLAD trace
+// GTAIV.3, call 287065). Its c213 (gDeferredVolumeRadiusScale) from n as 0xABE3A0 makes it: a = (π/2) / n,
+// 1 / (((2 cos a + 1) / 3)² + 2 (sin a / 3)²) - 1.044903 and 1.071094 as in all four traces.
+function gameLightVolumeMesh(n, eighths, fan) {
+  const out = [];
+  for (let b = 0; b < eighths; b++) {
+    const lx = b & 1 ? 1 : -1, ly = b & 2 ? 1 : -1, z = b & 4 ? 1 : -1;
+    let u = lx === ly ? 1 : 0;
+    if (z < 0) u = 1 - u;
+    const A = u === 1 ? [lx, 0, 0] : [0, ly, 0], B = u === 1 ? [0, ly, 0] : [lx, 0, 0];
+    const side = (P, a) => [P[0] - P[0] * a, P[1] - P[1] * a, P[2] + (z - P[2]) * a];
+    const lerp = (p, q, t) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t];
+    for (let k = 0; k < n; k++) {
+      const m = n - k, P0 = side(A, k / n), Q0 = side(B, k / n), P1 = side(A, (k + 1) / n), Q1 = side(B, (k + 1) / n);
+      if (fan && k === 0) for (let j = 0; j < m; j++) {
+        if (j === 0) out.push(0, 0, 0);
+        out.push(0, 0, 0, ...lerp(P0, Q0, j / m));
+        if (j === m - 1) out.push(...Q0, ...Q0, ...Q0);
+      }
+      for (let j = 0; j < m; j++) {
+        const p = lerp(P0, Q0, j / m);
+        if (j === 0) out.push(...p);
+        out.push(...p, ...lerp(P1, Q1, m > 1 ? j / (m - 1) : j / m));
+        if (j === m - 1) out.push(...Q0, ...Q0, ...Q0);
+      }
+    }
+  }
+  const a = Math.PI / 2 / n, c = (2 * Math.cos(a) + 1) / 3, s = Math.sin(a) / 3;
+  return { data: out, scale: 1 / (c * c + 2 * s * s) };
+}
+
+let lightVolume = null;
+function gameLightVolumes(post, w, h, volumes) {
+  if (!lightVolume) {
+    const vs = `#version 300 es
+      precision highp float;
+      in vec3 unit;
+      uniform mat4 viewProjection; uniform vec3 eye; uniform vec3 lampAt; uniform vec3 lampDir; uniform vec3 lampAcross;
+      uniform float cone; uniform float scale; uniform float size;
+      out vec3 ray; out float w;
+      void main() {
+        vec3 d;
+        if (cone <= 0.0) d = normalize(unit + 1e-5);
+        else {
+          float xy = dot(unit.xy, unit.xy);
+          if (xy >= 1e-4) {
+            float a = cone * (1.0 - clamp(-unit.z, 0.0, 1.0));
+            float c = cos(a);
+            float k = sqrt((1.0 - c * c) / (xy + 1e-4)) * scale;
+            d = cross(lampAcross, lampDir) * (k * unit.y) + lampAcross * (k * unit.x) + lampDir * c;
+          } else d = abs(unit.z) >= 1e-4 ? lampDir : vec3(0.0);
+        }
+        vec3 world = lampAt + d * size;
+        ray = world - eye;
+        gl_Position = viewProjection * vec4(world, 1.0);
+        w = gl_Position.w;
+      }`;
+    const fs = `#version 300 es
+      precision highp float;
+      in vec3 ray; in float w; out vec4 outColor;
+      uniform sampler2D depth; uniform vec2 range; uniform vec3 eyeFromLamp; uniform float radius; uniform vec3 color;
+      uniform bool lookup; uniform sampler2D volumeLookup;
+      void main() {
+        float d = texelFetch(depth, ivec2(gl_FragCoord.xy), 0).r * 2.0 - 1.0;
+        float sceneZ = 2.0 * range.x * range.y / (range.y + range.x - d * (range.y - range.x));
+        float t = clamp(sceneZ / w, 0.0, 1.0);
+        float len = length(ray);
+        vec3 dir = ray / max(len, 1e-5);
+        float sEye = dot(dir, eyeFromLamp);
+        float h = length(eyeFromLamp - dir * sEye);
+        float f;
+        if (lookup) {
+          // ps18 / ps19: the eye and the point (face or scene) seen from the lamp, scaled by sqrt(K / (1 + K h²)),
+          // K = min(16 / radius², 16); the angle between them looked up (u 0.125, v 0.5 + 0.5 cos), times π /
+          // (1.5 sqrt(1 + K h²)).
+          float k = min(16.0 / (radius * radius), 16.0);
+          float s = sqrt(1.0 + k * h * h);
+          vec3 p = (eyeFromLamp + ray * t) * (sqrt(k) / s), e = eyeFromLamp * (sqrt(k) / s);
+          float c = dot(p, e) * inversesqrt(dot(e, e) + 1e-5) * inversesqrt(dot(p, p) + 1e-5);
+          f = texture(volumeLookup, vec2(0.125, c * 0.5 + 0.5)).r * 3.14159274 / (1.5 * s);
+        } else {
+          // ps20 / ps21.
+          float sFace = len * t + sEye;
+          float r = 0.66 * radius;
+          float c = h < r ? sqrt(r * r - h * h) : 0.0;
+          float x = clamp(sFace, -c, c) - clamp(sEye, -c, c);
+          f = x * x / (3.0 * r * r);
+        }
+        outColor = vec4(color * f * (gl_FrontFacing ? -1.0 : 1.0), 0.0);
+      }`;
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.bindAttribLocation(p, 0, "unit");
+    gl.linkProgram(p);
+    const u = {};
+    for (const n of ["viewProjection", "eye", "lampAt", "lampDir", "lampAcross", "cone", "scale", "size", "depth", "range", "eyeFromLamp", "radius", "color", "lookup", "volumeLookup"]) u[n] = gl.getUniformLocation(p, n);
+    const mesh = made => {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(made.data), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      return { vao, count: made.data.length / 3, scale: made.scale };
+    };
+    lightVolume = { p, u, spot: mesh(gameLightVolumeMesh(5, 4, true)), point: mesh(gameLightVolumeMesh(4, 8, false)), frame: gl.createFramebuffer() };
+  }
+  const v = lightVolume;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, v.frame);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, post.light, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  gl.viewport(0, 0, w, h);
+  gl.useProgram(v.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, post.depth);
+  gl.uniform1i(v.u.depth, 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, volumes.lookup || null);
+  gl.uniform1i(v.u.volumeLookup, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniformMatrix4fv(v.u.viewProjection, false, volumes.matrix);
+  gl.uniform3fv(v.u.eye, volumes.eye);
+  gl.uniform2f(v.u.range, volumes.near, volumes.far);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  for (const l of volumes.list) {
+    const m = l.cone > 0 ? v.spot : v.point;
+    gl.uniform3fv(v.u.lampAt, l.at);
+    gl.uniform3fv(v.u.lampDir, l.dir);
+    gl.uniform3fv(v.u.lampAcross, l.tangent);
+    gl.uniform3f(v.u.eyeFromLamp, volumes.eye[0] - l.at[0], volumes.eye[1] - l.at[1], volumes.eye[2] - l.at[2]);
+    // The outer angle as the game hands it on (Light_Add: degrees x π/180).
+    gl.uniform1f(v.u.cone, l.cone > 0 ? l.cone * Math.PI / 180 : 0);
+    gl.uniform1f(v.u.scale, m.scale);
+    gl.uniform1f(v.u.size, m.scale * l.radius * 0.662);
+    gl.uniform1f(v.u.radius, l.radius);
+    gl.uniform1i(v.u.lookup, l.lookup ? 1 : 0);
+    const k = l.strength * 0.25 * volumes.exposure;
+    gl.uniform3f(v.u.color, l.rgb[0] * k, l.rgb[1] * k, l.rgb[2] * k);
+    gl.bindVertexArray(m.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, m.count);
+  }
+  gl.disable(gl.BLEND);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.bindVertexArray(post.vao);
 }
 
 // The eye's adaptation from the quarter copy (before the blur): its mean luminance, moved towards as adaptTone

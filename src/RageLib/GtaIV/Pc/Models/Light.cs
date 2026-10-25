@@ -54,6 +54,14 @@ namespace RageLib.GtaIV.Pc.Models
     public float CoronaSize { get; private set; }
     public uint Flags { get; private set; }
 
+    /// <summary>
+    /// Its light volume (a cone of light in the air, drawn for flag 0x80000): how strong (times Range) and how big
+    /// (times the light's radius). GTAIV.exe 0xC1E200 hands +0x30 x Range and +0x34 to Light_Add, which keeps them
+    /// at +0x70 and +0x74 of its light (0x5B8580); the volume pass (0xAC2270) draws none where either is 0.
+    /// </summary>
+    public float VolumeIntensity { get; private set; }
+    public float VolumeSize { get; private set; }
+
     /// <summary>The bone it moves with (an id of the skeleton).</summary>
     public int BoneId { get; private set; }
 
@@ -71,6 +79,8 @@ namespace RageLib.GtaIV.Pc.Models
       Falloff = attributes.Falloff;
       CoronaSize = attributes.CoronaSize;
       Flags = attributes.Flags;
+      VolumeIntensity = attributes.Unknown2C;
+      VolumeSize = attributes.Unknown30;
       BoneId = attributes.BoneId;
     }
   }
