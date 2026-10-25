@@ -108,6 +108,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>gta_emissivenight: only shines at night (x the time cycle's day/night effects).</summary>
     public static bool IsEmissiveAtNight(string shader) => shader.Contains("emissivenight", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// gta_emissivestrong: its vertex shaders push it back by zShift (add o0.z, r0.z, c210.x), gta_emissive's and
+    /// gta_emissivenight's pull it forward (-c210.x) - all of their vertex programs (win32_30 .fxc). Seen in the
+    /// traces: bc_3's caged wall lamp (GTAIV.1, draw 84178518) keeps its bars, bc_1's spot lens (GTAIV.2, draw
+    /// 73906237) shows over its housing.
+    /// </summary>
+    public static bool IsEmissiveStrong(string shader) => shader.Contains("emissivestrong", StringComparison.OrdinalIgnoreCase);
+
     public static readonly uint EmissiveMultiplier = GxtFile.Hash("emissiveMultiplier");
 
     // gta_ped_skin's light through the skin (its G-buffer pass, program 10): a colour, how far the light wraps
