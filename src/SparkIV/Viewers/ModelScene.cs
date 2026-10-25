@@ -839,6 +839,11 @@ namespace SparkIV.WinUI.Viewers
       var vertices = mesh.DecodeVertexData();
       var positions = new float[vertices.Length * 3];
       var normals = mesh.VertexHasNormal ? new float[vertices.Length * 3] : null;
+      // A ped's normal map is laid along its vertices' tangents (gta_ped's deferred program, vs04 + ps05): those,
+      // turned as the normals, and the binormal's side (w).
+      var tangents = normals != null && vertices.Length > 0 && vertices[0].Tangent != null && material >= 0 && material < Materials.Count &&
+                     GtaIVPcMaterials.IsPed(Materials[material].Shader) && Materials[material].NormalKey != null
+        ? new float[vertices.Length * 4] : null;
       var uvs = mesh.VertexHasTexture ? new float[vertices.Length * 2] : null;
       // Turned round about Z: x and y change sign (a turn, not a mirror, so the triangles keep their side).
       float turn = placement?.TurnedRound == true ? -1 : 1;
@@ -859,6 +864,14 @@ namespace SparkIV.WinUI.Viewers
             normals[i * 3 + 1] = n.Y;
             normals[i * 3 + 2] = n.Z;
           }
+          if (tangents != null && v.Tangent != null)
+          {
+            var t = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(v.Tangent[0], v.Tangent[1], v.Tangent[2]), atBone);
+            tangents[i * 4] = t.X;
+            tangents[i * 4 + 1] = t.Y;
+            tangents[i * 4 + 2] = t.Z;
+            tangents[i * 4 + 3] = v.Tangent[3];
+          }
         }
         else
         {
@@ -870,6 +883,13 @@ namespace SparkIV.WinUI.Viewers
             normals[i * 3] = v.Normal.X * turn;
             normals[i * 3 + 1] = v.Normal.Y * turn;
             normals[i * 3 + 2] = v.Normal.Z;
+          }
+          if (tangents != null && v.Tangent != null)
+          {
+            tangents[i * 4] = v.Tangent[0] * turn;
+            tangents[i * 4 + 1] = v.Tangent[1] * turn;
+            tangents[i * 4 + 2] = v.Tangent[2];
+            tangents[i * 4 + 3] = v.Tangent[3];
           }
         }
         if (uvs != null)
@@ -1009,6 +1029,7 @@ namespace SparkIV.WinUI.Viewers
         LayerWeights = layerWeights,
         Colors = colors,
         Alphas = alphas,
+        Tangents = tangents,
       };
       Meshes.Add(scene);
       return scene.Id;
@@ -1222,6 +1243,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>See-through materials and decals: each vertex's alpha (how much of it shows); null otherwise.</summary>
     public float[]? Alphas { get; init; }
 
+    /// <summary>A ped's tangents (x, y, z, binormal side w) for its normal map, or null.</summary>
+    public float[]? Tangents { get; init; }
+
     public int Id { get; }
     public int Material { get; }
     public float[] Positions { get; }
@@ -1245,6 +1269,7 @@ namespace SparkIV.WinUI.Viewers
       layerWeights = LayerWeights == null ? null : Base64(LayerWeights),
       colors = Colors == null ? null : Base64(Colors),
       alphas = Alphas == null ? null : Base64(Alphas),
+      tangents = Tangents == null ? null : Base64(Tangents),
       indices = Convert.ToBase64String(MemoryMarshal.AsBytes(Indices.AsSpan())),
     };
 
