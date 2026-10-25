@@ -70,7 +70,9 @@
     in vec4 layerUvA; in vec2 layerUvB; in vec4 layerWeights; in vec3 vertexColor;
     // See-through materials and decals: how much of each vertex shows.
     in float vertexAlpha;
-    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor; out float vAlpha;
+    // A ped's tangent and its binormal's side (w), for its normal map (none: 0).
+    in vec4 tangent;
+    out vec2 vUv1; out vec2 vUv2; out vec2 vUv3; out vec4 vWeights; out vec3 vColor; out float vAlpha; out vec4 vTangent;
     uniform mat4 viewProjection; uniform bool skinned; uniform highp sampler2D boneMatrices;
     // A texture moved by an animation (map objects: signs, screens, flames): its texture matrix's two rows.
     uniform bool uvAnim; uniform vec3 uvRow0; uniform vec3 uvRow1;
@@ -105,13 +107,18 @@
     void main() {
       vec4 p = marker ? vec4(markerAt + position * markerScale, 1.0) : vec4(position, 1.0);
       vLampShadow = vec2(0.0);
-      vec3 n = normal;
+      vec3 n = normal, t = tangent.xyz;
       if (skinned) {
         mat4 m = bone(skinBones.x) * skinWeights.x + bone(skinBones.y) * skinWeights.y +
                  bone(skinBones.z) * skinWeights.z + bone(skinBones.w) * skinWeights.w;
         p = m * p;
         n = mat3(m) * n;
+        t = mat3(m) * t;
       }
+      // (A ped's normal and tangent normalised per vertex, as gta_ped's vs04 hands them on.)
+      bool hasTangent = dot(t, t) > 1e-8;
+      if (hasTangent) n = normalize(n + 1e-5);
+      vTangent = hasTangent ? vec4(normalize(t + 1e-5), tangent.w) : vec4(0.0);
       if (waterGrid) {
         vec2 at = dynamicMin + position.xy;
         p = vec4(at, gridLevel + textureLod(dynamicWater, at / 200.0 + 0.005, 0.0).r * seaEdge(position.xy), 1.0);
@@ -132,7 +139,7 @@
   const FRAGMENT = `#version 300 es
     precision highp float;
     in vec3 vNormal; in vec2 vUv; in vec3 vPosition;
-    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha;
+    in vec2 vUv1; in vec2 vUv2; in vec2 vUv3; in vec4 vWeights; in vec3 vColor; in float vAlpha; in vec4 vTangent;
     in vec2 vLampShadow;
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
     // A vehicle's paint on its texture (its shader: texture x matDiffuseColor, the vehicle's colour); white else.
@@ -195,6 +202,22 @@
       vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
       float scale = inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
       return normalize(mat3(t * scale, b * scale, n) * m);
+    }
+    // A ped's normal as gta_ped's G-buffer pass makes it (deferred_draw: vs04 + ps05) and the lighting reads it
+    // back: the map's x and y (its alpha for x where 1 - alpha - x >= 0, the DXT5 normal maps'), tilting by
+    // (xy - 0.5) x bumpiness along the vertex tangent and the binormal (normal x tangent x w), z = sqrt(1 - x² - y²)
+    // of the map's values as they are (0.707 where flat); written to GBuffer1 rounded down to 1/64
+    // (floor(64 (n + 1)) / 128 in its 10-bit channels, the rest in its alpha the lights don't read), read as
+    // 2 x - 0.99999 and normalised (the lamps' programs, the TLAD trace GTAIV.3: 102287953).
+    vec3 pedBumped(vec3 n, vec4 t, vec2 uv) {
+      vec4 raw = texture(normalTex, uv);
+      vec2 xy = 1.0 - raw.w - raw.x >= 0.0 ? raw.wy : raw.xy;
+      vec2 k = (xy - 0.5) * bumpiness;
+      float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+      vec3 b = cross(n, t.xyz) * t.w;
+      vec3 g = normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
+      vec3 stored = round(floor(64.0 * (g + 1.0)) / 128.0 * 1023.0) / 1023.0;
+      return normalize(stored * 2.0 - 0.99999);
     }
     // Terrain: how many layers (1 for anything else), their textures, and which of them are there.
     uniform int layers; uniform sampler2D tex1; uniform sampler2D tex2; uniform sampler2D tex3; uniform vec3 layerOn;
@@ -269,7 +292,7 @@
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
         base.rgb += texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
       }
-      if (useNormalMap && useTexture) n = bumped(n, vPosition, vUv);
+      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(n, vTangent, vUv) : bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
@@ -471,6 +494,7 @@
       layerWeights: gl.getAttribLocation(program, "layerWeights"),
       vertexColor: gl.getAttribLocation(program, "vertexColor"),
       vertexAlpha: gl.getAttribLocation(program, "vertexAlpha"),
+      tangent: gl.getAttribLocation(program, "tangent"),
       layers: gl.getUniformLocation(program, "layers"),
       tex1: gl.getUniformLocation(program, "tex1"),
       tex2: gl.getUniformLocation(program, "tex2"),
@@ -665,6 +689,8 @@
     attribute(loc.vertexColor, 3, m.colors ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.colors).buffer)) : null, 0, 0);
     // Without its own, every vertex shows fully (the value is set before each draw: it isn't kept in the VAO).
     attribute(loc.vertexAlpha, 1, m.alphas ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.alphas).buffer)) : null, 0, 0);
+    // A ped's tangents for its normal map (without: the attribute's default, 0, 0, 0, 1 - none).
+    attribute(loc.tangent, 4, m.tangents ? buffer(gl.ARRAY_BUFFER, new Float32Array(bytes(m.tangents).buffer)) : null, 0, 0);
     buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
     gl.bindVertexArray(null);
 

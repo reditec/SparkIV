@@ -14,9 +14,15 @@ namespace RageLib.Models.Data
     public float[] BlendWeights { get; set; }
     public uint[] BlendIndices { get; set; }
 
+    /// <summary>
+    /// The tangent (x, y, z and, where stored, w: the binormal's side, as gta_ped's vertex program takes it: binormal =
+    /// normal x tangent x w); null without one.
+    /// </summary>
+    public float[] Tangent { get; private set; }
+
     public const int MaxTextureCoordinates = 8;
 
-    // To add: Tangent, Binormal (sizes/etc??)
+    // To add: Binormal (sizes/etc??)
     // BlendIndices/BlendWeights: Type = Color ... stored as ARGB I think but presumably swizzled as RGBA
 
     internal Vertex(BinaryReader br, Mesh mesh) : this()
@@ -38,6 +44,9 @@ namespace RageLib.Models.Data
             break;
           case VertexElementUsage.Normal:
             Normal = new Vector3(br);
+            break;
+          case VertexElementUsage.Tangent when element.UsageIndex == 0 && (element.Size == 12 || element.Size == 16):
+            Tangent = new float[] { br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), element.Size == 16 ? br.ReadSingle() : 1f };
             break;
           case VertexElementUsage.TextureCoordinate:
             TextureCoordinates[element.UsageIndex] = new Vector2(br);

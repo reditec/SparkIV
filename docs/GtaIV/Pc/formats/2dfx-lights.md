@@ -101,7 +101,15 @@ Effect in et01_aa, measured against game snapshots of the same moment:
 - Sofa bottom left: 46.9 → 37.6, game 37.1.
 - Armchair bottom left: 36.2 → 31.8, game 31.4.
 
-**Open:** In the game, Malc's shirt shows contour bands with dark edges in the ceiling lamp's light (self-shadowing artefacts). SparkIV does not show them, although the map matches. Our lookup point lies 1.9 cm in front of the stored surface. Suspected but **unconfirmed** cause: the game's G-buffer normal, rounded down to 1/64 and bent by the normal map, when offsetting by 0.1 m. Because of this, the shirt is still about 7 % too bright in our render.
+**Contour bands on Malc's shirt** (#7): in the ceiling lamp's light, the game shows dark contour bands along the folds of the shirt. These are self-shadowing edges of the shadow test.
+
+- **Cause:** the normal the 0.1 m offset uses. Recomputed over the shirt with the game's depth and shadow atlas (state dumps at calls 102287952/954), the geometric normal gives no bands at all, so they come from the G-buffer normal.
+- **How the peds' G-buffer pass makes that normal** (gta_ped, gta_ped_skin, gta_ped_reflect, gta_ped_skin_blendshape; technique `deferred_draw`, vs04 + ps05):
+  - The normal map's x and y are taken from (w, y) of the texture where 1 − w − x ≥ 0, otherwise from (x, y).
+  - They tilt by (xy − 0.5) × bumpiness along the vertex tangent and the binormal (normal × tangent × w).
+  - z = √(1 − x² − y²) of the raw values.
+  - The result is written to GBuffer1 as floor(64 (n + 1)) / 128 (A2R10G10B10; the finer remainder goes into the alpha). The lights read it back as rgb × 2 − 0.99999, i.e. rounded down to 1/64.
+- **In SparkIV** since 2026-10-25: RageLib reads the vertex tangents, `ModelScene` sends them for peds with a normal map, and `pedBumped` in `ModelView.html` builds this normal. The bands now lie on the same folds as in the game, but they are still narrower (see #7).
 
 ## Light volumes
 
