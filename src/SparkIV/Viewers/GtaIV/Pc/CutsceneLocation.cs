@@ -124,6 +124,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public byte[]? Clouds { get; private set; }
     public byte[]? CloudDetail { get; private set; }
 
+    /// <summary>The light volumes' lookup texture's key (see <see cref="LightVolume"/>).</summary>
+    public const string LightVolumeKey = "mlight/volume";
+
+    /// <summary>
+    /// The lookup texture the light volumes of lamps without flag 0x100000 read (deferred_lighting's ps18/ps19,
+    /// gDeferredLightSampler2): "volume" of pc\textures\lights_occluders.wtd, as GTAIV.exe takes it (0xAD1A90 from the
+    /// dictionary 0xABF130 loads, platform:/textures/lights_occluders; 32 x 512 L8 in the bc_1 trace GTAIV.2, call
+    /// 1539806), as ModelScene.Raw makes it; null without it.
+    /// </summary>
+    public byte[]? LightVolume { get; private set; }
+
     /// <summary>
     /// The models' textures in packs of about <see cref="PackBytes"/> each (keys "mpack/0" ...), as the scene
     /// message lists them: the page asks for a few dozen instead of two thousand, one by one (bc_3: 10 s
@@ -159,6 +170,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (key == CloudKey || key == CloudDetailKey)
       {
         return key == CloudKey ? Clouds : CloudDetail;
+      }
+      if (key == LightVolumeKey)
+      {
+        return LightVolume;
       }
       if (key.StartsWith(PackKey, StringComparison.Ordinal))
       {
@@ -590,6 +605,24 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           // Then the water is smooth.
         }
+      }
+      try
+      {
+        string occluders = Path.Combine(folder, "pc", "textures", "lights_occluders.wtd");
+        if (System.IO.File.Exists(occluders))
+        {
+          using var textures = new RageLib.Textures.TextureFile();
+          textures.Open(occluders);
+          // Named "pack:/volume.dds" in the file; the game asks for "volume".
+          if (textures.Textures.FirstOrDefault(x => string.Equals(Path.GetFileNameWithoutExtension(x.Name.Substring(x.Name.LastIndexOf('/') + 1)), "volume", StringComparison.OrdinalIgnoreCase)) is RageLib.Textures.Texture volume)
+          {
+            location.LightVolume = ModelScene.Raw(volume);
+          }
+        }
+      }
+      catch (Exception)
+      {
+        // Then no light volumes of that kind.
       }
       log?.Step("location: water and sky", location.Water.Count / 4 + " water quads");
       return location;
@@ -1284,7 +1317,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// (0 for a light all round). With them the interiors' rooms (by their numbers in the objects' room):
     /// the interior's place, the turn from the scene into it, the box there.
     /// </summary>
-    public object LightsMessage()
+    /// <summary>The "mapLights" message; <paramref name="volumeTexture"/>: the address of <see cref="LightVolume"/>, or null.</summary>
+    public object LightsMessage(string? volumeTexture = null)
     {
       var lights = new List<object>();
       foreach (var obj in Objects)
@@ -1294,6 +1328,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var at = Vector3.Transform(light.Position, obj.Place);
           var way = Vector3.TransformNormal(light.Direction, obj.Place);
           way = way.LengthSquared() > 1e-8f ? Vector3.Normalize(way) : new Vector3(0, 0, -1);
+          var across = Vector3.TransformNormal(light.Tangent, obj.Place);
           lights.Add(new
           {
             position = new[] { at.X, at.Y, at.Z },
@@ -1311,6 +1346,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             flags = light.Flags,
             // Drawn by the lighting's shadow program: its own flag 0x8000 and its object's instance flag 0x100.
             shadows = obj.LampShadows && (light.Flags & 0x8000) != 0,
+            // Its light volume (flag 0x80000; GTAIV.exe 0xAC2270): strength = its own x Range, size x the radius.
+            volume = (light.Flags & 0x80000) != 0 && light.VolumeIntensity != 0 && light.VolumeSize != 0
+              ? new[] { light.VolumeIntensity * light.Range, light.VolumeSize }
+              : null,
+            // Its second axis (the volume's mesh is turned by it: gDeferredLightTangent).
+            tangent = new[] { across.X, across.Y, across.Z },
           });
         }
       }
@@ -1323,7 +1364,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         max = new[] { r.Max.X, r.Max.Y, r.Max.Z },
         portals = r.Portals.Select(q => new { centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To }).ToList(),
       }).ToList();
-      return new { type = "mapLights", lights, rooms };
+      return new { type = "mapLights", lights, rooms, volumeTexture };
     }
 
     private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));

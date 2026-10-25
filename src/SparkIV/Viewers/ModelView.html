@@ -1261,6 +1261,8 @@
   // The lights of a cutscene's location (lamps, wall lights in its models: the light the game puts there),
   // fixed: place, direction, colour, range, cone (cosine of half, -1 all round).
   let mapLights = [];
+  // The light volumes' lookup texture (lights_occluders.wtd's "volume"), once loaded.
+  let lightVolumeLookup = null;
   // How bright a lamp is: its colour (0 to 1) times its strength as the game adds it to the light.
   const MapLightScale = 0.6;
   const MaxLights = 40;
@@ -1788,6 +1790,9 @@
       coneScale: l.cone > 0 ? 1 / Math.max(1e-3, Math.cos(Math.min(l.cone - 0.5, Math.max(0, l.hotSpot || 0)) * Math.PI / 180) - Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180)) : 0,
       // What the game lights outside by (see the game's file: outdoorLamp).
       radius: l.radius || 0, strength: l.strength || 0, rgb: l.color, flags: l.flags || 0, shadows: l.shadows === true,
+      // Its light volume (flag 0x80000): [strength, size]; a spot's outer angle in degrees (0: all round).
+      volume: l.volume && l.volume[0] > 0 && l.volume[1] > 0 ? l.volume : null, coneDegrees: l.cone || 0,
+      tangent: l.tangent || [1, 0, 0],
       // The room it is in (see sceneLightsNow).
       room: roomOf(l.position),
     }));
@@ -1822,6 +1827,28 @@
       for (const { l } of near) { if (now.length >= MaxLights) break; now.push(l); }
     }
     return now;
+  }
+
+  // The lamps' light volumes to draw now (the game's file: gameLightVolumes): those on and of the camera's
+  // interior as sceneLightsNow takes them, within reach of the camera; with the view's matrix and depth range.
+  function lightVolumesNow(vp) {
+    if (!showSceneLights || !mapLights.length || !visible.size) return null;
+    const outside = !!sky && skyOn && backgroundReach > 0;
+    const camRoom = rooms.length ? roomOf(vp.eye) : -1;
+    const camAt = camRoom >= 0 ? rooms[camRoom].at : null;
+    const otherInterior = r => camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2]);
+    const list = [];
+    for (const m of mapLights) {
+      // With flag 0x100000 the game's passes 4 and 5 of deferred_lighting's lightShafts, without it passes 0 and 1
+      // (another model, reading the lookup texture: none drawn while it isn't there).
+      const lookup = !(m.flags & 0x100000);
+      if (!m.volume || (lookup && !lightVolumeLookup) || !(m.radius > 0) || otherInterior(m.room)) continue;
+      if (outside && !outdoorLamp(m)) continue;
+      const reach = m.radius * m.volume[1];
+      if (Math.hypot(m.at[0] - vp.eye[0], m.at[1] - vp.eye[1], m.at[2] - vp.eye[2]) > reach + LampReach) continue;
+      list.push({ at: m.at, dir: m.dir, tangent: m.tangent, rgb: m.rgb, radius: reach, strength: m.volume[0], cone: m.coneDegrees, lookup });
+    }
+    return list.length ? { list, lookup: lightVolumeLookup, matrix: vp.matrix, eye: vp.eye, near: vp.near, far: vp.far, exposure: sky ? sky.exposure || 1 : 1 } : null;
   }
 
   function cutLightsNow() {
@@ -2234,7 +2261,7 @@
     // Through the cutscene's camera its depth of field, with the depth's range to read the distance back.
     const depthOfField = film && film.dofFar != null ? { near: nearClip, far, focus: film.dofFar } : null;
     // (Its axes and opening too, for the sun's shadow cascades: the game's file, sunShadowCascades.)
-    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye, eye: e, depthOfField,
+    return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye, eye: e, depthOfField, near: nearClip, far,
              forward: f, right: s, up: u, fov: film ? film.fov : camera.fov, aspect };
   }
 
@@ -2955,7 +2982,7 @@
       gl.bindVertexArray(null);
       // Outside: the eye's adaptation to this picture, for the next (the game's file: adaptTone); stopped,
       // drawn again at once with it.
-      if (postOn ? gamePostEnd(w, h, playback.playing, vp.depthOfField) : outside && adaptTone(w, h, playback.playing)) draw();
+      if (postOn ? gamePostEnd(w, h, playback.playing, vp.depthOfField, lightVolumesNow(vp)) : outside && adaptTone(w, h, playback.playing)) draw();
       // Water in the picture moves all the time, also while the cutscene stands still: the next frame then.
       if (waterShown && !playback.playing) draw();
     });
@@ -3141,7 +3168,20 @@
       else if (m.type === "facials") { showFacials = m.on; showFrame(); }
       else if (m.type === "cast") { setSceneLights(m.lights); setCast(m.actors); }
       else if (m.type === "sceneLights") { showSceneLights = m.on; draw(); }
-      else if (m.type === "mapLights") { setMapLights(m.lights, m.rooms); }
+      else if (m.type === "mapLights") {
+        setMapLights(m.lights, m.rooms);
+        // The light volumes' lookup texture (the game's file: gameLightVolumes), clamped and filtered as
+        // deferred_lighting.fxc's sampler of deferredLightTexture2 (filter 2, linear; the bc_1 trace GTAIV.2:
+        // ADDRESSU / ADDRESSV CLAMP, MINFILTER LINEAR at its draws).
+        if (m.volumeTexture && !lightVolumeLookup) loadTexture(m.volumeTexture, t => {
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          lightVolumeLookup = t;
+        });
+      }
       else if (m.type === "sky") { setSky(m); }
       else if (m.type === "useSky") { skyOn = m.on; showSky(); }
       else if (m.type === "camera") { setFilmCamera(m.camera); }
