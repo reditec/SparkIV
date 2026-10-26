@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- One version for SparkIV and its libraries. Scheme and the criteria for 1.0: docs/versioning.md. -->
-    <Version>0.9.0-alpha.1</Version>
+    <Version>0.9.0-alpha.2</Version>
   </PropertyGroup>
 
 </Project>
