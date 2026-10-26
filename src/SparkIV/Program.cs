@@ -28,7 +28,7 @@ namespace SparkIV.WinUI
     /// <summary>
     /// The installer and the updater start SparkIV with their own arguments (install, update, uninstall);
     /// Velopack handles those first and exits. Otherwise the app starts as XAML would start it; restarted by
-    /// Velopack after an update, it offers what's new (MainWindow).
+    /// Velopack after an update, it shows what's new (MainWindow).
     /// </summary>
     [STAThread]
     static void Main(string[] args)

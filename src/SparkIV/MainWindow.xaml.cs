@@ -85,17 +85,22 @@ namespace SparkIV.WinUI
       UpdateSortHeaders();
       UpdateEditModeButton();
 
+      // Just updated (Velopack restarted SparkIV into the new version): what's new, once, as soon as the window shows.
+      if (Updates.JustUpdated)
+      {
+        async void ShowWhatsNew(object sender, RoutedEventArgs args)
+        {
+          Root.Loaded -= ShowWhatsNew;
+          await ChangelogDialog.ShowAsync(Root.XamlRoot, Updates.CurrentVersion);
+        }
+        Root.Loaded += ShowWhatsNew;
+      }
+
       CheckForUpdate();
     }
 
     private async void CheckForUpdate()
     {
-      // Just updated: what's new, once (a newer update found below takes its place).
-      if (Updates.JustUpdated)
-      {
-        ShowMessage(InfoBarSeverity.Success, "Updated", "SparkIV " + Updates.CurrentVersion + " is installed.",
-                    "What's new", async () => await ChangelogDialog.ShowAsync(Root.XamlRoot, Updates.CurrentVersion));
-      }
       string? version = await Updates.CheckAsync();
       if (version != null)
       {
