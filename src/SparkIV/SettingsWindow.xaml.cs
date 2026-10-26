@@ -28,7 +28,7 @@ namespace SparkIV.WinUI
 {
   /// <summary>
   /// SparkIV's settings: where the games are installed (one folder per game and platform), the backups,
-  /// how cutscenes are shown, the update channel, and About (version, license, notices).
+  /// how cutscenes are shown, the update channel, and About (version, changelog, license, notices).
   /// </summary>
   public sealed partial class SettingsWindow : Window
   {
@@ -68,6 +68,8 @@ namespace SparkIV.WinUI
     private const string SourceUrl = "https://github.com/reditec/SparkIV";
 
     private static string LicenseFile(string name) => System.IO.Path.Combine(AppContext.BaseDirectory, name);
+
+    private async void ShowChangelog_Click(object sender, RoutedEventArgs e) => await ChangelogDialog.ShowAsync(Root.XamlRoot);
 
     private async void ShowLicense_Click(object sender, RoutedEventArgs e) =>
       await ShowTextAsync("License", LicenseFile("LICENSE.txt"), null);

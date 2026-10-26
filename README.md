@@ -59,55 +59,7 @@ Third-party components:
 
 ## Changelog
 
-Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC).
-
-### v0.9.0-alpha.1 (WinUI version, reditec)
-
-* New WinUI 3 app on .NET 10.
-
-* Installer; SparkIV updates itself from the GitHub releases.
-
-* New logo, replacing the GTA IV icon.
-
-* New viewers for models, animations, cutscenes and collision; the audio viewer can play and export multichannel banks.
-
-* Removed components that were closed or licensed incompatibly with the GPL (ragezip.dll, Model3DViewer, the old WaveOut player).
-
-### What's new in v0.8.56 (Beta)
-
-* Fix Update checker returning old version.
-
-### What's new in v0.8.52 (Beta)
-
-* Added the support for GTA IV (Complete Edition) v1.2.0.32 (for Steam and non-Steam versions).
-
-### What's New In V0.8.1 (Beta)
-
-* Added partial Darg & Drop support.
-
-* New update system.
-
-* Improved support for **GTA IV** ***1.0.8.0*** & **EFLC** ***1.1.3.0***.
-
-* Added fallback folder browser dialog for selecting game folder if the ***registry path*** was deleted.
-
-* Added file deleting ability by clicking (***Delete Key***) in the keyboard.
-
-### What's New In V0.8.0 (Beta)
-
-* New icons
-
-* Support for GTA IV 1.0.8.0 & GTA EFLC 1.1.3.0
-
-* Windows 10+ Support 
-
-* New style
-
-* Fixed some bugs
-
-* Initial drag & drop support (WIP)
-
-* Fix checking for updates not working
+What changed in each version: [CHANGELOG.md](CHANGELOG.md). SparkIV also shows it in Settings → About.
 
 ## License
 

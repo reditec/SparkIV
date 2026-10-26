@@ -57,6 +57,9 @@ namespace SparkIV.WinUI.Services
     public static string CurrentVersion { get; } =
       (typeof(Updates).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0").Split('+')[0];
 
+    /// <summary>Whether Velopack restarted SparkIV after installing an update (its OnRestarted hook, Program).</summary>
+    public static bool JustUpdated { get; set; }
+
     public static UpdateChannel Channel
     {
       get => Enum.TryParse(AppSettings.UpdateChannel, out UpdateChannel channel) ? channel : ChannelOf(CurrentVersion);

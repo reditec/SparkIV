@@ -80,7 +80,9 @@ run it again after changing the SVG.
 ## Release checklist
 
 1. Set `<Version>` in `src/Directory.Build.props`.
-2. Turn the newest changelog heading in the README into the version.
+2. Add the version's changes at the top of [`CHANGELOG.md`](../CHANGELOG.md) under "## v<version>" (short, in
+   English, from the user's view). SparkIV finds a version's part by this heading: Settings > About shows the whole
+   file, and after an update SparkIV offers the new version's part as "What's new".
 3. Commit and merge into `master`.
 4. Run `tools/release.ps1`. It builds SparkIV (x64, self-contained) and packs it into `release/out`.
 5. On GitHub, create a release with the tag `v<version>` on that commit (mark alpha and beta as "Pre-release")

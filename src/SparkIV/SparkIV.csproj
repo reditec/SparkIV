@@ -36,6 +36,8 @@
     <!-- The licenses ship with the program; Settings > About shows them. -->
     <Content Include="..\..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\licenses\*.txt" Link="licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Settings > About shows it, and after an update the new version's part (ChangelogDialog). -->
+    <Content Include="..\..\CHANGELOG.md" Link="CHANGELOG.md" CopyToOutputDirectory="PreserveNewest" />
     <EmbeddedResource Include="Viewers\TextDocumentView.html" LogicalName="SparkIV.TextDocumentView.html" />
     <EmbeddedResource Include="Viewers\HexView.html" LogicalName="SparkIV.HexView.html" />
     <EmbeddedResource Include="Viewers\ModelView.html" LogicalName="SparkIV.ModelView.html" />

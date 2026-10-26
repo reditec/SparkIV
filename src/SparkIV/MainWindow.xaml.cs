@@ -90,6 +90,12 @@ namespace SparkIV.WinUI
 
     private async void CheckForUpdate()
     {
+      // Just updated: what's new, once (a newer update found below takes its place).
+      if (Updates.JustUpdated)
+      {
+        ShowMessage(InfoBarSeverity.Success, "Updated", "SparkIV " + Updates.CurrentVersion + " is installed.",
+                    "What's new", async () => await ChangelogDialog.ShowAsync(Root.XamlRoot, Updates.CurrentVersion));
+      }
       string? version = await Updates.CheckAsync();
       if (version != null)
       {
