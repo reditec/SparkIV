@@ -104,12 +104,19 @@ Effect in et01_aa, measured against game snapshots of the same moment:
 **Contour bands on Malc's shirt** (#7): in the ceiling lamp's light, the game shows dark contour bands along the folds of the shirt. These are self-shadowing edges of the shadow test.
 
 - **Cause:** the normal the 0.1 m offset uses. Recomputed over the shirt with the game's depth and shadow atlas (state dumps at calls 102287952/954), the geometric normal gives no bands at all, so they come from the G-buffer normal.
-- **How the peds' G-buffer pass makes that normal** (gta_ped, gta_ped_skin, gta_ped_reflect, gta_ped_skin_blendshape; technique `deferred_draw`, vs04 + ps05):
+- **How the peds' G-buffer pass makes that normal** (gta_ped, gta_ped_skin, gta_ped_reflect, gta_ped_skin_blendshape; technique `deferred_draw`, vs04 + ps05; skinned peds `deferred_drawskinned`, vs05 + ps05):
   - The normal map's x and y are taken from (w, y) of the texture where 1 − w − x ≥ 0, otherwise from (x, y).
-  - They tilt by (xy − 0.5) × bumpiness along the vertex tangent and the binormal (normal × tangent × w).
-  - z = √(1 − x² − y²) of the raw values.
-  - The result is written to GBuffer1 as floor(64 (n + 1)) / 128 (A2R10G10B10; the finer remainder goes into the alpha). The lights read it back as rgb × 2 − 0.99999, i.e. rounded down to 1/64.
+  - They tilt by (xy − 0.5) × bumpiness along the vertex tangent T and the binormal B = T × N × w (both vertex programs compute `cross(T, N)`).
+  - z = √|1 − x² − y²| of the raw values (`rsq` takes the absolute value). Where x² + y² comes near 1, z is near 0 and the normal turns far over.
+  - vs04 normalises N and T; vs05 (skinned) does not, and ps05 only normalises the sum N z + T kx + B ky. Blended between bones turned apart (elbows), N and T come out shorter, each by its own amount.
+  - The result is written to GBuffer1 as floor(64 (n + 1)) / 128 (A2R10G10B10; the finer remainder goes into the alpha). The TLAD lamps read it back as rgb × 2 − 0.99999, i.e. rounded down to 1/64. GTA IV's cutscene lights (GTAIV.2, PS 0x26b13980) also read the remainder from the alpha; SparkIV keeps the 1/64 rounding for all lights.
 - **In SparkIV** since 2026-10-25: RageLib reads the vertex tangents, `ModelScene` sends them for peds with a normal map, and `pedBumped` in `ModelView.html` builds this normal. The bands now lie on the same folds as in the game, but they are still narrower (see #7).
+- **Bumps were off** from 57a4f88 (2026-10-05) to #8 (2026-10-26): the `bumpiness` uniform was never set, so it was 0 for every material and no normal map tilted anything (peds and map objects). So the #7 bands above came from the 1/64 rounding alone. Found on Bernie's tracksuit (#8, bc_1 s2, GTAIV.2 frame 84490042):
+  - The dark patches on his sleeves come only from the cutscene light spt_rm2_1 (lamp draw 84488245): there it adds 0, beside them +3.8. The surface faces the light there (n.l 0.96 from the depth buffer), so the G-buffer normal must be turned more than 70°.
+  - Replays with Bernie's other draws, the blended G-buffer draws or all map draws left out (`apitrace trim`, `d3dretrace --ignore-calls`) leave the patches as they are: his torso draw 84486442 writes that normal itself.
+  - Recomputed per vertex from the game's vertex buffer (call 55890979), bone matrices (84486437) and the formula above: a visible forearm vertex with map values (0.65, 0.73) has z ≈ 0.21, and n.l drops from 0.51 to −0.16.
+  - In SparkIV the patches appear only with all four fixes together: bumpiness set again, B = T × N × w, z from the absolute value, skinned N and T not normalised.
+  - Bumpiness is set again for peds only. The other materials' normal maps (`bumped`, tangent space from screen derivatives, not checked against the game's shaders) stay off: switched on, they made bc_3's harbour wall further from the game (s3 f506.75 +0.53, s2 f1307 +0.43).
 
 ## Light volumes
 

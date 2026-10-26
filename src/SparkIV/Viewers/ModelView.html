@@ -115,10 +115,13 @@
         n = mat3(m) * n;
         t = mat3(m) * t;
       }
-      // (A ped's normal and tangent normalised per vertex, as gta_ped's vs04 hands them on.)
+      // (A ped's normal and tangent normalised per vertex as gta_ped's vs04 hands them on; skinned as its vs05
+      // does (deferred_drawskinned), not normalised: blended between bones turned apart, at the elbow, they come
+      // out shorter, each by its own amount, and the normal map tilts the normal further there. GTAIV.2, Bernie's
+      // tracksuit, draw 84486442: |N| 0.88 to 1, |T| 0.72 to 1 on his forearm.)
       bool hasTangent = dot(t, t) > 1e-8;
-      if (hasTangent) n = normalize(n + 1e-5);
-      vTangent = hasTangent ? vec4(normalize(t + 1e-5), tangent.w) : vec4(0.0);
+      if (hasTangent && !skinned) n = normalize(n + 1e-5);
+      vTangent = hasTangent ? vec4(skinned ? t : normalize(t + 1e-5), tangent.w) : vec4(0.0);
       if (waterGrid) {
         vec2 at = dynamicMin + position.xy;
         p = vec4(at, gridLevel + textureLod(dynamicWater, at / 200.0 + 0.005, 0.0).r * seaEdge(position.xy), 1.0);
@@ -203,18 +206,21 @@
       float scale = inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
       return normalize(mat3(t * scale, b * scale, n) * m);
     }
-    // A ped's normal as gta_ped's G-buffer pass makes it (deferred_draw: vs04 + ps05) and the lighting reads it
-    // back: the map's x and y (its alpha for x where 1 - alpha - x >= 0, the DXT5 normal maps'), tilting by
-    // (xy - 0.5) x bumpiness along the vertex tangent and the binormal (normal x tangent x w), z = sqrt(1 - x² - y²)
-    // of the map's values as they are (0.707 where flat); written to GBuffer1 rounded down to 1/64
-    // (floor(64 (n + 1)) / 128 in its 10-bit channels, the rest in its alpha the lights don't read), read as
-    // 2 x - 0.99999 and normalised (the lamps' programs, the TLAD trace GTAIV.3: 102287953).
+    // A ped's normal as gta_ped's G-buffer pass makes it (deferred_draw: vs04 + ps05, skinned vs05 + ps05) and the
+    // lighting reads it back: the map's x and y (its alpha for x where 1 - alpha - x >= 0, the DXT5 normal maps'),
+    // tilting by (xy - 0.5) x bumpiness along the vertex tangent and the binormal (tangent x normal x w, both
+    // vertex programs), z = sqrt(|1 - x² - y²|) of the map's values as they are (0.707 where flat; rsq takes the
+    // absolute value), the normal, tangent and binormal as interpolated (ps05 normalises only the sum: where
+    // x² + y² comes near 1, z near 0, the normal turns far over - the dark patches on Bernie's sleeves, GTAIV.2
+    // draw 84486442); written to GBuffer1 rounded down to 1/64 (floor(64 (n + 1)) / 128 in its 10-bit channels,
+    // the rest in its alpha), read as 2 x - 0.99999 and normalised (the lamps' programs, the TLAD trace GTAIV.3:
+    // 102287953; GTA IV's cutscene lights also read the rest from the alpha, GTAIV.2 PS 0x26b13980).
     vec3 pedBumped(vec3 n, vec4 t, vec2 uv) {
       vec4 raw = texture(normalTex, uv);
       vec2 xy = 1.0 - raw.w - raw.x >= 0.0 ? raw.wy : raw.xy;
       vec2 k = (xy - 0.5) * bumpiness;
-      float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
-      vec3 b = cross(n, t.xyz) * t.w;
+      float z = sqrt(abs(1.0 - dot(xy, xy)));
+      vec3 b = cross(t.xyz, n) * t.w;
       vec3 g = normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
       vec3 stored = round(floor(64.0 * (g + 1.0)) / 128.0 * 1023.0) / 1023.0;
       return normalize(stored * 2.0 - 0.99999);
@@ -292,7 +298,7 @@
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
         base.rgb += texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
       }
-      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(n, vTangent, vUv) : bumped(n, vPosition, vUv);
+      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
@@ -724,7 +730,7 @@
     // background: around a cutscene (its location), not looked at when fitting. A cutscene's props (a door)
     // are lit as its location is (baked: no light of the camera, a middling light round about where they have
     // none of their own).
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null, far: m.far === true, mirrorOnly: m.mirrorOnly === true });
+    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null, far: m.far === true, mirrorOnly: m.mirrorOnly === true, pedBumps: !!m.tangents });
   }
 
   function addMaterial(m) {
@@ -2647,7 +2653,10 @@
           // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
           gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
           gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
-          // Map objects in their place show their bumps softer (under their baked light they looked harsh).
+          // A ped's bumps as the game's G-buffer pass makes them (pedBumped; unset from 57a4f88 to #8, so none
+          // tilted anything). The other materials' (bumped, its tangent space from the screen, not checked against
+          // the game) stay off: on bc_3's harbour wall they made the picture further from the game's.
+          gl.uniform1f(loc.bumpiness, m.pedBumps ? mat.bumpiness ?? 1 : 0);
           gl.uniform1f(loc.specPower, mat.specularPower || 0);
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
