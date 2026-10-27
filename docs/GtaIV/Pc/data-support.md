@@ -175,7 +175,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - One game hour is assumed to be 120 s of playback time; this is not read from the exe.
   - `DetailOffset` moves along in the game; in SparkIV it is fixed.
   - Stars, moon and galaxy (at night) are still missing, as is the blend to the water colour below the horizon.
-  - The time of the bc_3 and bc_1 reference videos (assumed 12:00): not read yet; the settings menu shows it in some recordings, not in the three reference videos sampled so far.
+  - The time of the bc_3 and bc_1 reference videos (12:00): the videos don't show the clock; it was around noon when they were recorded, the exact hour isn't known.
   - The light's sun direction (0x103FBE0) has not been found in a trace frame yet.
 
 ### `[DRAW_DISTANCE]` in the `.cut` (GTAIV.exe, resolved on 2026-10-13)
