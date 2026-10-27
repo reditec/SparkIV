@@ -181,6 +181,8 @@
     // How the game draws a location's lamp (see below): 1 as a "filler" (its 2dfx flag 0x100000), else as a light,
     // 0 outside, 2 in an interior's room.
     uniform float sceneLightKind[40];
+    // A cutscene's own light's inner angle's cosine (see cutLightsNow).
+    uniform float sceneLightInner[40];
     // The interior room of what is drawn (-1: none). A cutscene's light lights only what is in its own room,
     // as the game's do (bc_1: the fill light in Bernie's living room lit the hall outside his door through the
     // wall; the walls of the flat, in none of its rooms, aren't lit by them at all).
@@ -357,8 +359,8 @@
         if (cone > -1.0) {
           float c = dot(-l, sceneLightDir[i].xyz);
           float scale = sceneLightColor[i].w;
-          // (A cutscene's own light, its scale the room it is in: from the outer angle to the inner, half of it.)
-          if (scale < 0.0) scale = 1.0 / max(cos(acos(cone) * 0.5) - cone, 1e-3);
+          // (A cutscene's own light, its scale the room it is in: from the outer angle to its inner.)
+          if (scale < 0.0) scale = 1.0 / max(sceneLightInner[i] - cone, 1e-3);
           spot = clamp((c - cone) * scale, 0.0, 1.0);
         }
         // A lamp casting shadows (its 2dfx flag 0x8000 and its object's instance flag 0x100, see
@@ -636,6 +638,7 @@
       lampShadowOn: gl.getUniformLocation(program, "lampShadowOn"),
       sceneLightShadow: gl.getUniformLocation(program, "sceneLightShadow"),
       sceneLightKind: gl.getUniformLocation(program, "sceneLightKind"),
+      sceneLightInner: gl.getUniformLocation(program, "sceneLightInner"),
     };
   }
 
@@ -1944,8 +1947,13 @@
       const color = v3(l.color, [1, 1, 1]).map(c => c * strength * scale);
       const dir = v3(l.direction, null);
       const cone = l.cone && dir ? Math.cos(Math.min(89, Math.max(1, v1(l.cone, 89))) * Math.PI / 180) : -1;
+      // Its inner angle half the track's angle, from the angle as it is, not the one kept to 89° (0x9CA7E0 hands
+      // 0xABCC50 the track's value x 0.5 and the value): the TLAD trace GTAIV.4's light on Jim's face (et01_ba s1
+      // f385, call 140390932) has the cone offset cos 89° and the scale 2.07 = 1 / (cos 60° - cos 89°), its
+      // track's angle 120°; with half of 89° its light came out a third too weak there.
+      const inner = l.cone && dir ? Math.cos(Math.max(1, v1(l.cone, 89)) * 0.5 * Math.PI / 180) : 1;
       const at = v3(l.position, [0, 0, 0]);
-      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, strength, actors: true, room: roomOf(at) });
+      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, inner, strength, actors: true, room: roomOf(at) });
     }
     now.sort((a, b) => b.strength - a.strength);
     return now;
@@ -2467,7 +2475,8 @@
         gl.uniform4fv(loc.sceneLightAt, pad(l => [...l.at, !l.actors && l.shadows ? -l.range : l.range]));
         gl.uniform4fv(loc.sceneLightDir, pad(l => [...l.dir, l.cone]));
         gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) : (l.coneScale || 0)]));
-        gl.uniform1fv(loc.sceneLightKind, Float32Array.from({ length: MaxLights }, (_, i) => !lightsNow[i] ? 0 : lightsNow[i].filler ? 1 : lightsNow[i].room >= 0 ? 2 : 0));
+        gl.uniform1fv(loc.sceneLightInner, Float32Array.from({ length: MaxLights }, (_, i) => lightsNow[i] && lightsNow[i].inner !== undefined ? lightsNow[i].inner : 1));
+        gl.uniform1fv(loc.sceneLightKind,Float32Array.from({ length: MaxLights }, (_, i) => !lightsNow[i] ? 0 : lightsNow[i].filler ? 1 : lightsNow[i].room >= 0 ? 2 : 0));
       }
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
