@@ -299,7 +299,13 @@
       if (useEnv && useTexture) {
         vec3 r = reflect(normalize(vPosition - eyeAt), n);
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
-        base.rgb += texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
+        vec3 mirroredEnv = texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
+        // Drawn see-through (forward, blended by the texture's x the vertex's alpha), divided by that alpha first,
+        // 100 times below 0.01, so it shows whole on clear glass: the GTA IV trace GTAIV.2's glass table top in
+        // Bernie's flat (bc_1 s2 f84, draw 76996856, PS 0x25b4ebe0: r5 = env x 1/alpha + albedo, then x the light);
+        // without it the table came out +0.95 brighter than the floor below, the game's +1.37.
+        if (textureAlpha) { float seen = base.a * vAlpha; mirroredEnv *= seen >= 0.01 ? 1.0 / seen : 100.0; }
+        base.rgb += mirroredEnv;
       }
       if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
