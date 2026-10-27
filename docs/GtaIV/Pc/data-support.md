@@ -210,7 +210,11 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - Visual run: bc_3 s3 f137.5 −1.58, s1 f79 −1.35, s1 f984 −0.98, s3 f357.5 −0.86, s2 f437 −0.53, s2 f1055.25 −0.50; worse s2 f786.75 +0.03.
 - **Open (#13):**
   - The reflection is kept on the water's side of the horizon as in the game (the point 2000 m ahead on the water's plane, projected; v at least 0.5 (1 + its y) + 0.05 × near + 0.005); in the references this changes next to nothing.
-  - The water is still 3–14 % darker than the game's. Not yet checked: the far water's own shading (lerp by r0.z) and the shore's flattening of the normal.
+  - Which normal takes what, as in the game's shader: Fresnel and the mirror's shift take the gentle slopes, turned towards the view where the water is shallow (the shore's flattening). The sun's light and its glint take the steep ones (×4). SparkIV had it the other way round.
+  - The glint is ×10 × gDirectionalLight.w × the sun's shadow. Fresnel takes 1 − cos as 1 where the view meets a wave's back (the game's cmp, not abs).
+  - Visual run (bc_3): s3 f357.5 −0.22, f137.5 −0.17, s1 f79 −0.11, s2 f437 −0.11; worse s1 f984 +0.28, s2 f786.75 +0.09.
+  - The mirror's content matches the game's: its ReflectTexture, read mirrored in x as the shader reads it, is 7.5–7.8 / 8.1–9.1 / 8.4–9.8 at the water's regions; SparkIV's 7.1–7.7 / 8.3–9.1 / 9.1–10.0.
+  - Still open: the water is 3–14 % darker. In the comparison pictures the game's water has a bright, glittering band towards the horizon that SparkIV lacks. Steeper waves (×1.33) and 21 ms steps changed nothing; the far term (lerp by r0.z) only acts at the very shore line.
   - The game's water is still rougher and brighter. Its settled spread is about 1.3 × SparkIV's; the trace ran at 16–23 ms a frame, so its steps were larger.
   - The wind: SparkIV keeps its 0.25 (`WaterWind`); the trace has 0.
   - The rest of the water shader (its colour, Fresnel, the depth fade) is not yet checked against the trace.

@@ -437,8 +437,8 @@ const GameGlsl = Object.freeze({
           // As the game's water.fxc (its main pixel shader): the waves are its water simulation's (waterTex.fxc,
           // run each frame - see waterSimStep), whose texture holds their slopes in blue and alpha, laid over
           // the world three times: every 500 m beyond 50 m off, every 100 m everywhere, every 22 m within 50 m.
-          // The light takes their slopes as they are, the mirror four times steeper (the game's x and y of
-          // its slopes and its z and w).
+          // Two sets of slopes: as they are and four times steeper (the game's x and y of its slopes and its z
+          // and w; which of them takes what, see below).
           vec3 view = normalize(vPosition - eyeAt);
           vec3 lightNormal = vec3(0.0, 0.0, 1.0);
           vec3 mirrorNormal = lightNormal;
@@ -466,7 +466,27 @@ const GameGlsl = Object.freeze({
             lightNormal = normalize(vec3(lightSlope, 1.00001));
             mirrorNormal = normalize(vec3(mirrorSlope, 1.00001));
           }
-          float cosine = abs(dot(view, mirrorNormal));
+          // How much water lies in front of what is behind it (the view depths' difference; 1 where the scene is
+          // nearer or unknown), for the shore below and the see-through at the end.
+          float behindDepth = 1.0;
+          if (waterBehindOn) {
+            vec2 at = gl_FragCoord.xy / vec2(textureSize(waterBehind, 0));
+            float behind = texture(waterBehind, at).r * 2.0 - 1.0, front = gl_FragCoord.z * 2.0 - 1.0;
+            float n = waterRange.x, f = waterRange.y;
+            behindDepth = 2.0 * n * f / (f + n - behind * (f - n)) - 2.0 * n * f / (f + n - front * (f - n));
+            if (behindDepth < 0.0) behindDepth = 1.0;
+          }
+          // As water.fxc takes its normals (the GTA IV trace GTAIV.1's PS 0x24641060): Fresnel and the mirror's shift
+          // by the gentle slopes (the light's above), turned towards the view where the water is shallow - (1 -
+          // saturate(d / (saturate(depth^1.125 x 0.02) + 0.05)))², the view x -0.5 of that onto the slope; the
+          // sun's light and its glint by the steep ones (the mirror's above).
+          float viewDepth = length(eyeAt - vPosition);
+          float shore = 1.0 - clamp(behindDepth / (clamp(pow(viewDepth, 1.125) * 0.02, 0.0, 1.0) + 0.05), 0.0, 1.0);
+          shore *= shore;
+          vec3 gentleNormal = waterWaves ? normalize(vec3(lightNormal.xy / max(lightNormal.z, 1e-4) - 0.5 * view.xy * shore, 1.00001 - 0.5 * view.z * shore)) : lightNormal;
+          // (Where a wave faces away so far that the view meets its back, the game takes 1 - cos as 1: its cmp on
+          // -v.n, not the cosine's size - the most Fresnel, 0.8, there.)
+          float cosine = max(-dot(view, gentleNormal), 0.0);
           float fresnel = pow(1.0 - cosine, 5.0) * 0.6 + 0.2;
           vec3 bounce = reflect(view, mirrorNormal);
           vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
@@ -477,7 +497,7 @@ const GameGlsl = Object.freeze({
             vec3 across = normalize(cross(view, vec3(0.0, 0.0, 1.0)) + 1e-5);
             vec2 ahead = normalize(view.xy + 1e-5);
             float shift = min(0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 2.0);
-            vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(mirrorNormal.xy, across.xy), dot(mirrorNormal.xy, ahead)) * shift;
+            vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(gentleNormal.xy, across.xy), dot(gentleNormal.xy, ahead)) * shift;
             // Kept on the water's side of the horizon as water.fxc keeps it: its vertex shader projects the point
             // 2000 m ahead (along the camera's look, level) on the water's plane, its pixel shader holds the read's v
             // at least 0.5 (1 + that) + 0.05 x near + 0.005 (Direct3D's v down: here at most, mirrored).
@@ -488,7 +508,9 @@ const GameGlsl = Object.freeze({
             if (reflectLight) mirroredScene = scene;
             else mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
-          vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
+          // The sun's glint as water.fxc's: (saturate(R.l) + 1e-4)^512 x the sun x its shadow x gDirectionalLight.w
+          // x 10 (its 10 - 9 x the shore's factor^0.25, that 0 away from the very shore line).
+          vec3 glint = sunColor * pow(clamp(dot(bounce, sunDir), 0.0, 1.0) + 1e-4, 512.0) * sunShadow * pedShineScale.x * 10.0;
           // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's, sunny
           // at noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
           // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3);
@@ -497,7 +519,7 @@ const GameGlsl = Object.freeze({
           // (With the mirrored scene's light as the game's HDR ReflectTexture: taken as it is, unclipped.)
           vec3 mirroredLight = reflectLight && reflectOn ? gameToneUnmap(mirrored) * (1.0 - clamp(mirroredScene.a, 0.0, 1.0)) + mirroredScene.rgb : gameToneUnmap(mirrored);
           vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredLight * waterReflect + glint)
-                          + sunColor * clamp((dot(lightNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
+                          + sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
           lightOut = gameFog(waterLight, distance);
           rgb = gameToneMap(lightOut);
           a = 1.0;
@@ -506,14 +528,7 @@ const GameGlsl = Object.freeze({
           // the scene behind less the water's (where the scene is nearer, 1), saturate((d x waterColour.w x
           // 0.25)^0.25 + 0.125); its reflection and colour then show by that much, the sea bed by the rest (bc_3's
           // shallows by the shore pale where they lay dark here).
-          if (waterBehindOn) {
-            vec2 at = gl_FragCoord.xy / vec2(textureSize(waterBehind, 0));
-            float behind = texture(waterBehind, at).r * 2.0 - 1.0, front = gl_FragCoord.z * 2.0 - 1.0;
-            float n = waterRange.x, f = waterRange.y;
-            float d = 2.0 * n * f / (f + n - behind * (f - n)) - 2.0 * n * f / (f + n - front * (f - n));
-            if (d < 0.0) d = 1.0;
-            a = clamp(pow(d * waterAlpha * 0.25, 0.25) + 0.125, 0.0, 1.0);
-          }
+          if (waterBehindOn) a = clamp(pow(behindDepth * waterAlpha * 0.25, 0.25) + 0.125, 0.0, 1.0);
   `,
 });
 
