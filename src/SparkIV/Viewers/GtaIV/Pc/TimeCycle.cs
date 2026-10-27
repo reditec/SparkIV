@@ -144,6 +144,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public Vector4 CloudDetail { get; private init; }
     public float CloudShadowOffset { get; private init; }
     /// <summary>
+    /// The clouds' edge (column 89): GTAIV.exe 0x615D98 hands the shader EdgeSmooth = 1 / it (the sky's +0x184, next
+    /// to the detail's scale 90, strength 91 and the thickness 92 at +0x188 to +0x190). 1 in GTA IV's trace GTAIV.1
+    /// (column 89 = 1), infinite in TLAD's GTAIV.3/.4 (column 89 = 0).
+    /// </summary>
+    public float CloudEdge { get; private init; }
+    /// <summary>
     /// How fast the clouds' noise moves (column 107; the parser 0xAEFEB0 puts it at +0x1B4, 0xDBBDF0 hands it to the
     /// noise, whose Phase grows by it per game hour, 0x62E110: 1.7 in TLAD's trace at noon, its Phase 1.8 on in a
     /// little over an hour).
@@ -241,6 +247,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         CloudShape = a.Length > 119 && b.Length > 119 ? new Vector4(V(85), V(86), V(84), V(88)) : Vector4.Zero,
         CloudDetail = a.Length > 119 && b.Length > 119 ? new Vector4(V(92), V(90), V(91), V(94)) : Vector4.Zero,
         CloudShadowOffset = a.Length > 119 && b.Length > 119 ? V(87) : 0,
+        CloudEdge = a.Length > 119 && b.Length > 119 ? V(89) : 0,
         CloudSpeed = a.Length > 119 && b.Length > 119 ? V(107) : 0,
       };
     }
@@ -356,11 +363,27 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public static Vector3 SunDirection(float hour)
     {
-      double t = ((hour % 24) + 24) % 24;
-      double angle = t < 6 ? t * 0.2617994 : t < 20 ? (t - 6) * 0.2243995 + 1.570796 : (t - 20) * 0.3926991 + 4.712389;
-      angle = Math.Clamp(angle, 1.570796, 4.712389);
+      double angle = Math.Clamp(SunAngle(hour), 1.570796, 4.712389);
       const double Offset = 0.1;
-      angle = (1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI;
+      return SunOnAxis((1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI);
+    }
+
+    /// <summary>
+    /// Where the sky draws the sun (towards it) at the hour: GTAIV.exe 0xDBBDF0 hands gta_atmoscatt_clouds its
+    /// SunDirection from the same angle as <see cref="SunDirection"/>, but neither kept within pi/2 and 3pi/2 nor
+    /// offset. So the sun in the sky is higher than the light at the same hour. The traces' sky draws (VS c64,
+    /// against the clock from gDayNightEffects) match it to 0.0001 at 09:35, 09:44, 10:39, 10:42, 12:56 and 13:12.
+    /// </summary>
+    public static Vector3 SkySunDirection(float hour) => SunOnAxis(SunAngle(hour));
+
+    static double SunAngle(float hour)
+    {
+      double t = ((hour % 24) + 24) % 24;
+      return t < 6 ? t * 0.2617994 : t < 20 ? (t - 6) * 0.2243995 + 1.570796 : (t - 20) * 0.3926991 + 4.712389;
+    }
+
+    static Vector3 SunOnAxis(double angle)
+    {
       double s = Math.Sin(angle), c = Math.Cos(angle);
       var axis = new Vector3(0f, -0.3420202f, 0.9396926f);
       return Vector3.Normalize(new Vector3((float)s, 0f, 0f) - (float)c * axis);
@@ -376,6 +399,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         type = "sky",
         sunDirection = A(sunDirection),
+        skySunDirection = A(SkySunDirection(hour)),
         sun = A(Sun * SunMultiplier * Exposure),
         ambientAbove = A(AmbientAbove * AmbientMultiplierAbove * Exposure),
         ambientBelow = A(AmbientBelow * AmbientMultiplierBelow * Exposure),
@@ -435,6 +459,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           cloudShape = new[] { CloudShape.X, CloudShape.Y, CloudShape.Z, CloudShape.W },
           cloudDetail = new[] { CloudDetail.X, CloudDetail.Y, CloudDetail.Z, CloudDetail.W },
           cloudShadowOffset = CloudShadowOffset,
+          cloudEdge = CloudEdge,
           cloudSpeed = CloudSpeed,
         },
         skyTop = A(SkyTop),
