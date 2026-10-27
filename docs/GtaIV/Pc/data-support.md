@@ -192,6 +192,22 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 - **In SparkIV:** the composite in `gamePostEnd` (`gtaiv-pc.js`). Where the game's G-buffer has GB2.w, SparkIV has depth < 1 (it has no G-buffer).
 - **Open:** Whether the reference videos' remaining softness comes from the video compression or from the texture quality is not measured. The traces show the game's own picture without it.
 
+### The water's waves and their mirror (GTA IV trace `GTAIV.1`, bc_3 s1 f79, resolved in part on 2026-10-27, #6, #13)
+
+- **The band of specks before the shore** (#6) is not litter. It is the water's mirror of the rocks and the shore, broken up by the waves.
+  - Dumps of the frame (Present 74267898) before and after the water's 316 draws (PS 0x24641060, calls 74265526–74267101) show it: before, only the sand of the sea bed; after, the speckled band right below the rock pile.
+  - The water shader reads the wave texture (s0) three times (world xy × 0.002, 0.01, 0.0455) and looks the mirror (s1, the mirrored scene) up at the screen point, shifted by the slope × min(2, 0.5 / (0.03 · distance)).
+  - The same holds for s1 f984 (the "line before the shore") and s3 f357.5 (the chimney's mirror shifted into a slanting line).
+- **The wave simulation** (`waterTex.fxc`, step at call 74263369, PS 0x24640fc0) is as SparkIV had it: pull towards the neighbours, back to rest, kick, Verlet. Its constants waterSimParam = (1, 0.1, 0.01, 0.5, 0.5, 0.5, 1, the step = frame ms × 0.02).
+  - The quad's vertex colour (D3DCOLOR at offset 24 of the vertex declaration) gives a random noise shift (R, G), the threshold 51/255 = 0.2 (B) and the kick 6/255 ≈ 0.025 (A). That is (wind · 0.75 + 0.25) · 10 · 0.01 with the wind byte 0x12DDEB4 = 0, as `FUN_00ADC280` computes it. Seen in three frames (calls 74952390, 74263367, 84163935).
+  - **Size:** `FUN_00AD61C0` makes it 128 << the water quality (0x1160EB4). The trace's is 1024 × 1024, with its neighbours one texel of 1024 apart (waterTexResValue 0.25 × 1/256). SparkIV had 256.
+  - **Its state:** in the trace it has long settled (spread of the heights 0.17, of the slopes 0.12). SparkIV started it flat each time a scene was made, so in the references its waves were next to nothing (spread 0.0007) and the mirror came out sharp. Run on from flat at 16 ms a step, it settles after about 15 000 steps (0.13 / 0.09).
+- **In SparkIV:** `waterSimStep` in `gtaiv-pc.js` (1024 × 1024, 20 000 steps run on when it is made). Visual run: bc_3 s3 f137.5 −0.43, s1 f984 −0.34, s1 f79 −0.26; sum −1.01; worse s1 f586.75 +0.09, s2 f1055.25 +0.07.
+- **Open (#13):**
+  - The game's water is still rougher and brighter. Its settled spread is about 1.3 × SparkIV's; the trace ran at 16–23 ms a frame, so its steps were larger.
+  - The wind: SparkIV keeps its 0.25 (`WaterWind`); the trace has 0.
+  - The rest of the water shader (its colour, Fresnel, the depth fade) is not yet checked against the trace.
+
 ### `[DRAW_DISTANCE]` in the `.cut` (GTAIV.exe, resolved on 2026-10-13)
 
 - **Parsing:** `Cut_ParseFile` (0x9C3840) reads each line in block state 0x13 as `%d %*d %f %f`.
