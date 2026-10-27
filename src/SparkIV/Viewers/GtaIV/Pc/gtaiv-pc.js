@@ -439,12 +439,16 @@ const GameGlsl = Object.freeze({
           // the world three times: every 500 m beyond 50 m off, every 100 m everywhere, every 22 m within 50 m.
           // Two sets of slopes: as they are and four times steeper (the game's x and y of its slopes and its z
           // and w; which of them takes what, see below).
-          vec3 view = normalize(vPosition - eyeAt);
+          // The view from the eye to the point a metre above the water, as water.fxc takes it: its vertex shader
+          // passes the place + (0, 0, 1) (o3 = r0 + c5.wwx, the GTA IV trace GTAIV.1's VS for PS 0x24641060), its
+          // pixel shader takes the view and the distance from that - flatter, so more Fresnel.
+          vec3 lifted = vPosition + vec3(0.0, 0.0, 1.0);
+          vec3 view = normalize(lifted - eyeAt);
           vec3 lightNormal = vec3(0.0, 0.0, 1.0);
           vec3 mirrorNormal = lightNormal;
           if (waterWaves) {
             vec2 p = vPosition.xy;
-            float distance2 = dot(eyeAt - vPosition, eyeAt - vPosition);
+            float distance2 = dot(eyeAt - lifted, eyeAt - lifted);
             float near = max(1.0 - distance2 * 0.0004, 0.0);
             vec2 big = texture(waterSim, p * 0.002).zw - 0.5;
             vec2 middle = texture(waterSim, p * 0.01).zw - 0.5;
