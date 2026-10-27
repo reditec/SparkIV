@@ -496,7 +496,7 @@ const GameGlsl = Object.freeze({
 });
 
   // The game's water simulation (GTAIV.exe sets it up at 0xAD61C0 and runs it each frame at 0xADC280; the
-  // step is waterTex.fxc's pixel shader): a 256 x 256 texture tiled over the world, its red the water's height,
+  // step is waterTex.fxc's pixel shader): a 1024 x 1024 texture tiled over the world, its red the water's height,
   // green its speed (both 0.5 at rest), blue and alpha its slope across and along (0.5 flat), stepped on each
   // frame into a second one and back. Each point is pulled towards its eight neighbours (the corners by
   // 0.707), a little back to rest, and kicked where a noise texture (random bytes, shifted at random each
@@ -512,7 +512,7 @@ const GameGlsl = Object.freeze({
     in vec2 uv; out vec4 outColor;
     uniform sampler2D state; uniform sampler2D noise;
     uniform vec2 noiseShift; uniform float kick; uniform float step;
-    const float Texel = 1.0 / 256.0, Threshold = 0.2;
+    const float Texel = 1.0 / 1024.0, Threshold = 0.2;
     const float Pull = 1.0, Rest = 0.1, Accel = 0.5, Speed = 0.5, Kick = 0.5;
     float h(vec2 at) { return texture(state, at).x; }
     void main() {
@@ -532,8 +532,16 @@ const GameGlsl = Object.freeze({
   // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user chose.
   const WaterWind = 0.25;
   let waterSim = null;
+  // The simulation's size: GTAIV.exe 0xAD61C0 makes it 128 << the water's quality setting (0x1160EB4); the GTA IV
+  // trace GTAIV.1 steps a 1024 x 1024 one (call 74263369: render target and noise 1024, waterTexResValue 0.25 x
+  // 1/256, so its neighbours one texel of 1024 apart).
+  const WaterSimSize = 1024;
+  // The game's simulation has run since the game started; here it starts flat, so it is run on first as the game's
+  // would have been at 60 a second (16 ms a step) until it has settled: its heights' and slopes' spread no longer
+  // grow by then (measured here: 0.134 / 0.090 after 15 000 steps, the same after 20 000).
+  const WaterSimWarmUp = 20000;
   function waterSimStep() {
-    const Size = 256;
+    const Size = WaterSimSize;
     if (!waterSim) {
       const simProgram = createProgram(SIM_VERTEX, SIM_FRAGMENT);
       const where = ["state", "noise", "noiseShift", "kick", "step"].reduce((o, n) => (o[n] = gl.getUniformLocation(simProgram, n), o), {});
@@ -581,11 +589,18 @@ const GameGlsl = Object.freeze({
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_T, gl.REPEAT);
       waterSim = { simProgram, where, quad, textures, frames, noise, points, current: 0, last: 0 };
+      for (let i = 0; i < WaterSimWarmUp; i++) waterSimRun(16, false);
     }
     const now = performance.now();
     // The frame's milliseconds x 0.02 (the first frame, and after a pause, as at 30 a second).
     const ms = waterSim.last && now - waterSim.last < 200 ? now - waterSim.last : 33;
     waterSim.last = now;
+    waterSimRun(ms, true);
+  }
+
+  // One step of the water's simulation, ms the frame's milliseconds; its mipmaps made only when it is drawn next.
+  function waterSimRun(ms, shown) {
+    const Size = WaterSimSize;
     const next = 1 - waterSim.current;
     gl.bindFramebuffer(gl.FRAMEBUFFER, waterSim.frames[next]);
     gl.viewport(0, 0, Size, Size);
@@ -602,7 +617,7 @@ const GameGlsl = Object.freeze({
     gl.bindSampler(10, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[next]);
-    gl.generateMipmap(gl.TEXTURE_2D);
+    if (shown) gl.generateMipmap(gl.TEXTURE_2D);
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST);
     waterSim.current = next;
