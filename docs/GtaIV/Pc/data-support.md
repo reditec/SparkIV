@@ -157,6 +157,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - HDRExposure = SkyLightMult (column 60) × 2.85 (0xDBC049), clamped to 30. After that everything is tone-mapped like the rest.
 - **Cloud noise:** The shader `rage_perlinnoise` (0x23C2D220) recomputes it every frame into a 256² texture. The basis is `baseperlinnoise3channel` from `pc\textures\skydome.wtd`, 6 octaves.
   - The fine structure comes from `noise16_p`, not from `detailbump2`. In the capture the textures are two levels smaller; this is due to the texture quality.
+  - SparkIV now takes them from their third level as well (2026-10-27): in `GTAIV.1` the noise draw 74260495's Noise1Sampler is 32 × 32, byte for byte the third level of the 128 × 128 `baseperlinnoise3channel`; the sky draw 74265456's HighDetailNoiseSampler is 64 × 64, the third level of the 256 × 256 detail texture (within DXT rounding). From the full texture the noise's spread was 0.20, the game's 0.11 (now 0.110). With twice the contrast fewer places passed the threshold: blue sky where the game's lies overcast, and the water mirroring it too blue. Visual run: bc_3 sum −5.46 (s3 f828.25 −1.96, s2 f1307 −1.23, s2 f1055.25 −0.35, s1 f854.75 −0.35); worse s3 f357.5 +0.09, f137.5 +0.05; TLAD unchanged.
 - **Cloud columns** (matched in both captures):
   - CloudColor 81–83, SunsetColor 73–75 × column 89, upper cloud colour 99–101 + 73–75, TopCloud 95–98.
   - Threshold 85, bias 86, shadow strength 84, shadow offset 87, inscattering 88, detail scale 90, detail strength 91, thickness 92, fade towards the horizon 94.

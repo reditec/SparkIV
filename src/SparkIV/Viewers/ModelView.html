@@ -1432,8 +1432,18 @@
     skyOutside = make(m);
     skyRooms = (m.rooms || []).map(r => r ? make({ ...m, ...r }) : null);
     sky = skyOutside;
-    if (m.clouds && !cloudTex) loadTexture(m.clouds, t => cloudTex = t);
-    if (m.cloudDetail && !cloudDetailTex) loadTexture(m.cloudDetail, t => cloudDetailTex = t);
+    // The clouds' textures from their third level on, as the game has them: in the GTA IV trace GTAIV.1 (bc_3) the
+    // rage_perlinnoise draw 74260495's Noise1Sampler is 32 x 32, byte for byte the third level of skydome.wtd's
+    // 128 x 128 baseperlinnoise3channel, and the sky draw 74265456's HighDetailNoiseSampler 64 x 64, the third level
+    // of the 256 x 256 detail texture (its two largest levels not loaded). From the full noise its spread came out
+    // twice the game's (0.20, the game's 0.11), so that fewer places passed the clouds' threshold: blue sky where the
+    // game's lies overcast, and the water mirroring it too blue.
+    const fromThirdLevel = t => { gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 2); return t; };
+    if (m.clouds && !cloudTex) loadTexture(m.clouds, t => {
+      cloudTex = fromThirdLevel(t);
+      if (perlinPass) perlinPass.phase = NaN;
+    });
+    if (m.cloudDetail && !cloudDetailTex) loadTexture(m.cloudDetail, t => cloudDetailTex = fromThirdLevel(t));
     showSky();
   }
   function skyAtCamera() {
