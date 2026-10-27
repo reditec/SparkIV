@@ -343,6 +343,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // Far versions only for the map of the mirrored surroundings (see below), by index and by name and place.
       var mirrorOnly = new HashSet<int>();
       var mirrorPlaces = new HashSet<(string, Vector3)>();
+      // Far versions not named so (SupLOD_Ks3_02, og_BS3blk02a_lod): whatever other placements name as theirs.
+      var parentPlaces = new HashSet<(string, Vector3)>();
 
       // Inside: the origin across the ground in a room, up to 5 m below or above it (a scene's origin isn't
       // where it plays: bc_1's is 3.4 m under the floor of Bernie's living room).
@@ -376,6 +378,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           if (parent >= 0 && parent < index.Placements.Count && parent != i)
           {
             (below.TryGetValue(parent, out var list) ? list : below[parent] = new List<int>()).Add(i);
+            parentPlaces.Add((index.Placements[parent].Name, index.Placements[parent].Position));
           }
         }
         bool Wanted(int i)
@@ -453,7 +456,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var p = index.Placements[i];
           int parent = p.Parent;
           if (!IsFar(p.Name) && parent >= 0 && parent < index.Placements.Count && parent != i && !chosenSet.Contains(parent) &&
-              IsFar(index.Placements[parent].Name) && AtHour(index.Placements[parent].Name) && mirrorOnly.Add(parent))
+              index.Placements[parent].Name.Length > 0 && AtHour(index.Placements[parent].Name) && mirrorOnly.Add(parent))
           {
             var lod = index.Placements[parent];
             near.Add((lod.Name, lod.Position, lod.Rotation, -1));
@@ -538,7 +541,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             var place = Matrix4x4.CreateFromQuaternion(Quaternion.Conjugate(placement.Rotation)) * Matrix4x4.CreateTranslation(placement.Position - origin);
             location.Objects.Add(new LocationObject(model, place, placement.Room)
             {
-              Far = IsFar(placement.Name),
+              Far = IsFar(placement.Name) || parentPlaces.Contains((placement.Name, placement.Position)),
               MirrorOnly = mirrorPlaces.Contains((placement.Name, placement.Position)),
               LampShadows = shadowPlaces.Contains((placement.Name, placement.Position)),
             });

@@ -219,6 +219,14 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - The game's water is still rougher and brighter. Its settled spread is about 1.3 × SparkIV's; the trace ran at 16–23 ms a frame, so its steps were larger.
   - The wind: SparkIV keeps its 0.25 (`WaterWind`); the trace has 0.
   - The rest of the water shader (its colour, Fresnel, the depth fade) is not yet checked against the trace.
+- **What the water mirrors** (#13, 2026-10-27):
+  - The game draws its ReflectTexture from the far versions only, even beside the camera: of the 59 vertex buffers of its draws (`GTAIV.1`, 74262969–74263286) 50 aren't in the main pass, the 9 others are far versions it shows there too (the Brooklyn Bridge's, 100 m and more off). By their places in the WPL they are `LOD_P17_Port_MH1`, `LOD_P17_SW_MH1`, `LODKs_coastwall_01`, `LODBBrijSup2_Ks` and the like. What has no far version (`EC_hbr_bench_2`, `P17_PortHood_MH1`) is not mirrored, nor are people or vehicles.
+  - SparkIV mirrored the near models, the shore's ground among them (the dark land in the water). Now it mirrors the far versions, also those only meant for the map of the surroundings (`MirrorOnly`).
+  - A far version is any placement another names as its LOD (`SupLOD_…`, `…_lod` as well), not only one named `lod…`. With names alone the quay's and the ship's far versions were missing from bc_3 s2 f786.75's mirror. This also applies to the map of the surroundings.
+  - Lit as the game's pixel shader for the ReflectTexture (0x1A3F8A40): the texture × (the light from around × AO + the sun × saturate((n.l − 0.25) × 4/3)), the far fog over it; no shadow, no shine, no lamps. The same as for the map of the surroundings; the constants (c18, c37, c38, c45) are SparkIV's.
+  - Only front faces (CULLMODE CW for all its draws, 74262957–74263295): from below SparkIV showed the sunlit tops of the far ground and of the pier.
+  - Visual run (bc_3, against the mirror of the near models): s3 f357.5 −0.36, s2 f786.75 −0.12, s1 f984 −0.09; worse s2 f437 +0.11, s1 f586.75 +0.06; sum −0.48. TLAD et01_ba (the map of the surroundings) +0.01 to +0.05.
+  - Open: at f79 the game's mirror has a dark underside of the pier in its corner (1.2), SparkIV's sky there; the shore's far version behind the bridge stays in SparkIV's mirror, in the game's it is gone in the fog.
 
 ### `[DRAW_DISTANCE]` in the `.cut` (GTAIV.exe, resolved on 2026-10-13)
 
