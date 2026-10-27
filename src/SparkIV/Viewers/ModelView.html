@@ -237,7 +237,14 @@
     uniform vec3 hazeColor; uniform float hazeStart; uniform float hazeEnd;
     // The scene mirrored in the water (drawn first into reflectTex, what lies below clipBelow left out).
     uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
+    // reflectTex holds the mirrored scene's light (premultiplied, its alpha what was drawn), not its picture.
+    uniform bool reflectLight;
     uniform bool water; uniform bool waterWaves; uniform sampler2D waterSim; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform vec3 waterColor;
+    // The scene's depth before the water (for its see-through, see the game's file: water), the depth's range and
+    // the time cycle's water alpha (waterColour.w); off where there is none (reflections, without post effects).
+    uniform bool waterBehindOn; uniform highp sampler2D waterBehind; uniform vec2 waterRange; uniform float waterAlpha;
+    // (The vertex shader's, for the water's horizon.)
+    uniform highp mat4 viewProjection;
     // The game's sea round the camera (see the vertex shader): drawn as its grid where the water's quads are
     // (waterMask), the flat quads left out there.
     uniform bool waterGrid; uniform bool maskPass; uniform bool seaOn; uniform sampler2D waterMask; uniform vec3 skyColor; uniform vec3 skyTopColor;
@@ -630,6 +637,11 @@
       lampShadowOn: gl.getUniformLocation(program, "lampShadowOn"),
       sceneLightShadow: gl.getUniformLocation(program, "sceneLightShadow"),
       sceneLightKind: gl.getUniformLocation(program, "sceneLightKind"),
+      reflectLight: gl.getUniformLocation(program, "reflectLight"),
+      waterBehindOn: gl.getUniformLocation(program, "waterBehindOn"),
+      waterBehind: gl.getUniformLocation(program, "waterBehind"),
+      waterRange: gl.getUniformLocation(program, "waterRange"),
+      waterAlpha: gl.getUniformLocation(program, "waterAlpha"),
     };
   }
 
@@ -1811,6 +1823,7 @@
     if (reflection) {
       gl.deleteFramebuffer(reflection.frame); gl.deleteTexture(reflection.texture); gl.deleteRenderbuffer(reflection.depth);
       gl.deleteFramebuffer(reflection.drawFrame); gl.deleteRenderbuffer(reflection.drawColor); gl.deleteRenderbuffer(reflection.drawDepth);
+      if (reflection.light) { gl.deleteTexture(reflection.light); gl.deleteRenderbuffer(reflection.drawLight); }
     }
     const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
     const drawColor = gl.createRenderbuffer();
@@ -1819,9 +1832,25 @@
     const drawDepth = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, drawDepth);
     gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, w, h);
+    // With the post effects also the mirrored scene's light (as the game's ReflectTexture, A16B16G16R16F: the
+    // picture's colours clip the bright sky the water mirrors).
+    const hdr = typeof gamePost === "object" && !!gamePost;
+    let drawLight = null, light = null;
+    if (hdr) {
+      drawLight = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, drawLight);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA16F, w, h);
+      light = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, light);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
     const drawFrame = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, drawFrame);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, drawColor);
+    if (hdr) gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.RENDERBUFFER, drawLight);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, drawDepth);
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1835,9 +1864,10 @@
     const frame = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    if (hdr) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, light, 0);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
-    return reflection = { w, h, texture, depth, frame, drawFrame, drawColor, drawDepth };
+    return reflection = { w, h, texture, depth, frame, drawFrame, drawColor, drawDepth, drawLight, light };
   }
 
   function setMapLights(list, roomList) {
@@ -2513,11 +2543,33 @@
         return true;
       };
       let noWaterMasked = false;
-      for (const pass of ["solid", "glass"]) {
-        const glassPass = pass === "glass";
+      // Outside, with the post effects, the water after everything solid, see-through by its depth as the game's
+      // (water.fxc, the GTA IV trace GTAIV.1's water draws 74265526 to 74267101: SRCALPHA/INVSRCALPHA after the
+      // G-buffer's light, reading the scene's depth): the scene's depth copied first for its shader.
+      const waterLater = outside && !reflecting && !mapPass && !castBox && typeof gamePost === "object" && gamePost && sceneFramebuffer === gamePost.ms;
+      for (const pass of ["solid", "water", "glass"]) {
+        const glassPass = pass === "glass", waterPass = pass === "water";
         if (glassPass && (mapPass || castBox)) continue;
-        if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
+        if (waterPass) {
+          if (!waterLater) continue;
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, gamePost.ms);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, gamePost.resolve);
+          gl.blitFramebuffer(0, 0, gamePost.w, gamePost.h, 0, 0, gamePost.w, gamePost.h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, gamePost.ms);
+          // (On the lamps' shadow maps' unit: the water reads no lamp shadows; given back below.)
+          gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, gamePost.depth); gl.activeTexture(gl.TEXTURE0);
+          gl.uniform1i(loc.waterBehind, 9);
+          gl.uniform1i(loc.waterBehindOn, true);
+          gl.uniform2f(loc.waterRange, vp.near, vp.far);
+          gl.uniform1f(loc.waterAlpha, sky && sky.water ? sky.water[3] : 1);
+          gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(true);
+        }
+        else if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
         else { gl.disable(gl.BLEND); gl.depthMask(true); }
+        if (glassPass && waterLater) {
+          gl.uniform1i(loc.waterBehindOn, false);
+          gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lampMapNow ? lampMapNow.texture : null); gl.activeTexture(gl.TEXTURE0);
+        }
         // An interior's glowing see-through parts (drawn only as their glow, below) before the rest of what is
         // see-through: the game adds those glows to the light before its fog pass and the forward draws (TLAD trace
         // GTAIV.3, et01_aa: bulbs and shades from 102288252, the fog at 102288312, the sheer curtain at 102288471),
@@ -2548,7 +2600,8 @@
           // Glass and what is see-through by its texture after everything solid, without writing depth.
           // Outside the water is drawn whole (its overlapping quads see-through came out lighter where two lay).
           const seeThrough = (mat.glass && !(mat.water && outside)) || (mat.blend && showTextures && !!mat.texture);
-          if (seeThrough !== glassPass) continue;
+          if (waterLater && mat.water && outside) { if (!waterPass) continue; }
+          else if (waterPass || seeThrough !== glassPass) continue;
           // Into the mirrored surroundings' map: only what its shader reads (texture or colour, terrain layers, the
           // vertex colours' AO; the rest is the same throughout that pass, set before it).
           if (mapPass) {
@@ -2965,6 +3018,7 @@
         gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, target.drawFrame);
+        if (target.light) gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
         gl.viewport(0, 0, target.w, target.h);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -2982,16 +3036,23 @@
         // The samples resolved into the texture.
         gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.drawFrame);
         gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.frame);
+        if (target.light) { gl.readBuffer(gl.COLOR_ATTACHMENT0); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.NONE]); }
         gl.blitFramebuffer(0, 0, target.w, target.h, 0, 0, target.w, target.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        if (target.light) {
+          gl.readBuffer(gl.COLOR_ATTACHMENT1); gl.drawBuffers([gl.NONE, gl.COLOR_ATTACHMENT1]);
+          gl.blitFramebuffer(0, 0, target.w, target.h, 0, 0, target.w, target.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+          gl.readBuffer(gl.COLOR_ATTACHMENT0);
+        }
         gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
         gl.viewport(0, 0, w, h);
         gl.uniformMatrix4fv(loc.viewProjection, false, vp.matrix);
         gl.uniform3fv(loc.eyeAt, vp.eye);
         gl.uniform1f(loc.clipBelow, -1e9);
         gl.activeTexture(gl.TEXTURE7);
-        gl.bindTexture(gl.TEXTURE_2D, target.texture);
+        gl.bindTexture(gl.TEXTURE_2D, target.light || target.texture);
         gl.activeTexture(gl.TEXTURE0);
         gl.uniform1i(loc.reflectTex, 7);
+        gl.uniform1i(loc.reflectLight, !!target.light);
         gl.uniform2f(loc.screenSize, w, h);
       }
       gl.uniform1f(loc.clipBelow, -1e9);

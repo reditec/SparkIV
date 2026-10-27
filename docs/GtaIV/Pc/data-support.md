@@ -203,7 +203,14 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - **Size:** `FUN_00AD61C0` makes it 128 << the water quality (0x1160EB4). The trace's is 1024 × 1024, with its neighbours one texel of 1024 apart (waterTexResValue 0.25 × 1/256). SparkIV had 256.
   - **Its state:** in the trace it has long settled (spread of the heights 0.17, of the slopes 0.12). SparkIV started it flat each time a scene was made, so in the references its waves were next to nothing (spread 0.0007) and the mirror came out sharp. Run on from flat at 16 ms a step, it settles after about 15 000 steps (0.13 / 0.09).
 - **In SparkIV:** `waterSimStep` in `gtaiv-pc.js` (1024 × 1024, 20 000 steps run on when it is made). Visual run: bc_3 s3 f137.5 −0.43, s1 f984 −0.34, s1 f79 −0.26; sum −1.01; worse s1 f586.75 +0.09, s2 f1055.25 +0.07.
+- **The mirror's brightness and the see-through** (#13, 2026-10-27):
+  - The game's water reads an HDR ReflectTexture (A16B16G16R16F). SparkIV mirrored the scene into an 8-bit picture and turned it back into light, which clipped the bright sky. Now the mirror pass also writes the scene's light (RGBA16F), and the water reads that.
+  - Measured against `GTAIV.1` after the water's draws (call 74267150, bc_3 s1 f79, scene at the trace's 10:38): the water was 13–24 % too dark, rising with distance, which points at the mirror; now it is 3–14 % too dark.
+  - The water's alpha as the game's: sat((d · waterColour.w · 0.25)^0.25 + 0.125), d the view depth of the scene behind less the water's; drawn after everything solid, blended over it. In the references it only shows at the very edges (the water there is deeper than 1–2 m).
+  - Visual run: bc_3 s3 f137.5 −1.58, s1 f79 −1.35, s1 f984 −0.98, s3 f357.5 −0.86, s2 f437 −0.53, s2 f1055.25 −0.50; worse s2 f786.75 +0.03.
 - **Open (#13):**
+  - The reflection is kept on the water's side of the horizon as in the game (the point 2000 m ahead on the water's plane, projected; v at least 0.5 (1 + its y) + 0.05 × near + 0.005); in the references this changes next to nothing.
+  - The water is still 3–14 % darker than the game's. Not yet checked: the far water's own shading (lerp by r0.z) and the shore's flattening of the normal.
   - The game's water is still rougher and brighter. Its settled spread is about 1.3 × SparkIV's; the trace ran at 16–23 ms a frame, so its steps were larger.
   - The wind: SparkIV keeps its 0.25 (`WaterWind`); the trace has 0.
   - The rest of the water shader (its colour, Fresnel, the depth fade) is not yet checked against the trace.

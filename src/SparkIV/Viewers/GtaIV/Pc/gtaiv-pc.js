@@ -470,6 +470,7 @@ const GameGlsl = Object.freeze({
           float fresnel = pow(1.0 - cosine, 5.0) * 0.6 + 0.2;
           vec3 bounce = reflect(view, mirrorNormal);
           vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
+          vec4 mirroredScene = vec4(0.0);
           if (reflectOn) {
             // The mirrored scene where it is, shifted by the waves as water.fxc does: their slope turned to the
             // picture (across, up) times 0.5 / (0.03 x the distance), at most twice; the sky where nothing was drawn.
@@ -477,8 +478,15 @@ const GameGlsl = Object.freeze({
             vec2 ahead = normalize(view.xy + 1e-5);
             float shift = min(0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 2.0);
             vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(mirrorNormal.xy, across.xy), dot(mirrorNormal.xy, ahead)) * shift;
+            // Kept on the water's side of the horizon as water.fxc keeps it: its vertex shader projects the point
+            // 2000 m ahead (along the camera's look, level) on the water's plane, its pixel shader holds the read's v
+            // at least 0.5 (1 + that) + 0.05 x near + 0.005 (Direct3D's v down: here at most, mirrored).
+            vec2 ahead2 = normalize(viewForward.xy + 1e-5);
+            vec4 far = viewProjection * vec4(eyeAt.xy + ahead2 * 2000.0, vPosition.z, 1.0);
+            if (far.w > 0.0) at.y = min(at.y, 0.5 + 0.5 * far.y / far.w - 0.05 * max(1.0 - dot(eyeAt - vPosition, eyeAt - vPosition) * 0.0004, 0.0) - 0.005);
             vec4 scene = texture(reflectTex, clamp(at, 0.001, 0.999));
-            mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
+            if (reflectLight) mirroredScene = scene;
+            else mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
           vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
           // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's, sunny
@@ -486,12 +494,26 @@ const GameGlsl = Object.freeze({
           // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3);
           // then into the picture as everything else (gameToneMap). The mirrored colour is already in the
           // picture: back to light first (gameToneUnmap).
-          vec3 mirroredLight = gameToneUnmap(mirrored);
+          // (With the mirrored scene's light as the game's HDR ReflectTexture: taken as it is, unclipped.)
+          vec3 mirroredLight = reflectLight && reflectOn ? gameToneUnmap(mirrored) * (1.0 - clamp(mirroredScene.a, 0.0, 1.0)) + mirroredScene.rgb : gameToneUnmap(mirrored);
           vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredLight * waterReflect + glint)
                           + sunColor * clamp((dot(lightNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
           lightOut = gameFog(waterLight, distance);
           rgb = gameToneMap(lightOut);
           a = 1.0;
+          // See-through by how much water lies in front of what is behind it, as water.fxc's alpha (the GTA IV trace
+          // GTAIV.1's water, PS 0x24641060, blended SRCALPHA/INVSRCALPHA over the lit scene): d the view depth of
+          // the scene behind less the water's (where the scene is nearer, 1), saturate((d x waterColour.w x
+          // 0.25)^0.25 + 0.125); its reflection and colour then show by that much, the sea bed by the rest (bc_3's
+          // shallows by the shore pale where they lay dark here).
+          if (waterBehindOn) {
+            vec2 at = gl_FragCoord.xy / vec2(textureSize(waterBehind, 0));
+            float behind = texture(waterBehind, at).r * 2.0 - 1.0, front = gl_FragCoord.z * 2.0 - 1.0;
+            float n = waterRange.x, f = waterRange.y;
+            float d = 2.0 * n * f / (f + n - behind * (f - n)) - 2.0 * n * f / (f + n - front * (f - n));
+            if (d < 0.0) d = 1.0;
+            a = clamp(pow(d * waterAlpha * 0.25, 0.25) + 0.125, 0.0, 1.0);
+          }
   `,
 });
 
