@@ -674,7 +674,7 @@ const GameGlsl = Object.freeze({
   // rest by 0.5 x dt, damped by 0.7 ^ dt; then heights on by speed x dt. The water's slope near the camera
   // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
   // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
-  const DynamicSize = 100, DynamicSpacing = 2;
+  const DynamicSize = 100, DynamicSpacing = 2, DynamicWarmUp = 600;
   // How far from the camera floating litter is there (see drawMeshes): GTAIV.exe 0xC87760, 0.5 x the detail
   // distance + 20 m, the detail distance (0x103F714, set by 0xAEBD70 from 0x59EEF0) its menu slider / 99 x 100 + 10;
   // the reference videos' slider at 100: 75 m.
@@ -719,13 +719,20 @@ const GameGlsl = Object.freeze({
     const d = dynamicWater, h = d.height, v = d.speed;
     const now = performance.now();
     const dt = Math.min(d.last ? (now - d.last) / 1000 : 1 / 30, 0.13);
+    const started = !d.last;
     d.last = now;
     // Index of a point by its world metres (even): (x / 2 + 100000) % 100, as the game.
     const index = c => ((Math.trunc(c / 2) % n) + n) % n;
     const evenDown = c => { const t = Math.trunc(c) - 100; return t - (t % 2); };
     const x0 = evenDown(eyeAt[0]), y0 = evenDown(eyeAt[1]);
+    // Started anew (made, or the camera jumped): run on first until it has settled, as the game's has long before a
+    // cutscene (in the GTA IV trace GTAIV.1, bc_3, the water's grid round the camera, draws 74265526 to 74267101: the
+    // heights' spread 0.10 m, the vertex normals' 0.024 across and 0.065 along y; flat, the near water's Fresnel came
+    // out a tenth too high).
+    let warmUp = started ? DynamicWarmUp : 0;
     if (d.x0 === null || Math.abs(x0 - d.x0) > 200 || Math.abs(y0 - d.y0) > 200) {
       h.fill(0); v.fill(0);
+      warmUp = DynamicWarmUp;
     } else {
       // The columns and rows that left the window (and come in at its other side) start flat.
       for (let x = Math.min(d.x0, x0); x < Math.max(d.x0, x0); x += 2) { const i = index(x); for (let j = 0; j < n; j++) { h[i * n + j] = 0; v[i * n + j] = 0; } }
@@ -733,29 +740,37 @@ const GameGlsl = Object.freeze({
     }
     d.x0 = x0; d.y0 = y0;
     const ci = index(x0), cj = index(y0);
-    const kick = (WaterWind * 0.7 + 0.23) * 10, swell = (WaterWind * 0.55 + 0.18) * 1.0;
-    for (let k = 0; k < 2000; k++) {
-      const at = Math.floor(Math.random() * n) * n + Math.floor(Math.random() * n);
-      v[at] += (Math.random() * 2 - 1) * kick * 0.5 * dt;
-    }
-    const phase = (now % 4000) * (2 * Math.PI / 4000);
-    for (let r = 0; r < n; r++) {
-      const push = Math.sin((y0 + r * DynamicSpacing) * 0.15 + phase) * swell * dt;
-      const j = (cj + r) % n;
-      for (let i = 0; i < n; i++) v[i * n + j] += push;
-    }
-    const pull = 40 * dt, rest = 0.5 * dt, damp = Math.pow(0.7, dt);
-    for (let a = 0; a < n; a++) {
-      const i = (ci + a) % n, iBack = a === 0 ? i : (i + n - 1) % n, iOn = a === n - 1 ? i : (i + 1) % n;
-      for (let b = 0; b < n; b++) {
-        const j = (cj + b) % n, jBack = b === 0 ? j : (j + n - 1) % n, jOn = b === n - 1 ? j : (j + 1) % n;
-        const here = i * n + j;
-        const sides = h[iBack * n + j] + h[iOn * n + j] + h[i * n + jBack] + h[i * n + jOn];
-        const corners = h[iOn * n + jBack] + h[iOn * n + jOn] + h[iBack * n + jBack] + h[iBack * n + jOn];
-        v[here] = ((v[here] - (h[here] - (sides * 0.17 + corners * 0.08)) * pull) - h[here] * rest) * damp;
+    // Without the breeze WaterWind gives the waves' texture: settled, the trace's grid (heights' spread 0.10 m, the
+    // normals' 0.024 across, 0.065 along y) lies nearer to it with no wind (0.13, 0.015, 0.090) than with 0.25 (0.23,
+    // 0.027, 0.159), and bc_3's water with it (visual run, the water's references: sum -1.74).
+    const SwellWind = 0;
+    const kick = (SwellWind * 0.7 + 0.23) * 10, swell = (SwellWind * 0.55 + 0.18) * 1.0;
+    const advance = (dt, ms) => {
+      for (let k = 0; k < 2000; k++) {
+        const at = Math.floor(Math.random() * n) * n + Math.floor(Math.random() * n);
+        v[at] += (Math.random() * 2 - 1) * kick * 0.5 * dt;
       }
-    }
-    for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
+      const phase = (ms % 4000) * (2 * Math.PI / 4000);
+      for (let r = 0; r < n; r++) {
+        const push = Math.sin((y0 + r * DynamicSpacing) * 0.15 + phase) * swell * dt;
+        const j = (cj + r) % n;
+        for (let i = 0; i < n; i++) v[i * n + j] += push;
+      }
+      const pull = 40 * dt, rest = 0.5 * dt, damp = Math.pow(0.7, dt);
+      for (let a = 0; a < n; a++) {
+        const i = (ci + a) % n, iBack = a === 0 ? i : (i + n - 1) % n, iOn = a === n - 1 ? i : (i + 1) % n;
+        for (let b = 0; b < n; b++) {
+          const j = (cj + b) % n, jBack = b === 0 ? j : (j + n - 1) % n, jOn = b === n - 1 ? j : (j + 1) % n;
+          const here = i * n + j;
+          const sides = h[iBack * n + j] + h[iOn * n + j] + h[i * n + jBack] + h[i * n + jOn];
+          const corners = h[iOn * n + jBack] + h[iOn * n + jOn] + h[iBack * n + jBack] + h[iBack * n + jOn];
+          v[here] = ((v[here] - (h[here] - (sides * 0.17 + corners * 0.08)) * pull) - h[here] * rest) * damp;
+        }
+      }
+      for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
+    };
+    for (let s = warmUp; s > 0; s--) advance(1 / 30, now - s * 1000 / 30);
+    advance(dt, now);
     // Into the texture: its column i, row j (x along, y up), so x / 200 and y / 200 find them.
     const rows = new Float32Array(n * n);
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rows[j * n + i] = h[i * n + j];
