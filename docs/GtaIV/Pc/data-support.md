@@ -74,7 +74,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 | `BonePosition` (0), `BoneRotation` (1) | used | Bones of characters, objects and faces. |
 | `ModelPosition` (5), `ModelRotation` (6) | used | Root of the model. |
 | `CameraPosition` (7), `CameraRotation` (8), `CameraFov` (136) | used | Camera. |
-| `CameraDof` (137) | used (since 2026-10-11) | (near, far, 0) in metres. **Measured with x32dbg** (`dof_dump.txt`, breakpoint 0x5E16F0): the game passes exactly these values to its depth of field. In cutscene mode (`Cut_StartSection` 0x9C9180 sets Postfx +0x264) everything up to "far" is sharp; from "far + 0.5 m" it blends with strength b = M², using a 4×4 blur (rage_postfx program 12/13). **M is measured as 0.5** (`dof_blur.txt`, breakpoint 0x930580: DOF_BLUR = (0.5, 0, 0.5, 0)), i.e. `misc.DOFBlurMultiplier.SD` from `visualSettings.dat`, b at most 0.25. Why the SD value applies is open: the check function 0x424000 is not readable in Ghidra. |
+| `CameraDof` (137) | used (since 2026-10-11) | (near, far, 0) in metres. **Measured with x32dbg** (`dof_dump.txt`, breakpoint 0x5E16F0): the game passes exactly these values to its depth of field. In cutscene mode (`Cut_StartSection` 0x9C9180 sets Postfx +0x264) the shader gets dofDist = (0.5, far − near, 0.5, (near + far) / 2): everything from "near" to "far" is sharp; towards "near − 0.5 m" and "far + 0.5 m" it blends with strength b = M², using a 4×4 blur (rage_postfx's last pass; corrected on 2026-10-27, see "Depth of field and the G-buffer's softening" below: the near side blurs too). **M is measured as 0.5** (`dof_blur.txt`, breakpoint 0x930580: DOF_BLUR = (0.5, 0, 0.5, 0)), i.e. `misc.DOFBlurMultiplier.SD` from `visualSettings.dat`, b at most 0.25. Why the SD value applies is open: the check function 0x424000 is not readable in Ghidra. |
 | `CameraMatrixRotateFactor` (138) | **unclear** | Camera, one value per frame. |
 | `CameraControl` (144) | **unclear** | Camera, −1 or 1. |
 | `LightColor` (139), `LightDirection` (143) | used | Colour and direction of the scene lights. |
@@ -177,6 +177,20 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - Stars, moon and galaxy (at night) are still missing, as is the blend to the water colour below the horizon.
   - The time of the bc_3 and bc_1 reference videos (12:00): the videos don't show the clock; it was around noon when they were recorded, the exact hour isn't known.
   - The light's sun direction (0x103FBE0) has not been found in a trace frame yet.
+
+### Depth of field and the G-buffer's softening (rage_postfx's last pass, resolved on 2026-10-27, #4)
+
+- **The pass:** GTA IV's PS 0x23e5e6a0 (`GTAIV.1`, call 74970168), TLAD's 0x25819460 with the film grain (`GTAIV.3`, call 120953415). It does the depth of field, the motion blur and the tone mapping in one, into the backbuffer.
+- **Checked:** recomputed per pixel from the pass's inputs (state dumps right before it) against the backbuffer right after it. `GTAIV.1` (bc_3, outside): 99.8 % of the pixels within one step. `GTAIV.3` frame 13868 (et01_aa, DOF near 5.9 m, far 7.5 m): 100 % within two steps in every depth band, the mean difference 0.25 (rounding).
+- **Depth of field:** b = min(1, max(near − z, z − far, 0) / 0.5)², near and far from dofDist (see `CameraDof`), the distance z from the depth with dofProj (near clip 0.05). The near side blurs too. Without it, the pixels nearer than 2 m in `GTAIV.3` miss (mean 0.53 instead of 0.25).
+- **The G-buffer's softening:** where GB2.w ≠ 0 the point first goes halfway to the filtered read at (−1.5, 0.5) texels.
+  - The pass picks one of the four reads by GB2.w × 256 in (0, 2], (2, 4], (4, 8], (8, 256]. GB2 is A2R10G10B10, so a set GB2.w always picks the last.
+  - The G-buffer is cleared to 0 (`GTAIV.1` call 74953082), and every program that fills it writes its alpha there: gta_default and gta_normal_spec alpha × globalScalars.x (kept only from 0.176, so at least 1/3), gta_ped 1. So it applies to everything drawn, not to the sky.
+  - Without it only 79 % of `GTAIV.1`'s pixels come out within one step; with it, 3862 of the pixels on geometry fit only with the softening and 6 only without it.
+- **Outside cutscenes** dofBlur.w (the toggle at 0x11A28F0) switches the whole block off, the softening with it.
+- **Motion blur:** reprojection with motionBlurMatrix (c72) × gDirectionalMotionBlurLength (c80), up to 7 reads, not where the stencil copy has the player's mask. c80 is 0 in all dumped frames of the four traces, so it does nothing there.
+- **In SparkIV:** the composite in `gamePostEnd` (`gtaiv-pc.js`). Where the game's G-buffer has GB2.w, SparkIV has depth < 1 (it has no G-buffer).
+- **Open:** Whether the reference videos' remaining softness comes from the video compression or from the texture quality is not measured. The traces show the game's own picture without it.
 
 ### `[DRAW_DISTANCE]` in the `.cut` (GTAIV.exe, resolved on 2026-10-13)
 
