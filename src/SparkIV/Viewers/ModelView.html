@@ -1411,7 +1411,7 @@
     // strength, CloudFadeOut; CloudShadowOffset), from the noise rage_perlinnoise makes (PERLIN_FRAGMENT) and the
     // fine detail.
     uniform bool cloudsOn; uniform sampler2D perlin; uniform vec3 cloudColorH; uniform vec3 sunsetH; uniform vec3 topCloudColorH;
-    uniform vec4 topCloudH; uniform vec4 cloudShapeH; uniform vec4 cloudDetailH; uniform float cloudShadowOffsetH;
+    uniform vec4 topCloudH; uniform vec4 cloudShapeH; uniform vec4 cloudDetailH; uniform float cloudShadowOffsetH; uniform float cloudEdgeH;
     // The game's sky dome (GTAIV.4's vertex buffer 0x248B51C0, made at call 147965: 992 triangles, drawn x (10000,
     // 2000, 10000) round the camera, its up the world's z, its z the world's -y): per ring its radius, height and how
     // far its texture coordinates lie from (0.5, 0.5) - radial, towards the vertex. The lowest ring at -1.8 its
@@ -1478,7 +1478,7 @@
         // As gta_atmoscatt_clouds' programs (the TLAD trace GTAIV.4: vertex 0x247ACC40, pixel 0x23CFA160): the sky's
         // colour SkyColor + lerp(AzimuthColorEast, AzimuthColor, 0.5 d.x + 0.5) x (1 - saturate(d.up x
         // AzimuthHeight)) x AzimuthStrength; the sun's glow s = saturate((a^32 - b^3 x saturate(0.6 + sun.up) +
-        // (0.5 + 0.5 cos) x SunSize) x 0.5) x 4 (cos to the sun, a = saturate((1 - HDRSunExposure.y) x (12.58 cos -
+        // saturate(0.5 cos - 0.0625) x SunSize) x 0.5) x 4 (cos to the sun, a = saturate((1 - HDRSunExposure.y) x (12.58 cos -
         // 11.616)), b = saturate(0.9375 - 0.0625 cos), SunSize 1 in both traces; the disc's term x SunCentre.z, 0
         // there); then (sun + sun^4) x HDRSunExposure.x + saturate(saturate(1 - s) x HDRSunExposure.x x the sky's
         // colour), the sun = s x SunColor; x HDRExposure, at most HDRExposureClamp; no haze (the post's fog leaves
@@ -1488,7 +1488,7 @@
         float c = dot(dir, sunDir);
         float a = clamp(clamp(1.0 - skyHdr.z, 0.0, 1.0) * (12.58 * c - 11.6163721), 0.0, 1.0);
         float b = clamp(0.9375 - 0.0625 * c, 0.0, 1.0);
-        float s = clamp((pow(a, 32.0) - b * b * b * clamp(0.6 + sunDir.z, 0.0, 1.0) + clamp(0.5 + 0.5 * c, 0.0, 1.0)) * 0.5, 0.0, 1.0) * 4.0;
+        float s = clamp((pow(a, 32.0) - b * b * b * clamp(0.6 + sunDir.z, 0.0, 1.0) + clamp(0.5 * c - 0.0625, 0.0, 1.0)) * 0.5, 0.0, 1.0) * 4.0;
         vec3 sunLight = s * sunColorH;
         vec3 glow = (sunLight + sunLight * sunLight * sunLight * sunLight) * skyHdr.y + clamp(clamp(1.0 - s, 0.0, 1.0) * skyHdr.y * skyV, 0.0, 1.0);
         if (cloudsOn) {
@@ -1503,7 +1503,9 @@
           float topFade = 1.0 - length(fromMiddle * topCloudH.w);
           // The pixel program: the shadow (the noise moved, with a fifth of the detail), the clouds' density (the
           // noise's red + (detail - 0.5) x strength), amount = saturate(threshold x density - bias), cover = amount ^
-          // thickness (its edge infinite: column 93 is 1 throughout), lit by the noise's blue (the clumps); their
+          // thickness x saturate(amount x EdgeSmooth) (EdgeSmooth = 1 / column 89, GTAIV.exe 0x615D98: 1 in GTA IV's
+          // trace GTAIV.1, infinite in TLAD's, where column 89 is 0; gta_atmoscatt_clouds.fxc win32_30 program 8 =
+          // GTAIV.1's PS 0x246411a0 at 74963380: without the edge the clouds came out about a third too bright), lit by the noise's blue (the clumps); their
           // colour CloudColor x (1 + cos^2 x max(1 - cover - shadow / 2, 0) x CloudInscatteringRange) - shadow +
           // SunsetColor x (0.25 cos + 0.35) x light; the higher clouds from the noise's green; faded towards the
           // horizon by saturate(4 up - CloudFadeOut).
@@ -1513,7 +1515,7 @@
           float fine = texture(detail, detailUv).r - 0.5;
           float clump = clamp(fine * 0.2 + noise.b, 0.0, 1.0);
           float amount = clamp(threshold * (fine * strength + noise.r) - bias, 0.0, 1.0);
-          float cover = amount > 0.0 ? pow(amount, cloudDetailH.x) : 0.0;
+          float cover = amount > 0.0 ? pow(amount, cloudDetailH.x) * (cloudEdgeH > 0.0 ? clamp(amount / cloudEdgeH, 0.0, 1.0) : 1.0) : 0.0;
           float lit = (c * 0.25 + 0.35) * ((1.0 - shadow) * cover * clump + clump);
           vec3 cloud = (c * c * max(1.0 - cover - 0.5 * shadow, 0.0) * cloudShapeH.w + 1.0) * cloudColorH - shadow + sunsetH * lit;
           float top = clamp(topCloudH.z * (fine * strength * topCloudH.y + texture(perlin, topUv).g) - topCloudH.x, 0.0, 1.0) * topFade * (1.0 - cover);
@@ -1618,7 +1620,7 @@
       skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "haze", "hasClouds", "clouds", "detail",
                 "skyHdrOn", "skyColorH", "azimuthH", "azimuthEastH", "azimuthHS", "sunColorH", "skyHdr", "pageExposure",
                 "cloudsOn", "perlin", "cloudColorH", "sunsetH", "topCloudColorH", "topCloudH", "cloudShapeH", "cloudDetailH",
-                "cloudShadowOffsetH", "toMap"]
+                "cloudShadowOffsetH", "cloudEdgeH", "toMap"]
         .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
       skyQuad = gl.createVertexArray();
       gl.bindVertexArray(skyQuad);
@@ -1634,7 +1636,7 @@
     gl.uniform3fv(skyLoc.eye, eyeAt);
     gl.uniform3fv(skyLoc.horizon, sky.horizon);
     gl.uniform3fv(skyLoc.zenith, sky.zenith);
-    gl.uniform3fv(skyLoc.sunDir, sky.sunDirection);
+    gl.uniform3fv(skyLoc.sunDir, sky.skySunDirection ?? sky.sunDirection);
     gl.uniform3fv(skyLoc.haze, hazeColour());
     gl.uniform1i(skyLoc.hasClouds, !!cloudTex && !!cloudDetailTex);
     const h = sky.skyHdr;
@@ -1655,6 +1657,7 @@
         gl.uniform4fv(skyLoc.cloudShapeH, h.cloudShape);
         gl.uniform4fv(skyLoc.cloudDetailH, h.cloudDetail);
         gl.uniform1f(skyLoc.cloudShadowOffsetH, h.cloudShadowOffset);
+        gl.uniform1f(skyLoc.cloudEdgeH, h.cloudEdge ?? 1);
       }
     }
     gl.uniform1i(skyLoc.cloudsOn, !!perlin);

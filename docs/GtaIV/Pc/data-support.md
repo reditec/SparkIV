@@ -161,11 +161,22 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - CloudColor 81–83, SunsetColor 73–75 × column 89, upper cloud colour 99–101 + 73–75, TopCloud 95–98.
   - Threshold 85, bias 86, shadow strength 84, shadow offset 87, inscattering 88, detail scale 90, detail strength 91, thickness 92, fade towards the horizon 94.
 - **Movement:** The phase grows per game hour by column 107 (parser 0xAEFEB0 -> +0x1B4, 0x62E110).
+- **Cloud cover and sun glow** (#5, checked on GTA IV's trace `GTAIV.1`, sky draw 74963380, PS 0x246411a0 = program 8 of `common\shaders\win32_30\gta_atmoscatt_clouds.fxc`, instruction for instruction):
+  - Cover = amount^thickness × saturate(amount × EdgeSmooth). GTAIV.exe 0x615D98 sets EdgeSmooth = 1 / column 89 (the sky's +0x184, next to the detail's scale, strength and the thickness at +0x188 to +0x190). The traces agree: 1 in GTA IV's `GTAIV.1`/`.2` (column 89 = 1), infinite in TLAD's `GTAIV.3`/`.4` (column 89 = 0, so the factor is 1 there). The cover drives the light on the clouds, their inscattering, the fade of the upper clouds and the total.
+  - The sun's glow adds saturate(0.5 cos − 0.0625) × SunSize (cos to the sun), not saturate(0.5 + 0.5 cos).
+  - Recomputed per pixel with the trace's own constants and noise textures: before, clouds came out up to 40 % too bright and reddish (measured 7.7 / 7.9 / 7.8, computed 10.4 / 9.4 / 8.7); after, the mean is within 4 % of the game.
+  - The trace's sky is SUNNY at 10:39 (all 11 time cycle values within 0.0001), not 12:00. The references' 12:00 for bc_3 is not confirmed.
+- **Clock in a trace:** every frame sets gDayNightEffects (VS/PS c45) = seconds of the day / 43200, rising until noon and falling after it. Rising or falling over the neighbouring frames gives morning or afternoon. The traces: `GTAIV.1` 10:11–10:57, `GTAIV.2` 08:51–10:17, `GTAIV.3` 11:54–13:20, `GTAIV.4` 11:54–13:07. The clock runs on through the cutscenes; they don't set it.
+- **Two suns** (GTAIV.exe):
+  - The sky's (0xDBBDF0 → the shader's SunDirection): the angle from the hour (before 6 t × π/12, to 20 π/2 + (t − 6) × π/14, after it 3π/2 + (t − 20) × π/8), then normalize(sin a − cos a × (0, −0.342, 0.940)). Six sky draws in three traces (09:35 to 13:12, clock from c45) match it to 0.0001.
+  - The light's (0xAEF0E0 → 0x103FBE0, read by 0xAC51F0 into the directional light): the same angle kept within π/2 to 3π/2, then 0.8 × (a − π/2) + 0.6π. Lower than the sky's sun in the morning (at 10:39 by about 6°). Not yet seen in a trace.
 - **In SparkIV:** `SKY_FRAGMENT`, `PERLIN_FRAGMENT`, `perlinNoise` in `ModelView.html`; the values are in `TimeCycle.cs` as `skyHdr`.
 - **Open:**
   - One game hour is assumed to be 120 s of playback time; this is not read from the exe.
   - `DetailOffset` moves along in the game; in SparkIV it is fixed.
   - Stars, moon and galaxy (at night) are still missing, as is the blend to the water colour below the horizon.
+  - The time of the bc_3 and bc_1 reference videos (assumed 12:00): not read yet; the settings menu shows it in some recordings, not in the three reference videos sampled so far.
+  - The light's sun direction (0x103FBE0) has not been found in a trace frame yet.
 
 ### `[DRAW_DISTANCE]` in the `.cut` (GTAIV.exe, resolved on 2026-10-13)
 
