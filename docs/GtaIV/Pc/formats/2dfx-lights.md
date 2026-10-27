@@ -28,7 +28,7 @@ Models (`.wdr`, `.wdd`, `.wft`) can contain light effects, i.e. lamps and wall l
 | **0x8000** | **Shadow lamp** (light flag 4), only if the object's instance has flag 0x100 (see [wpl.md](wpl.md)) | used (since 2026-10-22) | ibid. |
 | 0x10000 | Separate path (light colour from 0xC1DAA0) | ignored | ibid. |
 | 0x80000 | **Light volume** (light flag 8), see [Light volumes](#light-volumes) | used (since 2026-10-25) | ibid., 0xAC2270 |
-| 0x100000 | Light flag 0x10: the light volume's passes 4–7 instead of 0–3 (see [Light volumes](#light-volumes)) | used | ibid., 0xAC2270 |
+| 0x100000 | Light flag 0x10: the lamp is drawn as a "filler" (`fillerVolumePoint`, see [Which program draws a lamp](#which-program-draws-a-lamp)); the light volume's passes 4–7 instead of 0–3 (see [Light volumes](#light-volumes)) | used | ibid., 0xAC1030, 0xAC2270 |
 
 The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light volume's strength (times Range) and size (times the radius); see [Light volumes](#light-volumes).
 
@@ -48,10 +48,36 @@ The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light
 
 ## Which program draws a lamp
 
-| Lamp | Program in `deferred_lighting.fxc` | Formula |
+`FUN_00AC1030` draws the frame's lights and picks the technique by the light's flags (+0x48); `FUN_00AD3560` maps the choice to the technique handles that `FUN_00AD1AD0` registers (resolved on 2026-10-27, #11):
+
+- **Light flag 0x10** (the 2dfx flag 0x100000) set: **`fillerVolumePoint`**, with a shadow **`fillerVolumeShadowPoint`**.
+- Not set: **`lightVolumePoint`**, with a shadow **`lightVolumeShadowPoint`**. These are the cutscene lights' programs too.
+- Within a technique the pass follows the light flags 0x20 (interior) and 0x40 (exterior): both or neither, only 0x20, only 0x40; cutscene lights (0x80 without 0x100) take their own pass.
+- These two light flags don't follow the 2dfx flags 0x20/0x40. bc_1's lamps in Bernie's flat have 2dfx 0x60, but the game draws them with the "only 0x20" pass (ps07, see below), so it sets them by where the lamp is. In SparkIV: a lamp in an interior's room takes ps07, any other ps06/ps08.
+
+The program numbers below are the pixel programs of `deferred_lighting.fxc` counted alone (ps00 …, as `fxdis.py` writes them); the older p-numbers of this page count vertex and pixel programs together (p30–p32 = ps10–ps12, p35 = ps15).
+
+| Lamp | Technique, pixel program | Formula |
 |---|---|---|
-| normal | p31 (stencil ≥ 8: interior objects and characters), p32 (stencil < 8), p30 (without stencil) | Falloff 1.5 · ((1 − d²/r²)² − 1/3); × sat((n·l − 0.2) · 1.25); no AO, no specular |
-| with shadow (flag 4) | p35 | Falloff 1.5 · ((1 − d²/r²)² − 1/3); × sat(1.5 · (n·l − 1/3)); no AO, no specular; × shadow from 4 samples of a paraboloid shadow map (see [Lamp shadows](#lamp-shadows-p35)) |
+| filler (flag 0x100000) | `fillerVolumePoint`: ps10 (without stencil), ps11 (stencil ≥ 8: interior objects and characters), ps12 (stencil < 8) | Falloff 1.5 · ((1 − d²/r²)² − 1/3); × sat((n·l − 0.2) · 1.25); no AO, no specular |
+| filler with shadow (flag 4) | `fillerVolumeShadowPoint`: ps15 | Falloff 1.5 · ((1 − d²/r²)² − 1/3); × sat(1.5 · (n·l − 1/3)); no AO, no specular; × shadow from 4 samples of a paraboloid shadow map (see [Lamp shadows](#lamp-shadows-p35)) |
+| light (without 0x100000) | `lightVolumePoint`: ps06 (0x20 and 0x40), ps07 (0x20 only, stencil ≥ 8), ps08 (0x40 only, stencil < 8), ps09 (cutscene lights) | Falloff (sat(1 − d²/r²)⁴ − 0.1) / 0.9; × cone; albedo × sat(n·l) + 2 · GB2.x · sat(L·R)^(GB2.y² · 512) (the shine); ps06 and ps08 all × sat(AO² + 0.5), ps07 not. In SparkIV (`ModelView.html`, `sceneLightKind`) since 2026-10-27; the stencil conditions of ps07/ps08 are not modelled |
+| light with shadow | `lightVolumeShadowPoint`: ps14 | as ps06, × the shadow (as in ps15), and where the stencil is under 8 × sat(0.5 · AO⁴ + AO²) instead of sat(AO² + 0.5) |
+
+- **Evidence (light):** bc_3's wall lamps by the steps (2dfx flags 0xac060, orange, strength 8, radius 8 m). The GTA IV trace `GTAIV.1`, frame 2792 (bc_3 s1 f293.25), draws the two nearest with shadow (calls 84175355 and 84175371, PS 0x24762b60 = ps14, instruction for instruction). Their positions match SparkIV's lamps to 1 cm (scene offset 501.10 / −499.38 / 0.40).
+  - Between the dumps before and after them, they add +0.83/+0.43/+0.14 (above the window lamp) and +1.22/+0.64/+0.20 (below it) to the granite wall's HDR. That is all the warmth the game's wall has over SparkIV's.
+  - The lamp sits in the wall, so the light comes in flat. The filler's sat(1.5 · (n·l − 1/3)) gave next to nothing there (+0.15 without the shadow).
+  - Without the lamps, SparkIV's wall matches the game's sun pass within 1–2 % (3.49/3.45/3.04 against 3.46/3.39/2.96).
+  - With the light programs, SparkIV's wall is within 2–3 % of the game's after all lamps.
+- **Evidence (both families in one frame):** the GTA IV trace `GTAIV.2`, bc_1, frame of call 84490042 (Bernie's flat). Its 12 lamps run through two pixel shaders.
+  - PS 0x26b121c0 is ps07 (state dump at call 84488319): 5 lamps, all with 2dfx flags 0x60.
+  - PS 0x26b129e0 is a filler (state dump at call 84488395): 7 lamps, all with 0x100060.
+  - Matched to SparkIV's lamps by colour, strength and radius; none breaks the rule.
+- **Visual run** (2026-10-27, against the state before):
+  - bc_3 s1 f293.25 −2.38, s2 f1307 −0.85.
+  - bc_1 s3 f750.75 −1.77, s2 f1174 −1.40, s3 f990.75 −1.36, s1 f939.5 −1.23.
+  - Sum −12.36 over bc_1 and bc_3; TLAD unchanged (its lamps in the references are fillers).
+  - Worse: bc_3 s3 f137.5 +0.18, f971 +0.05.
 
 Evidence from `GTAIV.3.trace`, et01_aa, frame 10210:
 - **Normal lamps:** The table and wall lamps run through PS 0x25d41c80 (draws 102287887/905/923). Its code is p31, instruction for instruction. This section used to say p26 – that was **wrong**: p26–p29 (falloff ((a²)² − 0.1)/0.9, with specular) are the programs of the cut lights.

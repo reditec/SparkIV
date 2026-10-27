@@ -178,6 +178,9 @@
     // known: -(its room + 2), so -1 outside any room).
     uniform bool forwardLit; uniform float actorAmbient;
     uniform int sceneLights; uniform vec4 sceneLightAt[40]; uniform vec4 sceneLightDir[40]; uniform vec4 sceneLightColor[40];
+    // How the game draws a location's lamp (see below): 1 as a "filler" (its 2dfx flag 0x100000), else as a light,
+    // 0 outside, 2 in an interior's room.
+    uniform float sceneLightKind[40];
     // The interior room of what is drawn (-1: none). A cutscene's light lights only what is in its own room,
     // as the game's do (bc_1: the fill light in Bernie's living room lit the hall outside his door through the
     // wall; the walls of the flat, in none of its rooms, aren't lit by them at all).
@@ -356,10 +359,30 @@
         // CutsceneLocation.LightsMessage) the game lights by program 35 (the TLAD trace GTAIV.3's ceiling lamp in
         // Elizabeta's lounge, draw 102287953): reaching 1.5 (a² - 1/3), facing it saturate(1.5 (n.l - 1/3)), no AO,
         // no shine, x its shadow (the game's file: lampShadow; where its map wasn't drawn, none).
+        // Which of deferred_lighting.fxc's two families draws a lamp, GTAIV.exe 0xAC1030 picks by its light flag 0x10
+        // (from the 2dfx flag 0x100000) for the technique (0xAD3560): with it fillerVolumePoint (ps10 to ps12, with a
+        // shadow fillerVolumeShadowPoint, ps15; TLAD's ceiling lamp 0x108060 in Elizabeta's lounge, below), without
+        // it lightVolumePoint (ps06 to ps09, with a shadow lightVolumeShadowPoint, ps14), the cutscene lights' own:
+        // reaching (a⁴ - 0.1) / 0.9, facing it saturate(n.l), the shine 2 x GB2.x x saturate(L.R)^(GB2.y² x 512),
+        // both x saturate(AO² + 0.5) for a lamp outside (ps06, ps08), nothing more for one in an interior (ps07:
+        // bc_1's lamps in Bernie's flat, the GTA IV trace GTAIV.2 calls 84488320 to 84488576 - all 12 of the frame
+        // by this rule, matched by colour, strength and radius), or, past a shadow, x saturate(0.5 AO⁴ + AO²) where
+        // the stencil is under 8 (ps14). bc_3's wall lamps by the steps (0xac060, two with shadow: the GTA IV trace
+        // GTAIV.1, draws 84175355 and 84175371, PS 0x24762b60 = ps14) light the granite wall beside them +0.8 to
+        // +1.2 red where the filler's saturate(1.5 (n.l - 1/3)) gave next to nothing (the lamp sits in the wall:
+        // the light comes in flat).
+        float kind = sceneLightKind[i];
+        bool filler = kind > 0.5 && kind < 1.5;
         if (shadowLamp) {
-          float near = max(1.5 * (a * a - 1.0 / 3.0), 0.0);
           float slot = sceneLightShadow[i];
           float past = lampShadowOn && slot >= 0.0 ? lampShadow(slot, sceneLightAt[i].xyz, range, n) : 1.0;
+          if (!filler) {
+            vec3 lampLight = sceneLightColor[i].rgb * reach * spot * past * (kind > 1.5 ? 1.0 : clamp(0.5 * ao * ao * ao * ao + ao * ao, 0.0, 1.0));
+            lit += lampLight * clamp(dot(n, l), 0.0, 1.0);
+            if (lampPower > 0.0) lampShine += lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
+            continue;
+          }
+          float near = max(1.5 * (a * a - 1.0 / 3.0), 0.0);
           lit += sceneLightColor[i].rgb * near * spot * clamp(1.5 * (dot(n, l) - 1.0 / 3.0), 0.0, 1.0) * past;
           continue;
         }
@@ -367,6 +390,12 @@
         // 32 elsewhere; the TLAD trace GTAIV.3's table lamps and spots in Elizabeta's lounge, PS 0x25d41c80 at
         // 102287887, its code program 31's): reaching 1.5 (a² - 1/3), facing it saturate((n.l - 0.2) x 1.25), no
         // AO, no shine. The hard edge at n.l 0.2 draws the folds of Malc's shirt's normal map as dark patches.
+        if (marked >= 0.0 && !forwardLit && !filler) {
+          vec3 lampLight = sceneLightColor[i].rgb * reach * spot * (kind > 1.5 ? 1.0 : clamp(ao * ao + 0.5, 0.0, 1.0));
+          lit += lampLight * clamp(dot(n, l), 0.0, 1.0);
+          if (lampPower > 0.0) lampShine += lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
+          continue;
+        }
         if (marked >= 0.0 && !forwardLit) {
           float near = max(1.5 * (a * a - 1.0 / 3.0), 0.0);
           lit += sceneLightColor[i].rgb * near * spot * clamp((dot(n, l) - 0.2) * 1.25, 0.0, 1.0);
@@ -600,6 +629,7 @@
       lampShadowMap: gl.getUniformLocation(program, "lampShadowMap"),
       lampShadowOn: gl.getUniformLocation(program, "lampShadowOn"),
       sceneLightShadow: gl.getUniformLocation(program, "sceneLightShadow"),
+      sceneLightKind: gl.getUniformLocation(program, "sceneLightKind"),
     };
   }
 
@@ -1825,6 +1855,8 @@
       coneScale: l.cone > 0 ? 1 / Math.max(1e-3, Math.cos(Math.min(l.cone - 0.5, Math.max(0, l.hotSpot || 0)) * Math.PI / 180) - Math.cos(Math.min(85, Math.max(1, l.cone)) * Math.PI / 180)) : 0,
       // What the game lights outside by (see the game's file: outdoorLamp).
       radius: l.radius || 0, strength: l.strength || 0, rgb: l.color, flags: l.flags || 0, shadows: l.shadows === true,
+      // Drawn as a "filler" (the 2dfx flag 0x100000, the game's light flag 0x10) or as a light (see the shader).
+      filler: ((l.flags || 0) & 0x100000) !== 0,
       // Its light volume (flag 0x80000): [strength, size]; a spot's outer angle in degrees (0: all round).
       volume: l.volume && l.volume[0] > 0 && l.volume[1] > 0 ? l.volume : null, coneDegrees: l.cone || 0,
       tangent: l.tangent || [1, 0, 0],
@@ -2429,6 +2461,7 @@
         gl.uniform4fv(loc.sceneLightAt, pad(l => [...l.at, !l.actors && l.shadows ? -l.range : l.range]));
         gl.uniform4fv(loc.sceneLightDir, pad(l => [...l.dir, l.cone]));
         gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) : (l.coneScale || 0)]));
+        gl.uniform1fv(loc.sceneLightKind, Float32Array.from({ length: MaxLights }, (_, i) => !lightsNow[i] ? 0 : lightsNow[i].filler ? 1 : lightsNow[i].room >= 0 ? 2 : 0));
       }
       gl.uniform1i(loc.tex, 0);
       gl.activeTexture(gl.TEXTURE0);
