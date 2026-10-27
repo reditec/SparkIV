@@ -1013,7 +1013,7 @@ function gamePostShader(fragment) {
   gl.bindAttribLocation(p, 0, "corner");
   gl.linkProgram(p);
   const u = {};
-  for (const n of ["picture", "light", "bloom", "depth", "dof", "noise", "grain", "texel", "direction", "toneScale", "toneSaturation", "toneCorrect", "toneShift", "toneGamma", "bloomScale", "brightPass"]) u[n] = gl.getUniformLocation(p, n);
+  for (const n of ["picture", "light", "bloom", "depth", "dof", "focus", "noise", "grain", "texel", "direction", "toneScale", "toneSaturation", "toneCorrect", "toneShift", "toneGamma", "bloomScale", "brightPass"]) u[n] = gl.getUniformLocation(p, n);
   return { p, u };
 }
 
@@ -1061,29 +1061,40 @@ function gamePostBegin(w, h) {
         outColor = vec4(c + sum * 0.172413796, 1.0);
       }`),
       composite: gamePostShader(`
-      uniform highp sampler2D depth; uniform vec4 dof;
+      uniform highp sampler2D depth; uniform vec2 dof; uniform vec2 focus;
       uniform sampler2D noise; uniform vec3 grain;
       void main() {
         vec3 hdr = lightAt(uv);
-        if (dof.w > 0.0) {
-          // The depth of field (program 12 before its tone mapping): the distance from the depth, in a cutscene
-          // 0 nearer than its camera's far, rising to 1 half a metre beyond it, squared; four filtered reads
-          // around (half and one and a half texels off, turned), and 1 also where the point stands out from
-          // them (its luminance further from their mean than they spread); then lerp(point, their mean).
-          float d = texture(depth, uv).r * 2.0 - 1.0;
-          float z = 2.0 * dof.x * dof.y / (dof.y + dof.x - d * (dof.y - dof.x));
-          // x DOF_BLUR's z: misc.DOFBlurMultiplier of visualSettings.dat, its HD one (1): read with x32dbg at
+        if (dof.y > 0.0) {
+          // The depth of field (rage_postfx's last pass, GTAIV.1 PS 0x23e5e6a0 / TLAD's GTAIV.3 PS 0x25819460,
+          // before its tone mapping): the distance from the depth; 0 between the camera's DOF near and far, rising
+          // to 1 half a metre nearer than near and half a metre beyond far (dofDist (0.5, far - near, 0.5,
+          // (near + far) / 2)), squared; four filtered reads around (half and one and a half texels off, turned),
+          // and 1 also where the point stands out from them (its luminance further from their mean than they
+          // spread); then lerp(point, their mean). Recomputed per pixel from the inputs of that pass against the
+          // game's picture (GTAIV.1 call 74970168, GTAIV.3 call 120953415, near 5.9 m there): within rounding.
+          float d = texture(depth, uv).r;
+          float z = 2.0 * dof.x * dof.y / (dof.y + dof.x - (d * 2.0 - 1.0) * (dof.y - dof.x));
+          // x DOF_BLUR's x and z: misc.DOFBlurMultiplier of visualSettings.dat, its HD one (1): read with x32dbg at
           // 0x930580 during a cutscene at the reference videos' settings (1600 x 900, 23.10.: DOF_BLUR (1, 0, 1, 0));
-          // an earlier read at other settings gave the SD one (0.5).
-          float b = min(max(z - dof.z, 0.0) * 2.0, 1.0) * 1.0;
+          // an earlier read at other settings gave the SD one (0.5). All four traces have (1, 0, 1, 0).
+          float b = min(max(max(focus.x - z, z - focus.y), 0.0) * 2.0, 1.0) * 1.0;
           b *= b;
-          vec3 s0 = lightAt(uv + texel * vec2(-0.5, -1.5)), s1 = lightAt(uv + texel * vec2(1.5, -0.5));
-          vec3 s2 = lightAt(uv + texel * vec2(0.5, 1.5)), s3 = lightAt(uv + texel * vec2(-1.5, 0.5));
+          // The game's offsets are in Direct3D's texture space (v down the screen), here up: y the other way.
+          vec3 s0 = lightAt(uv + texel * vec2(-0.5, 1.5)), s1 = lightAt(uv + texel * vec2(1.5, 0.5));
+          vec3 s2 = lightAt(uv + texel * vec2(0.5, -1.5)), s3 = lightAt(uv + texel * vec2(-1.5, -0.5));
           vec4 l = vec4(dot(s0, Luma), dot(s1, Luma), dot(s2, Luma), dot(s3, Luma));
           float mean = dot(l, vec4(0.25));
           vec4 off = l - mean;
           float centre = dot(hdr, Luma) - mean;
           if (centre * centre - dot(off, off) >= 0.0) b = 1.0;
+          // The point itself, where the G-buffer has GB2.w (A2R10G10B10: 0, 1/3, 2/3, 1): halfway to the read at
+          // (-1.5, 0.5) (the pass picks one of the four by GB2.w x 256 in (0, 2], (2, 4], (4, 8], (8, 256]: with
+          // two bits always the last). The G-buffer is cleared to 0 (GTAIV.1 call 74953082) and every program
+          // that fills it writes its alpha there (gta_default, gta_normal_spec: alpha x globalScalars.x, kept only
+          // from 0.176 on, so at least 1/3; gta_ped: 1): so everything drawn, not the sky. With it the recomputed
+          // pictures match the game's (99.8 % of GTAIV.1's within one step, 79 % without).
+          if (d < 1.0) hdr = 0.5 * hdr + 0.5 * s3;
           hdr = hdr * (1.0 - b) + (s0 + s1 + s2 + s3) * (b * 0.25);
         }
         // The film grain (TLAD; rage_postfx.fxc programs 25 and 27, chosen while the time cycle's grain isn't 0:
@@ -1180,13 +1191,15 @@ function gameGrainTexture() {
 }
 
 // After the frame: the post effects into the canvas. True when stopped and the adaptation moved (drawn again).
-// depthOfField: through a cutscene's camera { near, far: the depth's range, focus: the camera's DOF far }, else
-// null. GTAIV.exe: Cut_StartSection (0x9C9180) puts its post effects into the cutscene mode (+0x264), in which
+// depthOfField: through a cutscene's camera { near, far: the depth's range, focusNear, focusFar: the camera's DOF },
+// else null. GTAIV.exe: Cut_StartSection (0x9C9180) puts its post effects into the cutscene mode (+0x264), in which
 // FUN_005E16F0 makes DOF_PARAMS (0.5, far - near, 0.5, (near + far) / 2) from the camera clip's CameraDof
 // (near, far; measured with x32dbg) and the end of 0x930A80 DOF_BLUR (M, M x 0, M, 0), M the
 // misc.DOFBlurMultiplier of visualSettings.dat (its HD one, 1, at the reference videos' settings: x32dbg, 23.10.):
-// sharp to far, from half a metre beyond fully blurred. Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game
-// recorded) turns it off.
+// sharp from near to far, from half a metre nearer or beyond fully blurred (the traces' last pass, see the
+// composite). Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game recorded)
+// turns it off, and with it the G-buffer's softening (GB2.w). The pass's motion blur (gDirectionalMotionBlurLength)
+// is 0 in all four traces, so it isn't here.
 // volumes: the lamps' light volumes to add (see gameLightVolumes), or null.
 function gamePostEnd(w, h, playing, depthOfField, volumes) {
   const post = gamePost;
@@ -1219,7 +1232,8 @@ function gamePostEnd(w, h, playing, depthOfField, volumes) {
   pass(post.composite, null, w, h, [post.picture, post.light, post.quarter, post.depth, grain > 0 ? gameGrainTexture() : null], u => {
     gl.uniform2f(u.texel, 1 / w, 1 / h);
     const d = depthOfField;
-    gl.uniform4f(u.dof, d ? d.near : 0, d ? d.far : 1, d ? d.focus : 0, d ? 1 : 0);
+    gl.uniform2f(u.dof, d ? d.near : 0, d ? d.far : 0);
+    gl.uniform2f(u.focus, d ? d.focusNear : 0, d ? d.focusFar : 0);
     gl.uniform3f(u.grain, Math.random(), Math.random(), grain * (sky.exposure || 1));
   });
   for (let i = 0; i < 5; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, null); }

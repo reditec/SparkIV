@@ -2006,9 +2006,11 @@
     sample(filmCamera.rotation, at, filmCamera.frames, q, 0);
     const turn = v => qmul(qmul(q, [v[0], v[1], v[2], 0]), qconj(q)).slice(0, 3);
     const fov = filmCamera.fov ? filmCamera.fov[Math.min(whole, filmCamera.fov.length - 1)] : 45;
-    // Its depth of field's far (metres): beyond it the game's post effects blur (the game's file: gamePostEnd).
-    const dofFar = filmCamera.dof ? filmCamera.dof[Math.min(whole, filmCamera.dof.length / 3 - 1) * 3 + 1] : null;
-    return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180, dofFar };
+    // Its depth of field's near and far (metres): nearer and beyond them the game's post effects blur (the game's
+    // file: gamePostEnd).
+    const dofAt = filmCamera.dof ? Math.min(whole, filmCamera.dof.length / 3 - 1) * 3 : -1;
+    const dof = dofAt >= 0 ? { near: filmCamera.dof[dofAt], far: filmCamera.dof[dofAt + 1] } : null;
+    return { eye: e, forward: norm(turn([0, 1, 0])), up: norm(turn([0, 0, 1])), fov: Math.max(1, Math.min(170, fov)) * Math.PI / 180, dof };
   }
 
   // Leaving the cutscene's camera: the free view goes on from where it is, looking the same way (fitted to
@@ -2294,7 +2296,7 @@
     // the camera a normal map's bumps hardly change the shade).
     const toEye = f.map(x => -x);
     // Through the cutscene's camera its depth of field, with the depth's range to read the distance back.
-    const depthOfField = film && film.dofFar != null ? { near: nearClip, far, focus: film.dofFar } : null;
+    const depthOfField = film && film.dof ? { near: nearClip, far, focusNear: film.dof.near, focusFar: film.dof.far } : null;
     // (Its axes and opening too, for the sun's shadow cascades: the game's file, sunShadowCascades.)
     return { matrix: out, light: norm(toEye.map((v, k) => v + u[k] * 0.55 - s[k] * 0.35)), toEye, eye: e, depthOfField, near: nearClip, far,
              forward: f, right: s, up: u, fov: film ? film.fov : camera.fov, aspect };
