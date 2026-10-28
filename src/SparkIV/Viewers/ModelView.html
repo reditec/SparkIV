@@ -2553,6 +2553,11 @@
         // GTAIV.1 (bc_3, draws 74262969 to 74263286) 50 of its 59 vertex buffers aren't in the main pass, the 9
         // others far versions shown there too (100 m off and more); no people, no vehicles, no models near.
         if (reflecting && (m.actor || !m.far)) return false;
+        // And of those not the ground (the terrain's layered shaders, gta_terrain_va_*lyr): of Coney Island's beach far
+        // versions the game draws only the parts that aren't (LOD_ci6_7_beach05's 424 vertices, the rocks
+        // LOD_ci6CI7_rks07 and 08: 2351, 3110), never their sand (669 to 828 vertices, layered here) - in its mirror
+        // the pier, the huts and the rocks stand over no land.
+        if (reflecting && m.layered && (materials.get(m.material) || {}).layerCount > 1) return false;
         if (m.actor) return !mapPass && (!castBox || !!castCast);
         if (castBox && castCast) return false;
         if (m.radius === undefined) {

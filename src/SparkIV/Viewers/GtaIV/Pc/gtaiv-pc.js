@@ -674,7 +674,7 @@ const GameGlsl = Object.freeze({
   // rest by 0.5 x dt, damped by 0.7 ^ dt; then heights on by speed x dt. The water's slope near the camera
   // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
   // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
-  const DynamicSize = 100, DynamicSpacing = 2, DynamicWarmUp = 600;
+  const DynamicSize = 100, DynamicSpacing = 2, DynamicWarmUp = 1000;
   // How far from the camera floating litter is there (see drawMeshes): GTAIV.exe 0xC87760, 0.5 x the detail
   // distance + 20 m, the detail distance (0x103F714, set by 0xAEBD70 from 0x59EEF0) its menu slider / 99 x 100 + 10;
   // the reference videos' slider at 100: 75 m.
@@ -769,7 +769,9 @@ const GameGlsl = Object.freeze({
       }
       for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
     };
-    for (let s = warmUp; s > 0; s--) advance(1 / 30, now - s * 1000 / 30);
+    // (In steps of 20 ms, the trace's frames: 16 to 23 ms. The kicks come per frame, so how high the swell settles
+    // grows with the root of the step: at 1/30 s it settled 1.3 x the trace's.)
+    for (let s = warmUp; s > 0; s--) advance(0.02, now - s * 20);
     advance(dt, now);
     // Into the texture: its column i, row j (x along, y up), so x / 200 and y / 200 find them.
     const rows = new Float32Array(n * n);
