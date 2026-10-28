@@ -437,14 +437,18 @@ const GameGlsl = Object.freeze({
           // As the game's water.fxc (its main pixel shader): the waves are its water simulation's (waterTex.fxc,
           // run each frame - see waterSimStep), whose texture holds their slopes in blue and alpha, laid over
           // the world three times: every 500 m beyond 50 m off, every 100 m everywhere, every 22 m within 50 m.
-          // The light takes their slopes as they are, the mirror four times steeper (the game's x and y of
-          // its slopes and its z and w).
-          vec3 view = normalize(vPosition - eyeAt);
+          // Two sets of slopes: as they are and four times steeper (the game's x and y of its slopes and its z
+          // and w; which of them takes what, see below).
+          // The view from the eye to the point a metre above the water, as water.fxc takes it: its vertex shader
+          // passes the place + (0, 0, 1) (o3 = r0 + c5.wwx, the GTA IV trace GTAIV.1's VS for PS 0x24641060), its
+          // pixel shader takes the view and the distance from that - flatter, so more Fresnel.
+          vec3 lifted = vPosition + vec3(0.0, 0.0, 1.0);
+          vec3 view = normalize(lifted - eyeAt);
           vec3 lightNormal = vec3(0.0, 0.0, 1.0);
           vec3 mirrorNormal = lightNormal;
           if (waterWaves) {
             vec2 p = vPosition.xy;
-            float distance2 = dot(eyeAt - vPosition, eyeAt - vPosition);
+            float distance2 = dot(eyeAt - lifted, eyeAt - lifted);
             float near = max(1.0 - distance2 * 0.0004, 0.0);
             vec2 big = texture(waterSim, p * 0.002).zw - 0.5;
             vec2 middle = texture(waterSim, p * 0.01).zw - 0.5;
@@ -466,32 +470,69 @@ const GameGlsl = Object.freeze({
             lightNormal = normalize(vec3(lightSlope, 1.00001));
             mirrorNormal = normalize(vec3(mirrorSlope, 1.00001));
           }
-          float cosine = abs(dot(view, mirrorNormal));
+          // How much water lies in front of what is behind it (the view depths' difference; 1 where the scene is
+          // nearer or unknown), for the shore below and the see-through at the end.
+          float behindDepth = 1.0;
+          if (waterBehindOn) {
+            vec2 at = gl_FragCoord.xy / vec2(textureSize(waterBehind, 0));
+            float behind = texture(waterBehind, at).r * 2.0 - 1.0, front = gl_FragCoord.z * 2.0 - 1.0;
+            float n = waterRange.x, f = waterRange.y;
+            behindDepth = 2.0 * n * f / (f + n - behind * (f - n)) - 2.0 * n * f / (f + n - front * (f - n));
+            if (behindDepth < 0.0) behindDepth = 1.0;
+          }
+          // As water.fxc takes its normals (the GTA IV trace GTAIV.1's PS 0x24641060): Fresnel and the mirror's shift
+          // by the gentle slopes (the light's above), turned towards the view where the water is shallow - (1 -
+          // saturate(d / (saturate(depth^1.125 x 0.02) + 0.05)))², the view x -0.5 of that onto the slope; the
+          // sun's light and its glint by the steep ones (the mirror's above).
+          float viewDepth = length(eyeAt - vPosition);
+          float shore = 1.0 - clamp(behindDepth / (clamp(pow(viewDepth, 1.125) * 0.02, 0.0, 1.0) + 0.05), 0.0, 1.0);
+          shore *= shore;
+          vec3 gentleNormal = waterWaves ? normalize(vec3(lightNormal.xy / max(lightNormal.z, 1e-4) - 0.5 * view.xy * shore, 1.00001 - 0.5 * view.z * shore)) : lightNormal;
+          // (Where a wave faces away so far that the view meets its back, the game takes 1 - cos as 1: its cmp on
+          // -v.n, not the cosine's size - the most Fresnel, 0.8, there.)
+          float cosine = max(-dot(view, gentleNormal), 0.0);
           float fresnel = pow(1.0 - cosine, 5.0) * 0.6 + 0.2;
           vec3 bounce = reflect(view, mirrorNormal);
           vec3 mirrored = mix(skyColor, skyTopColor, clamp(bounce.z * 2.5, 0.0, 1.0));
+          vec4 mirroredScene = vec4(0.0);
           if (reflectOn) {
             // The mirrored scene where it is, shifted by the waves as water.fxc does: their slope turned to the
             // picture (across, up) times 0.5 / (0.03 x the distance), at most twice; the sky where nothing was drawn.
             vec3 across = normalize(cross(view, vec3(0.0, 0.0, 1.0)) + 1e-5);
             vec2 ahead = normalize(view.xy + 1e-5);
             float shift = min(0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 2.0);
-            vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(mirrorNormal.xy, across.xy), dot(mirrorNormal.xy, ahead)) * shift;
+            vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(gentleNormal.xy, across.xy), dot(gentleNormal.xy, ahead)) * shift;
+            // Kept on the water's side of the horizon as water.fxc keeps it: its vertex shader projects the point
+            // 2000 m ahead (along the camera's look, level) on the water's plane, its pixel shader holds the read's v
+            // at least 0.5 (1 + that) + 0.05 x near + 0.005 (Direct3D's v down: here at most, mirrored).
+            vec2 ahead2 = normalize(viewForward.xy + 1e-5);
+            vec4 far = viewProjection * vec4(eyeAt.xy + ahead2 * 2000.0, vPosition.z, 1.0);
+            if (far.w > 0.0) at.y = min(at.y, 0.5 + 0.5 * far.y / far.w - 0.05 * max(1.0 - dot(eyeAt - vPosition, eyeAt - vPosition) * 0.0004, 0.0) - 0.005);
             vec4 scene = texture(reflectTex, clamp(at, 0.001, 0.999));
-            mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
+            if (reflectLight) mirroredScene = scene;
+            else mirrored = mirrored * (1.0 - scene.a) + scene.rgb;
           }
-          vec3 glint = sunColor * pow(max(dot(bounce, sunDir), 0.0), 512.0);
+          // The sun's glint as water.fxc's: (saturate(R.l) + 1e-4)^512 x the sun x its shadow x gDirectionalLight.w
+          // x 10 (its 10 - 9 x the shore's factor^0.25, that 0 away from the very shore line).
+          vec3 glint = sunColor * pow(clamp(dot(bounce, sunDir), 0.0, 1.0) + 1e-4, 512.0) * sunShadow * pedShineScale.x * 10.0;
           // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's, sunny
           // at noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
           // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3);
           // then into the picture as everything else (gameToneMap). The mirrored colour is already in the
           // picture: back to light first (gameToneUnmap).
-          vec3 mirroredLight = gameToneUnmap(mirrored);
+          // (With the mirrored scene's light as the game's HDR ReflectTexture: taken as it is, unclipped.)
+          vec3 mirroredLight = reflectLight && reflectOn ? gameToneUnmap(mirrored) * (1.0 - clamp(mirroredScene.a, 0.0, 1.0)) + mirroredScene.rgb : gameToneUnmap(mirrored);
           vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredLight * waterReflect + glint)
-                          + sunColor * clamp((dot(lightNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
+                          + sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
           lightOut = gameFog(waterLight, distance);
           rgb = gameToneMap(lightOut);
           a = 1.0;
+          // See-through by how much water lies in front of what is behind it, as water.fxc's alpha (the GTA IV trace
+          // GTAIV.1's water, PS 0x24641060, blended SRCALPHA/INVSRCALPHA over the lit scene): d the view depth of
+          // the scene behind less the water's (where the scene is nearer, 1), saturate((d x waterColour.w x
+          // 0.25)^0.25 + 0.125); its reflection and colour then show by that much, the sea bed by the rest (bc_3's
+          // shallows by the shore pale where they lay dark here).
+          if (waterBehindOn) a = clamp(pow(behindDepth * waterAlpha * 0.25, 0.25) + 0.125, 0.0, 1.0);
   `,
 });
 
@@ -529,8 +570,18 @@ const GameGlsl = Object.freeze({
       outColor = vec4(height, speed, (right - left) * 0.5 + 0.5, (up - down) * 0.5 + 0.5);
     }`;
   // How windy (0 to 1) the water's simulation takes it. The game's (0x12DDEB4, a byte / 255) is set only from a
-  // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user chose.
-  const WaterWind = 0.25;
+  // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user
+  // chose, unless the mission script forces the wind ("water": bernie3's FORCE_WIND(0.0f) before bc_3, whose quad in
+  // the GTA IV trace GTAIV.1 carries wind 0, its alpha 6 / 255).
+  let WaterWind = 0.25;
+  // The wind the sea's swell takes (see dynamicWaterStep), and the point its window keeps round: where the player
+  // stands (GTAIV.exe 0x93F090), in a mission's first cutscene the mission's marker ("water": swellAt, the page's
+  // metres); without one the camera.
+  let SwellWind = 0, swellAt = null;
+  function setWater(m) {
+    if (typeof m.wind === "number") { WaterWind = m.wind; SwellWind = m.wind; }
+    swellAt = Array.isArray(m.swellAt) ? m.swellAt : null;
+  }
   let waterSim = null;
   // The simulation's size: GTAIV.exe 0xAD61C0 makes it 128 << the water's quality setting (0x1160EB4); the GTA IV
   // trace GTAIV.1 steps a 1024 x 1024 one (call 74263369: render target and noise 1024, waterTexResValue 0.25 x
@@ -540,6 +591,13 @@ const GameGlsl = Object.freeze({
   // would have been at 60 a second (16 ms a step) until it has settled: its heights' and slopes' spread no longer
   // grow by then (measured here: 0.134 / 0.090 after 15 000 steps, the same after 20 000).
   const WaterSimWarmUp = 20000;
+  // Run on with a stronger kick than the cutscene's: settled from its own (0.044) it stays at 0.13 / 0.09, the game's
+  // in the GTA IV trace GTAIV.1 is 0.164 / 0.115 (bc_3 s1 f79, 2.6 s into the cutscene). Its step is the same as
+  // SparkIV's to the bit (call 74263369 recomputed from its state and noise: all of its heights and speeds), its own kick
+  // there 6 / 255 (the quad's vertex colour, wind 0), far below a step of its 8 bits; from its state the same step falls
+  // to 0.13 within 2000 steps. So the game's water was driven harder before the cutscene (by what is not found: more
+  // than its wind can give, at most 0.1); with 0.25 the settled water is 0.163 / 0.109 2.6 s on.
+  const WaterSimWarmUpKick = 0.25;
   function waterSimStep() {
     const Size = WaterSimSize;
     if (!waterSim) {
@@ -562,8 +620,11 @@ const GameGlsl = Object.freeze({
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-        gl.generateMipmap(gl.TEXTURE_2D);
+        // Read without smaller levels, as the game's water reads it (the GTA IV trace GTAIV.1, bc_3, the water draw
+        // 74265526: its SurfaceTextureSampler 1024 x 1024 with this one level, MINFILTER LINEAR): far off each pixel
+        // takes the slope at its own point, so the mirror there breaks up into specks (the rocks' and the pier's in
+        // bc_3), not averaged smooth.
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         return t;
       });
       const frames = textures.map(t => {
@@ -589,7 +650,7 @@ const GameGlsl = Object.freeze({
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_T, gl.REPEAT);
       waterSim = { simProgram, where, quad, textures, frames, noise, points, current: 0, last: 0 };
-      for (let i = 0; i < WaterSimWarmUp; i++) waterSimRun(16, false);
+      for (let i = 0; i < WaterSimWarmUp; i++) waterSimRun(16, false, WaterSimWarmUpKick);
     }
     const now = performance.now();
     // The frame's milliseconds x 0.02 (the first frame, and after a pause, as at 30 a second).
@@ -599,7 +660,7 @@ const GameGlsl = Object.freeze({
   }
 
   // One step of the water's simulation, ms the frame's milliseconds; its mipmaps made only when it is drawn next.
-  function waterSimRun(ms, shown) {
+  function waterSimRun(ms, shown, kick = (WaterWind * 0.75 + 0.25) * 0.1) {
     const Size = WaterSimSize;
     const next = 1 - waterSim.current;
     gl.bindFramebuffer(gl.FRAMEBUFFER, waterSim.frames[next]);
@@ -610,21 +671,20 @@ const GameGlsl = Object.freeze({
     gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, waterSim.noise);
     gl.uniform1i(waterSim.where.state, 10); gl.uniform1i(waterSim.where.noise, 11);
     gl.uniform2f(waterSim.where.noiseShift, Math.random(), Math.random());
-    gl.uniform1f(waterSim.where.kick, (WaterWind * 0.75 + 0.25) * 0.1);
+    gl.uniform1f(waterSim.where.kick, kick);
     gl.uniform1f(waterSim.where.step, Math.round(ms) * 0.02);
     gl.bindVertexArray(waterSim.quad);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindSampler(10, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[next]);
-    if (shown) gl.generateMipmap(gl.TEXTURE_2D);
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST);
     waterSim.current = next;
   }
 
   // The game's sea (CWater::UpdateDynamicWaterTask, GTAIV.exe 0xADBA40, set up at 0xADB770; heights read at
-  // 0xAD5560): a grid of 100 x 100 points 2 m apart round the camera (its window snapped to even metres,
+  // 0xAD5560): a grid of 100 x 100 points 2 m apart round the player (swellAt; else the camera; its window snapped to even metres,
   // following it; the points stay where they are in the world, those coming into the window start flat),
   // each with a height and a speed. Each frame (dt its seconds, at most 0.13): 2000 kicks at random points,
   // (random -1..1) x (wind x 0.7 + 0.23) x 10 x 0.5 x dt; a long swell pushed through it row by row,
@@ -663,7 +723,8 @@ const GameGlsl = Object.freeze({
     return false;
   }
   let dynamicWater = null;
-  function dynamicWaterStep(eyeAt) {
+  function dynamicWaterStep(eye) {
+    const eyeAt = swellAt || eye;
     const n = DynamicSize;
     if (!dynamicWater) {
       const texture = gl.createTexture();
@@ -678,13 +739,24 @@ const GameGlsl = Object.freeze({
     const d = dynamicWater, h = d.height, v = d.speed;
     const now = performance.now();
     const dt = Math.min(d.last ? (now - d.last) / 1000 : 1 / 30, 0.13);
+    const started = !d.last;
     d.last = now;
     // Index of a point by its world metres (even): (x / 2 + 100000) % 100, as the game.
     const index = c => ((Math.trunc(c / 2) % n) + n) % n;
     const evenDown = c => { const t = Math.trunc(c) - 100; return t - (t % 2); };
     const x0 = evenDown(eyeAt[0]), y0 = evenDown(eyeAt[1]);
+    // Started anew (made, or the camera jumped): run on first for as long as the cutscene has played, as the game's
+    // grid started flat when the cutscene's camera came (it moved more than its 200 m window: 0xAD4E80 clears it).
+    // In the GTA IV trace GTAIV.1 (bc_3 s1 f79, 2.6 s in; the water's grid round the camera, draws 74265526 to
+    // 74267101) the heights' spread is 0.10 m, the vertex normals' 0.024 across and 0.065 along y; 2.6 s on from flat
+    // here 0.093, 0.009, 0.068 (settled 0.13, 0.012, 0.08). Without a cutscene's time 20 s. Flat, the near water's
+    // Fresnel came out a tenth too high.
+    const played = typeof playback === "object" && playback && clip ? Math.min(Math.max(playback.time, 0), 30) : 20;
+    const fromFlat = Math.round(played / 0.02);
+    let warmUp = started ? fromFlat : 0;
     if (d.x0 === null || Math.abs(x0 - d.x0) > 200 || Math.abs(y0 - d.y0) > 200) {
       h.fill(0); v.fill(0);
+      warmUp = fromFlat;
     } else {
       // The columns and rows that left the window (and come in at its other side) start flat.
       for (let x = Math.min(d.x0, x0); x < Math.max(d.x0, x0); x += 2) { const i = index(x); for (let j = 0; j < n; j++) { h[i * n + j] = 0; v[i * n + j] = 0; } }
@@ -692,29 +764,38 @@ const GameGlsl = Object.freeze({
     }
     d.x0 = x0; d.y0 = y0;
     const ci = index(x0), cj = index(y0);
-    const kick = (WaterWind * 0.7 + 0.23) * 10, swell = (WaterWind * 0.55 + 0.18) * 1.0;
-    for (let k = 0; k < 2000; k++) {
-      const at = Math.floor(Math.random() * n) * n + Math.floor(Math.random() * n);
-      v[at] += (Math.random() * 2 - 1) * kick * 0.5 * dt;
-    }
-    const phase = (now % 4000) * (2 * Math.PI / 4000);
-    for (let r = 0; r < n; r++) {
-      const push = Math.sin((y0 + r * DynamicSpacing) * 0.15 + phase) * swell * dt;
-      const j = (cj + r) % n;
-      for (let i = 0; i < n; i++) v[i * n + j] += push;
-    }
-    const pull = 40 * dt, rest = 0.5 * dt, damp = Math.pow(0.7, dt);
-    for (let a = 0; a < n; a++) {
-      const i = (ci + a) % n, iBack = a === 0 ? i : (i + n - 1) % n, iOn = a === n - 1 ? i : (i + 1) % n;
-      for (let b = 0; b < n; b++) {
-        const j = (cj + b) % n, jBack = b === 0 ? j : (j + n - 1) % n, jOn = b === n - 1 ? j : (j + 1) % n;
-        const here = i * n + j;
-        const sides = h[iBack * n + j] + h[iOn * n + j] + h[i * n + jBack] + h[i * n + jOn];
-        const corners = h[iOn * n + jBack] + h[iOn * n + jOn] + h[iBack * n + jBack] + h[iBack * n + jOn];
-        v[here] = ((v[here] - (h[here] - (sides * 0.17 + corners * 0.08)) * pull) - h[here] * rest) * damp;
+    // SwellWind: 0 without the breeze WaterWind gives the waves' texture: settled, the trace's grid (heights' spread
+    // 0.10 m, the normals' 0.024 across, 0.065 along y) lies nearer to it with no wind (0.13, 0.015, 0.090) than with
+    // 0.25 (0.23, 0.027, 0.159), and bc_3's water with it (visual run, the water's references: sum -1.74).
+    const kick = (SwellWind * 0.7 + 0.23) * 10, swell = (SwellWind * 0.55 + 0.18) * 1.0;
+    const advance = (dt, ms) => {
+      for (let k = 0; k < 2000; k++) {
+        const at = Math.floor(Math.random() * n) * n + Math.floor(Math.random() * n);
+        v[at] += (Math.random() * 2 - 1) * kick * 0.5 * dt;
       }
-    }
-    for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
+      const phase = (ms % 4000) * (2 * Math.PI / 4000);
+      for (let r = 0; r < n; r++) {
+        const push = Math.sin((y0 + r * DynamicSpacing) * 0.15 + phase) * swell * dt;
+        const j = (cj + r) % n;
+        for (let i = 0; i < n; i++) v[i * n + j] += push;
+      }
+      const pull = 40 * dt, rest = 0.5 * dt, damp = Math.pow(0.7, dt);
+      for (let a = 0; a < n; a++) {
+        const i = (ci + a) % n, iBack = a === 0 ? i : (i + n - 1) % n, iOn = a === n - 1 ? i : (i + 1) % n;
+        for (let b = 0; b < n; b++) {
+          const j = (cj + b) % n, jBack = b === 0 ? j : (j + n - 1) % n, jOn = b === n - 1 ? j : (j + 1) % n;
+          const here = i * n + j;
+          const sides = h[iBack * n + j] + h[iOn * n + j] + h[i * n + jBack] + h[i * n + jOn];
+          const corners = h[iOn * n + jBack] + h[iOn * n + jOn] + h[iBack * n + jBack] + h[iBack * n + jOn];
+          v[here] = ((v[here] - (h[here] - (sides * 0.17 + corners * 0.08)) * pull) - h[here] * rest) * damp;
+        }
+      }
+      for (let k = 0; k < n * n; k++) h[k] += v[k] * dt;
+    };
+    // (In steps of 20 ms, the trace's frames: 16 to 23 ms. The kicks come per frame, so how high the swell settles
+    // grows with the root of the step: at 1/30 s it settled 1.3 x the trace's.)
+    for (let s = warmUp; s > 0; s--) advance(0.02, now - s * 20);
+    advance(dt, now);
     // Into the texture: its column i, row j (x along, y up), so x / 200 and y / 200 find them.
     const rows = new Float32Array(n * n);
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) rows[j * n + i] = h[i * n + j];

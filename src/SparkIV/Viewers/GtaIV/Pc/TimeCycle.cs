@@ -156,6 +156,22 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public float CloudSpeed { get; private init; }
 
+    /// <summary>
+    /// The name of the weather of this number (a script's FORCE_WEATHER_NOW(1)): the file's blocks in their order,
+    /// EXTRASUNNY, SUNNY, SUNNY_WINDY, CLOUDY, RAIN, DRIZZLE, FOGGY, LIGHTNING (bernie3's FORCE_WEATHER_NOW(1)
+    /// before bc_3, sunny in the game); null without the file or such a block.
+    /// </summary>
+    public static string? WeatherName(string gameFolder, int weather)
+    {
+      string path = Path.Combine(gameFolder, "pc", "data", "timecyc.dat");
+      if (weather < 0 || !File.Exists(path))
+      {
+        return null;
+      }
+      return File.ReadLines(path).Select(l => l.Trim()).Where(l => l.StartsWith("//////////", StringComparison.Ordinal))
+                 .Select(l => l.TrimStart('/').Trim()).ElementAtOrDefault(weather);
+    }
+
     /// <summary>The weather's line at the hour (blended between the two times round it), or null without the file or weather.</summary>
     public static TimeCycle? Load(string gameFolder, string weather, float hour)
     {

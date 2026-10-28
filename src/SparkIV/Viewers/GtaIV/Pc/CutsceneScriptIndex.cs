@@ -45,13 +45,22 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   public sealed class CutsceneScriptIndex
   {
     // Raised when what is read from the scripts changes, so older indexes are built again.
-    private const int Format = 1;
+    private const int Format = 2;
 
     /// <summary>A vehicle a script makes: its model's hash and the four colours it gives it (-1: not set).</summary>
     public sealed record ScriptVehicle(uint Model, int[] Colours);
 
-    /// <summary>Per cutscene (upper case): the script that starts it and the vehicles that script makes.</summary>
-    public sealed record Entry(string Script, List<ScriptVehicle> Vehicles);
+    /// <summary>
+    /// Per cutscene (upper case): the script that starts it and the vehicles that script makes; what it sets
+    /// right before (in the same function, before START_CUTSCENE_NOW): the weather (FORCE_WEATHER_NOW: the
+    /// number of its block in timecyc.dat, -1 none), the wind (FORCE_WIND, null none) and the hour
+    /// (SET_TIME_OF_DAY / FORCE_TIME_OF_DAY, hours and minutes as hours; null none); and where the mission's marker
+    /// stands (null none), where the player is when the mission and its first cutscene start (main.sco: the
+    /// mission's registration names its marker, another call places that marker - Bernie3's
+    /// sub_879a(18, 2, 0, 32, "M_78", ..., "Bernie3", ...) and sub_5d16(32, 487.5043, -499.1311, 3.6922, ...)).
+    /// GTAIV.exe keeps the sea's swell round the player (see the page's dynamicWaterStep).
+    /// </summary>
+    public sealed record Entry(string Script, List<ScriptVehicle> Vehicles, int Weather = -1, float? Wind = null, float? Hour = null, float[]? Marker = null);
 
     public string Fingerprint { get; init; } = "";
     public Dictionary<string, Entry> Cutscenes { get; init; } = new(StringComparer.OrdinalIgnoreCase);
@@ -167,6 +176,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var index = new CutsceneScriptIndex { Fingerprint = FingerprintOf(gameFolder) };
       var img = new IMGFileSystem();
       img.Open(ScriptArchive(gameFolder));
+      // The missions' markers (see Entry): the marker each mission script's registration names, and the places
+      // of the markers by the function that places them.
+      var markerOf = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+      var placed = new Dictionary<int, float[]>();
       try
       {
         var scripts = img.RootDirectory.OfType<File>().Where(f => f.Name.EndsWith(".sco", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -184,16 +197,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             continue;
           }
-          var cutscenes = Regex.Matches(code, @"START_CUTSCENE_NOW\(""([^""]+)""\)").Select(m => m.Groups[1].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-          if (cutscenes.Count == 0)
+          string name = Path.GetFileNameWithoutExtension(scripts[i].Name);
+          if (name.Equals("main", StringComparison.OrdinalIgnoreCase))
+          {
+            Markers(code, markerOf, placed);
+          }
+          var starts = Regex.Matches(code, @"START_CUTSCENE_NOW\(""([^""]+)""\)");
+          if (starts.Count == 0)
           {
             continue;
           }
           var vehicles = Vehicles(code);
-          string name = Path.GetFileNameWithoutExtension(scripts[i].Name);
-          foreach (string cutscene in cutscenes)
+          foreach (Match start in starts)
           {
-            index.Cutscenes.TryAdd(cutscene, new Entry(name, vehicles));
+            var (weather, wind, hour) = SetBefore(code, start.Index);
+            index.Cutscenes.TryAdd(start.Groups[1].Value, new Entry(name, vehicles, weather, wind, hour));
           }
         }
         progress?.Invoke(scripts.Count, scripts.Count);
@@ -201,6 +219,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       finally
       {
         img.Close();
+      }
+      foreach (var (cutscene, entry) in index.Cutscenes.ToList())
+      {
+        if (markerOf.TryGetValue(entry.Script, out int marker) && placed.TryGetValue(marker, out var at))
+        {
+          index.Cutscenes[cutscene] = entry with { Marker = at };
+        }
       }
       lock (Gate)
       {
@@ -217,6 +242,62 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
       }
       return index;
+    }
+
+    // A number as the decompiled code writes it: 480,7322f (its decimal comma), 0.0f, (float)250, 3, -1.
+    private const string Number = @"(?:\(float\))?-?\d+(?:[.,]\d+)?f?";
+
+    private static float? ParseNumber(string text)
+    {
+      string t = text.Trim().Replace("(float)", "").TrimEnd('f').Replace(',', '.');
+      return float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : null;
+    }
+
+    // What the script sets in the function of a START_CUTSCENE_NOW before it: the last FORCE_WEATHER_NOW(1),
+    // FORCE_WIND(0.0f) and SET_TIME_OF_DAY(5, 0) / FORCE_TIME_OF_DAY, with numbers written out.
+    private static (int Weather, float? Wind, float? Hour) SetBefore(string code, int at)
+    {
+      int from = Math.Max(code.LastIndexOf("\nvoid ", at, StringComparison.Ordinal), code.LastIndexOf("\nfunction ", at, StringComparison.Ordinal));
+      string before = code.Substring(Math.Max(0, from), at - Math.Max(0, from));
+      var weather = Regex.Matches(before, @"FORCE_WEATHER_NOW\((\d+)\)").LastOrDefault();
+      var wind = Regex.Matches(before, @"FORCE_WIND\((" + Number + @")\)").LastOrDefault();
+      var time = Regex.Matches(before, @"(?:SET|FORCE)_TIME_OF_DAY\((\d+),\s*(\d+)\)").LastOrDefault();
+      return (weather != null ? int.Parse(weather.Groups[1].Value, CultureInfo.InvariantCulture) : -1,
+              wind != null ? ParseNumber(wind.Groups[1].Value) : null,
+              time != null ? int.Parse(time.Groups[1].Value, CultureInfo.InvariantCulture) + int.Parse(time.Groups[2].Value, CultureInfo.InvariantCulture) / 60f : null);
+    }
+
+    // main.sco's missions: each registration (strand, step, trigger type, contact point, its text, three
+    // numbers, the script's name: sub_879a(18, 2, 0, 32, "M_78", 78, 1, 1, "Bernie3", ...); TLAD's
+    // sub_7180(4, 0, 0, 11, "E1M_19", 115, 1, 1, "Elizabeta1")) keeps its contact point's number,
+    // except for trigger types 1 to 7, which get 50, none (sub_7020); a mission's blip goes to the contact point
+    // of that number (sub_bb0f). The contact points are placed by the function asserting "Store_Contact_Point"
+    // (sub_5d16(32, 487,5043f, -499,1311f, 3,6922f, ...)); the map's other blips have numbers of their own
+    // ("Add_Map_Blip": sub_9a75(32, -477,8248f, ...)).
+    private static void Markers(string code, Dictionary<string, int> markerOf, Dictionary<int, float[]> placed)
+    {
+      int named = code.IndexOf("Store_Contact_Point", StringComparison.Ordinal);
+      int from = named < 0 ? -1 : code.LastIndexOf("\nvoid ", named, StringComparison.Ordinal);
+      var store = from < 0 ? Match.Empty : Regex.Match(code.Substring(from + 6), @"^\w+");
+      if (!store.Success)
+      {
+        return;
+      }
+      foreach (Match m in Regex.Matches(code, @"sub_\w+\(\d+, \d+, (\d+), (\d+), ""\w+"", \d+, \d+, \d+, ""(\w+)"""))
+      {
+        int type = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+        if (type < 1 || type > 7)
+        {
+          markerOf.TryAdd(m.Groups[3].Value, int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture));
+        }
+      }
+      foreach (Match m in Regex.Matches(code, @"\b" + store.Value + @"\((\d+), (" + Number + "), (" + Number + "), (" + Number + ")[,)]"))
+      {
+        if (ParseNumber(m.Groups[2].Value) is float x && ParseNumber(m.Groups[3].Value) is float y && ParseNumber(m.Groups[4].Value) is float z)
+        {
+          placed.TryAdd(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), new[] { x, y, z });
+        }
+      }
     }
 
     // The vehicles a script makes with a model's hash written out (CREATE_CAR(0x8b0d2ba6, x, y, z, &L[503], 1))
