@@ -570,8 +570,18 @@ const GameGlsl = Object.freeze({
       outColor = vec4(height, speed, (right - left) * 0.5 + 0.5, (up - down) * 0.5 + 0.5);
     }`;
   // How windy (0 to 1) the water's simulation takes it. The game's (0x12DDEB4, a byte / 255) is set only from a
-  // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user chose.
-  const WaterWind = 0.25;
+  // command list filled at run time (replay or network, it seems: in single player likely 0); a breeze, as the user
+  // chose, unless the mission script forces the wind ("water": bernie3's FORCE_WIND(0.0f) before bc_3, whose quad in
+  // the GTA IV trace GTAIV.1 carries wind 0, its alpha 6 / 255).
+  let WaterWind = 0.25;
+  // The wind the sea's swell takes (see dynamicWaterStep), and the point its window keeps round: where the player
+  // stands (GTAIV.exe 0x93F090), in a mission's first cutscene the mission's marker ("water": swellAt, the page's
+  // metres); without one the camera.
+  let SwellWind = 0, swellAt = null;
+  function setWater(m) {
+    if (typeof m.wind === "number") { WaterWind = m.wind; SwellWind = m.wind; }
+    swellAt = Array.isArray(m.swellAt) ? m.swellAt : null;
+  }
   let waterSim = null;
   // The simulation's size: GTAIV.exe 0xAD61C0 makes it 128 << the water's quality setting (0x1160EB4); the GTA IV
   // trace GTAIV.1 steps a 1024 x 1024 one (call 74263369: render target and noise 1024, waterTexResValue 0.25 x
@@ -674,7 +684,7 @@ const GameGlsl = Object.freeze({
   }
 
   // The game's sea (CWater::UpdateDynamicWaterTask, GTAIV.exe 0xADBA40, set up at 0xADB770; heights read at
-  // 0xAD5560): a grid of 100 x 100 points 2 m apart round the camera (its window snapped to even metres,
+  // 0xAD5560): a grid of 100 x 100 points 2 m apart round the player (swellAt; else the camera; its window snapped to even metres,
   // following it; the points stay where they are in the world, those coming into the window start flat),
   // each with a height and a speed. Each frame (dt its seconds, at most 0.13): 2000 kicks at random points,
   // (random -1..1) x (wind x 0.7 + 0.23) x 10 x 0.5 x dt; a long swell pushed through it row by row,
@@ -713,7 +723,8 @@ const GameGlsl = Object.freeze({
     return false;
   }
   let dynamicWater = null;
-  function dynamicWaterStep(eyeAt) {
+  function dynamicWaterStep(eye) {
+    const eyeAt = swellAt || eye;
     const n = DynamicSize;
     if (!dynamicWater) {
       const texture = gl.createTexture();
@@ -753,10 +764,9 @@ const GameGlsl = Object.freeze({
     }
     d.x0 = x0; d.y0 = y0;
     const ci = index(x0), cj = index(y0);
-    // Without the breeze WaterWind gives the waves' texture: settled, the trace's grid (heights' spread 0.10 m, the
-    // normals' 0.024 across, 0.065 along y) lies nearer to it with no wind (0.13, 0.015, 0.090) than with 0.25 (0.23,
-    // 0.027, 0.159), and bc_3's water with it (visual run, the water's references: sum -1.74).
-    const SwellWind = 0;
+    // SwellWind: 0 without the breeze WaterWind gives the waves' texture: settled, the trace's grid (heights' spread
+    // 0.10 m, the normals' 0.024 across, 0.065 along y) lies nearer to it with no wind (0.13, 0.015, 0.090) than with
+    // 0.25 (0.23, 0.027, 0.159), and bc_3's water with it (visual run, the water's references: sum -1.74).
     const kick = (SwellWind * 0.7 + 0.23) * 10, swell = (SwellWind * 0.55 + 0.18) * 1.0;
     const advance = (dt, ms) => {
       for (let k = 0; k < 2000; k++) {

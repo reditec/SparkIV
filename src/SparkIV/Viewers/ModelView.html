@@ -3318,6 +3318,7 @@
       else if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
       else if (m.type === "drawDistance") { drawSteps = m.steps || []; draw(); }
+      else if (m.type === "water") { setWater(m); draw(); }
       else if (m.type === "visible") { const first = visible.size === 0; visible = new Set(m.ids); findSpots(); if (first || m.fit) fit(); else draw(); }
       else if (m.type === "options") {
         showTextures = m.textures; wireframe = m.wireframe;

@@ -447,7 +447,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         float drawDistance = _document.Cut.DrawDistance > 0 && (farClip <= 0 || _document.Cut.DrawDistance < farClip) ? _document.Cut.DrawDistance : farClip;
         _drawDistance = drawDistance;
         var log = _document.Log;
-        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, OutsideHour, log));
+        int hour = (int)OutsideHour;
+        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, hour, log));
       }
       catch (Exception ex)
       {
@@ -482,9 +483,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private System.Diagnostics.Stopwatch? _pageWait;
     private string? _pageWaitFor;
 
-    // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too).
-    private const string OutsideWeather = "SUNNY";
-    private const int OutsideHour = 12;
+    // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too),
+    // as the mission script playing it forces them (bernie3: FORCE_WEATHER_NOW(1) before bc_3), else noon, sunny
+    // (the .cut gives neither).
+    private string OutsideWeather =>
+      _document.GameFolder is string folder && _document.Script is { Weather: >= 0 } script ? TimeCycle.WeatherName(folder, script.Weather) ?? "SUNNY" : "SUNNY";
+    private float OutsideHour => _document.Script?.Hour ?? 12;
     // Whether the location's light from the time cycle was sent (the page then lights and shows it as the game).
     private bool _lit;
     // How far the location's far models were loaded (the [DRAW_DISTANCE] as the game limits it by the time cycle).
@@ -506,7 +510,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       Post(scene);
       Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? Host + CutsceneLocation.LightVolumeKey : null));
-      // The light of the game's time cycle (the .cut gives no time or weather: noon, sunny), and for each room of
+      // The light of the game's time cycle (at OutsideWeather and OutsideHour), and for each room of
       // the location as its time cycle modifier changes it: the page lights by the one of the room the camera
       // is in, as the game does, inside the same way as outside.
       _lit = false;
@@ -519,6 +523,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                            _document.Location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null, rooms));
         _lit = true;
       }
+      // The water as the mission script leaves it: the wind it forces, and the sea's swell kept round where the
+      // player stands, the mission's marker (CutsceneScriptIndex.Entry), in the page's metres (less the origin).
+      var script = _document.Script;
+      float[]? origin = _document.Cut.Offset;
+      Post(new
+      {
+        type = "water",
+        wind = script?.Wind,
+        swellAt = script?.Marker is float[] marker && origin != null ? new[] { marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2] } : null,
+      });
       _locationVisible = visible;
       PostVisible();
       PostBackground();

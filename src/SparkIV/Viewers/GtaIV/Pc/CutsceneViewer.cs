@@ -62,6 +62,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public Action? LoadCast { get; set; }
 
+    /// <summary>
+    /// What the mission script playing the cutscene sets for it (weather, wind, hour, where its marker stands),
+    /// from the game's cutscene script index once the cast is loaded; null without one.
+    /// </summary>
+    public CutsceneScriptIndex.Entry? Script { get; set; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
@@ -111,16 +117,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The cast (some seconds) is loaded by the view once it shows, with its spinner (CutsceneDocument.LoadCast).
       var folder = game.Folder;
       var player = game.Player;
-      return new CutsceneDocument
+      var document = new CutsceneDocument
       {
         Cut = cut, Actors = actors, Sections = sections, Texts = texts, Game = game.Name, GameFolder = game.Folder,
         AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote, Log = log,
-        LoadCast = () => LoadCast(file.Name, cut, actors, folder, player, install, log),
       };
+      document.LoadCast = () => document.Script = LoadCast(file.Name, cut, actors, folder, player, install, log);
+      return document;
     }
 
-    /// <summary>The cast: everyone's model and textures, their variations and props, the vehicles' colours.</summary>
-    private static void LoadCast(string fileName, CutFile cut, List<CutActor> actors, string folder, string player, GameInstall? install, LoadLog log)
+    /// <summary>
+    /// The cast: everyone's model and textures, their variations and props, the vehicles' colours; returns what
+    /// the script playing the cutscene sets for it (null without one).
+    /// </summary>
+    private static CutsceneScriptIndex.Entry? LoadCast(string fileName, CutFile cut, List<CutActor> actors, string folder, string player, GameInstall? install, LoadLog log)
     {
       if (install != null)
       {
@@ -146,10 +156,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // Without the index: the .cut's colours.
       }
       string cutName = Path.GetFileNameWithoutExtension(fileName);
-      log.Step("cutscene script index", scripts?.Cutscenes.TryGetValue(cutName, out var entry) == true ? "played by " + entry.Script : "no script found");
+      CutsceneScriptIndex.Entry? entry = null;
+      bool found = scripts?.Cutscenes.TryGetValue(cutName, out entry) == true;
+      log.Step("cutscene script index", found ? "played by " + entry!.Script : "no script found");
       CutsceneMessages.ApplyPaint(cut, actors, folder, Games.InstallFolder(Games.GtaIV, "Windows"),
                                   scripts == null ? null : model => scripts.ColoursFor(cutName, model));
       log.Step("cast: variations and props");
+      return entry;
     }
 
     /// <summary>The sound the sections name ([AUDIO] B_1), from the game's pc\audio\sfx\cutscenes.rpf.</summary>
