@@ -2,6 +2,17 @@
 
 Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC). SparkIV shows this file in Settings → About, and after an update the part of the new version.
 
+## v0.9.0-alpha.3
+
+- Cutscenes: the water mirrors as in the game – far buildings only, no ground, broken up by its waves.
+- Cutscenes: the water's waves are there from the start, breaking up its mirror as in the game.
+- Cutscenes: the sky is no longer too white and the clouds no longer pink.
+- Cutscenes: depth of field also blurs the foreground, and the picture is softened as in the game.
+- Cutscenes: lamps light walls and rooms as in the game (bc_3's granite wall, Bernie's flat).
+- Cutscenes: see-through glass shows its reflection as in the game (Bernie's glass table).
+- Cutscenes: cutscene lights light faces as brightly as in the game.
+- After an update, SparkIV shows what's new right away.
+
 ## v0.9.0-alpha.2
 
 - Cutscenes: vehicle windows are no longer drawn twice (bright streaks on car glass).
