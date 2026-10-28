@@ -683,7 +683,7 @@ const GameGlsl = Object.freeze({
   // rest by 0.5 x dt, damped by 0.7 ^ dt; then heights on by speed x dt. The water's slope near the camera
   // comes from it (water.fxc within 50 m: the vertex normal, from the heights 2 m to either side), faded
   // out over its window's last 20 m. The heights go to the page as a texture tiled every 200 m.
-  const DynamicSize = 100, DynamicSpacing = 2, DynamicWarmUp = 1000;
+  const DynamicSize = 100, DynamicSpacing = 2;
   // How far from the camera floating litter is there (see drawMeshes): GTAIV.exe 0xC87760, 0.5 x the detail
   // distance + 20 m, the detail distance (0x103F714, set by 0xAEBD70 from 0x59EEF0) its menu slider / 99 x 100 + 10;
   // the reference videos' slider at 100: 75 m.
@@ -734,14 +734,18 @@ const GameGlsl = Object.freeze({
     const index = c => ((Math.trunc(c / 2) % n) + n) % n;
     const evenDown = c => { const t = Math.trunc(c) - 100; return t - (t % 2); };
     const x0 = evenDown(eyeAt[0]), y0 = evenDown(eyeAt[1]);
-    // Started anew (made, or the camera jumped): run on first until it has settled, as the game's has long before a
-    // cutscene (in the GTA IV trace GTAIV.1, bc_3, the water's grid round the camera, draws 74265526 to 74267101: the
-    // heights' spread 0.10 m, the vertex normals' 0.024 across and 0.065 along y; flat, the near water's Fresnel came
-    // out a tenth too high).
-    let warmUp = started ? DynamicWarmUp : 0;
+    // Started anew (made, or the camera jumped): run on first for as long as the cutscene has played, as the game's
+    // grid started flat when the cutscene's camera came (it moved more than its 200 m window: 0xAD4E80 clears it).
+    // In the GTA IV trace GTAIV.1 (bc_3 s1 f79, 2.6 s in; the water's grid round the camera, draws 74265526 to
+    // 74267101) the heights' spread is 0.10 m, the vertex normals' 0.024 across and 0.065 along y; 2.6 s on from flat
+    // here 0.093, 0.009, 0.068 (settled 0.13, 0.012, 0.08). Without a cutscene's time 20 s. Flat, the near water's
+    // Fresnel came out a tenth too high.
+    const played = typeof playback === "object" && playback && clip ? Math.min(Math.max(playback.time, 0), 30) : 20;
+    const fromFlat = Math.round(played / 0.02);
+    let warmUp = started ? fromFlat : 0;
     if (d.x0 === null || Math.abs(x0 - d.x0) > 200 || Math.abs(y0 - d.y0) > 200) {
       h.fill(0); v.fill(0);
-      warmUp = DynamicWarmUp;
+      warmUp = fromFlat;
     } else {
       // The columns and rows that left the window (and come in at its other side) start flat.
       for (let x = Math.min(d.x0, x0); x < Math.max(d.x0, x0); x += 2) { const i = index(x); for (let j = 0; j < n; j++) { h[i * n + j] = 0; v[i * n + j] = 0; } }
