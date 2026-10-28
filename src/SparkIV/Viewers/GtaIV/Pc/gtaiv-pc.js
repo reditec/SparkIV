@@ -603,8 +603,11 @@ const GameGlsl = Object.freeze({
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-        gl.generateMipmap(gl.TEXTURE_2D);
+        // Read without smaller levels, as the game's water reads it (the GTA IV trace GTAIV.1, bc_3, the water draw
+        // 74265526: its SurfaceTextureSampler 1024 x 1024 with this one level, MINFILTER LINEAR): far off each pixel
+        // takes the slope at its own point, so the mirror there breaks up into specks (the rocks' and the pier's in
+        // bc_3), not averaged smooth.
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         return t;
       });
       const frames = textures.map(t => {
@@ -658,7 +661,6 @@ const GameGlsl = Object.freeze({
     gl.bindSampler(10, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterSim.textures[next]);
-    if (shown) gl.generateMipmap(gl.TEXTURE_2D);
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST);
     waterSim.current = next;

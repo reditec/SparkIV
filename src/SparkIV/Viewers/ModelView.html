@@ -1834,6 +1834,8 @@
   }
 
   // The water's level: the height most of its quads lie at (the sea's, not a pond's up in a park); null without water.
+  // How far under the water the mirror still draws (see the reflection pass in drawScene).
+  const MirrorClipDepth = 0.515;
   let waterLevelCache;
   function waterLevel() {
     if (waterLevelCache !== undefined) return waterLevelCache;
@@ -2580,7 +2582,7 @@
         }
         else for (const p of planes) if (p[0] * m.center[0] + p[1] * m.center[1] + p[2] * m.center[2] + p[3] < -m.radius) return false;
         if (reflecting) {
-          if (m.max[2] < level) return false;
+          if (m.max[2] < level - MirrorClipDepth) return false;
           const d = Math.hypot(m.center[0] - eyeNow[0], m.center[1] - eyeNow[1], m.center[2] - eyeNow[2]);
           if (m.radius / Math.max(d, 1e-3) < 0.01) return false;
         }
@@ -3081,7 +3083,10 @@
         drawSky(mirrored, mirroredEye);
         gl.uniformMatrix4fv(loc.viewProjection, false, mirrored);
         gl.uniform3fv(loc.eyeAt, mirroredEye);
-        gl.uniform1f(loc.clipBelow, level - 0.05);
+        // Cut half a metre under the water, as the game's clip plane for it (the GTA IV trace GTAIV.1, bc_3: set at
+        // 74262927, in the world z >= -0.515 with the water at 0): what stands just under it shows in the mirror too
+        // (the pier's posts and lower edge, dark in its corner).
+        gl.uniform1f(loc.clipBelow, level - MirrorClipDepth);
         // (Without the sun's shadow: its cascades are the camera's, not the mirrored one's.)
         gl.uniform1i(loc.shadowOn, false);
         drawMeshes(true, mirrored, mirroredEye);
