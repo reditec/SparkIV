@@ -581,6 +581,13 @@ const GameGlsl = Object.freeze({
   // would have been at 60 a second (16 ms a step) until it has settled: its heights' and slopes' spread no longer
   // grow by then (measured here: 0.134 / 0.090 after 15 000 steps, the same after 20 000).
   const WaterSimWarmUp = 20000;
+  // Run on with a stronger kick than the cutscene's: settled from its own (0.044) it stays at 0.13 / 0.09, the game's
+  // in the GTA IV trace GTAIV.1 is 0.164 / 0.115 (bc_3 s1 f79, 2.6 s into the cutscene). Its step is the same as
+  // SparkIV's to the bit (call 74263369 recomputed from its state and noise: all of its heights and speeds), its own kick
+  // there 6 / 255 (the quad's vertex colour, wind 0), far below a step of its 8 bits; from its state the same step falls
+  // to 0.13 within 2000 steps. So the game's water was driven harder before the cutscene (by what is not found: more
+  // than its wind can give, at most 0.1); with 0.25 the settled water is 0.163 / 0.109 2.6 s on.
+  const WaterSimWarmUpKick = 0.25;
   function waterSimStep() {
     const Size = WaterSimSize;
     if (!waterSim) {
@@ -633,7 +640,7 @@ const GameGlsl = Object.freeze({
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.samplerParameteri(points, gl.TEXTURE_WRAP_T, gl.REPEAT);
       waterSim = { simProgram, where, quad, textures, frames, noise, points, current: 0, last: 0 };
-      for (let i = 0; i < WaterSimWarmUp; i++) waterSimRun(16, false);
+      for (let i = 0; i < WaterSimWarmUp; i++) waterSimRun(16, false, WaterSimWarmUpKick);
     }
     const now = performance.now();
     // The frame's milliseconds x 0.02 (the first frame, and after a pause, as at 30 a second).
@@ -643,7 +650,7 @@ const GameGlsl = Object.freeze({
   }
 
   // One step of the water's simulation, ms the frame's milliseconds; its mipmaps made only when it is drawn next.
-  function waterSimRun(ms, shown) {
+  function waterSimRun(ms, shown, kick = (WaterWind * 0.75 + 0.25) * 0.1) {
     const Size = WaterSimSize;
     const next = 1 - waterSim.current;
     gl.bindFramebuffer(gl.FRAMEBUFFER, waterSim.frames[next]);
@@ -654,7 +661,7 @@ const GameGlsl = Object.freeze({
     gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, waterSim.noise);
     gl.uniform1i(waterSim.where.state, 10); gl.uniform1i(waterSim.where.noise, 11);
     gl.uniform2f(waterSim.where.noiseShift, Math.random(), Math.random());
-    gl.uniform1f(waterSim.where.kick, (WaterWind * 0.75 + 0.25) * 0.1);
+    gl.uniform1f(waterSim.where.kick, kick);
     gl.uniform1f(waterSim.where.step, Math.round(ms) * 0.02);
     gl.bindVertexArray(waterSim.quad);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
