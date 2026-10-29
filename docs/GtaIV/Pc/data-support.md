@@ -74,7 +74,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 |---|---|---|
 | `BonePosition` (0), `BoneRotation` (1) | used | Bones of characters, objects and faces. |
 | `ModelPosition` (5), `ModelRotation` (6) | used | Root of the model. |
-| `CameraPosition` (7), `CameraRotation` (8), `CameraFov` (136) | used | Camera. |
+| `CameraPosition` (7), `CameraRotation` (8), `CameraFov` (136) | used | Camera ([cutscene-camera.md](formats/cutscene-camera.md)). |
 | `CameraDof` (137) | used (since 2026-10-11) | (near, far, 0) in metres. **Measured with x32dbg** (`dof_dump.txt`, breakpoint 0x5E16F0): the game passes exactly these values to its depth of field. In cutscene mode (`Cut_StartSection` 0x9C9180 sets Postfx +0x264) the shader gets dofDist = (0.5, far − near, 0.5, (near + far) / 2): everything from "near" to "far" is sharp; towards "near − 0.5 m" and "far + 0.5 m" it blends with strength b = M², using a 4×4 blur (rage_postfx's last pass; corrected on 2026-10-27, see "Depth of field and the G-buffer's softening" below: the near side blurs too). **M is measured as 0.5** (`dof_blur.txt`, breakpoint 0x930580: DOF_BLUR = (0.5, 0, 0.5, 0)), i.e. `misc.DOFBlurMultiplier.SD` from `visualSettings.dat`, b at most 0.25. Why the SD value applies is open: the check function 0x424000 is not readable in Ghidra. |
 | `CameraMatrixRotateFactor` (138) | **unclear** | Camera, one value per frame. |
 | `CameraControl` (144) | **unclear** | Camera, −1 or 1. |
