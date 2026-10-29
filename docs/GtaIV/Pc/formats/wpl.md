@@ -39,3 +39,26 @@ Passing to the lights: `Entity_AddModelLights` (0xC1DB60) passes bits 1, 2 and 3
 **Evidence in the image:** In bc_3, the wall lamp at the pier has the lamp flag 0x8000, but its instance does not have 0x100. In the game video it has the orange glow of the normal lamp. With the shadow program it disappeared in SparkIV; with the instance condition it is back.
 
 In SparkIV: `MapIndex.LampShadows`, `LocationObject.LampShadows`, in the light record `shadows`.
+
+## How far a distant version is drawn
+
+The game draws a distant version (LOD, its own LOD in turn, a district's `slod…`) as far as its `.ide` distance (the
+third field of its `.ide` line) **times the LOD view distance** of the graphics settings:
+
+- **Setting:** `[QUALITY SETTINGS] Set LOD view distance (0-99)` (command line `viewdistance`), stored at GTAIV.exe
+  0x01160E94.
+- **Factor:** 0x59EEF0 and 0x59F200 set 0x0118D838 = setting / 99 × 1.275 + 0.725. That is 0.725 at the lowest
+  setting and **2.0 at the highest** (99, shown as 100 in the menu).
+- **Not found:** the code that reads the factor; it lies in code Ghidra hasn't disassembled.
+- The detail distance (0x01160E98) gives another value, setting / 99 × 100 + 10 (0x0103F714, via 0xAEBD70); what it
+  scales is not checked.
+
+**Evidence:** trace `GTAIV.1.trace` (bc_3, recorded at the highest settings), section 2, frame 786.
+- The game shows the roofs of the tower blocks 752 m off across the water. Their distant version `lod_bs_ten01` has
+  an `.ide` distance of 550 m, so it is drawn only with a factor of at least 1.37.
+- With the factor 2.0, SparkIV draws them too. The reference's difference drops from 11.00 to 10.66; the other 22 of
+  bc_3 and et01_ba stay within 0.03.
+
+**In SparkIV:** `CutsceneLocation.LodViewDistance` = 2.0, the highest setting, for the distant versions only. With
+the factor also on the models themselves (and without the 150 m limit `OutsideModels`), bc_3's pier roof came
+back, but et01_ba's toll booth lost its tinted panes. That is open.
