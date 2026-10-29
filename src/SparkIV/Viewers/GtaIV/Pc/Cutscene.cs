@@ -365,6 +365,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>The props worn: the part in <see cref="PropScene"/> and the skeleton's bone it is fixed to.</summary>
     public List<(ModelPart Part, int Bone)> Props { get; } = new List<(ModelPart, int)>();
+
+    /// <summary>
+    /// The face shapes of a cutscene ped (its .wbs beside it in cutsprops.img) by the mesh of <see cref="Scene"/>
+    /// they move: the head's (head_000_R, the same vertices in the same order). Its face clip's tracks of type 21
+    /// weight them, by their keys.
+    /// </summary>
+    public Dictionary<int, RageLib.GtaIV.Pc.Models.BlendShapeMesh> Faces { get; } = new Dictionary<int, RageLib.GtaIV.Pc.Models.BlendShapeMesh>();
   }
 
   /// <summary>
@@ -453,6 +460,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           node["actor"] = actor.Id;
           // Peds are lit as they are; props (a door) as the location is (no light of the camera).
           node["ped"] = actor.IsPed;
+          if (actor.Faces.TryGetValue(mesh.Id, out var face))
+          {
+            node["face"] = FaceMessage(face);
+          }
           meshes.Add(node);
           if (shown.Contains(mesh.Id))
           {
@@ -653,6 +664,30 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
     }
 
+    /// <summary>
+    /// A head mesh's face shapes for the page: per shape its key, the vertices it moves and their changes as the
+    /// game adds them before skinning (GTA IV (PC), docs/GtaIV/Pc/formats/wbs.md): position x, y, z / 4096, normal
+    /// and tangent x, y, z / 128 (each x the shape's weight).
+    /// </summary>
+    private static JsonArray FaceMessage(RageLib.GtaIV.Pc.Models.BlendShapeMesh face)
+    {
+      string Floats(IEnumerable<float> values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.ToArray().AsSpan()));
+      var shapes = new JsonArray();
+      foreach (var target in face.Targets.Where(t => t.Key >= 0))
+      {
+        shapes.Add(new JsonObject
+        {
+          ["key"] = target.Key,
+          ["name"] = target.Name,
+          ["vertices"] = Convert.ToBase64String(MemoryMarshal.AsBytes(target.Vertices.AsSpan())),
+          ["positions"] = Floats(target.Positions.Select(v => v / 4096f)),
+          ["normals"] = target.Normals == null ? null : Floats(target.Normals.Select(v => v / 128f)),
+          ["tangents"] = target.Tangents == null ? null : Floats(target.Tangents.Select(v => v / 128f)),
+        });
+      }
+      return shapes;
+    }
+
     /// <summary>One number a frame (the camera's field of view).</summary>
     private static string SampledScalar(Animation clip, AnimationTrack track)
     {
@@ -770,6 +805,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                                                   .Select(r => r.BoneId));
         }
         var removed = removals.Where(boneOfId.ContainsKey).Select(id => boneOfId[id]).Distinct().ToList();
+        // The face clip's shape weights (tracks of type 21, one number a frame, by the shape's key), for the
+        // shapes of the actor's .wbs (see CutActor.Faces).
+        var faceWeights = new List<object>();
+        if (head != null && actor.Faces.Count > 0)
+        {
+          var keys = actor.Faces.Values.SelectMany(f => f.Targets).Select(t => t.Key).ToHashSet();
+          foreach (var track in head.Tracks)
+          {
+            if ((int)track.Kind == 21 && track.DataType == 2 && track.IsDecoded && keys.Contains(track.BoneId))
+            {
+              faceWeights.Add(new { key = track.BoneId, values = Sampled(head, track, 1) });
+            }
+          }
+        }
         cast.Add(new
         {
           id = actor.Id,
@@ -777,6 +826,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           clip = clip == null ? null : new { frames = Math.Max(1, clip.FrameCount), fps = FramesPerSecond(clip), tracks },
           root,
           removedBones = removed,
+          face = faceWeights.Count == 0 ? null : faceWeights,
         });
       }
 
@@ -942,6 +992,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             bool prop = file.Name.EndsWith(".wdr", StringComparison.OrdinalIgnoreCase);
             actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null, vertexColors: prop);
             actor.Source = file.Name + " · " + RelativeArchive(from);
+            for (int i = 0; i < archives.Count && actor.IsPed && actor.Faces.Count == 0; i++)
+            {
+              if (Open(i)?.RootDirectory.FindByName(actor.Model + ".wbs") is RageLib.FileSystem.Common.File wbs)
+              {
+                LoadFaces(actor, wbs.GetData());
+              }
+            }
           }
           catch (Exception ex)
           {
@@ -954,6 +1011,51 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         foreach (var img in open)
         {
           img?.Close();
+        }
+      }
+    }
+
+    /// <summary>
+    /// A cutscene ped's face shapes (its .wbs) on its scene's meshes: each of the file's meshes (head_000_R.mesh)
+    /// on the mesh of the part of that name that has as many vertices (the high level of detail). A file that
+    /// can't be read leaves the face still.
+    /// </summary>
+    private static void LoadFaces(CutActor actor, byte[] data)
+    {
+      if (actor.Scene == null)
+      {
+        return;
+      }
+      var file = new RageLib.GtaIV.Pc.Models.BlendShapeFile();
+      try
+      {
+        file.Open(new MemoryStream(data));
+      }
+      catch (Exception)
+      {
+        return;
+      }
+      foreach (var shapes in file.Meshes.Where(m => m.Targets.Count > 0))
+      {
+        string part = shapes.Name.EndsWith(".mesh", StringComparison.OrdinalIgnoreCase) ? shapes.Name[..^5] : shapes.Name;
+        var ids = new HashSet<int>();
+        void Collect(ModelPart p, bool inside)
+        {
+          inside |= p.Name.Equals(part, StringComparison.OrdinalIgnoreCase) || p.Name.StartsWith(part + "_", StringComparison.OrdinalIgnoreCase);
+          if (inside && p.MeshId >= 0)
+          {
+            ids.Add(p.MeshId);
+          }
+          foreach (var child in p.Children)
+          {
+            Collect(child, inside);
+          }
+        }
+        Collect(actor.Scene.Root, false);
+        var mesh = actor.Scene.Meshes.FirstOrDefault(m => ids.Contains(m.Id) && m.Positions.Length == shapes.VertexCount * 3);
+        if (mesh != null)
+        {
+          actor.Faces[mesh.Id] = shapes;
         }
       }
     }
