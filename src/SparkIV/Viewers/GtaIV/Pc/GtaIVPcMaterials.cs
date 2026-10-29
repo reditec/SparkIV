@@ -82,6 +82,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.09765625): (1, 50).
     /// - gta_vehicle_vehglass, technique draw (forward, program 8): its own lighting, see the page (the third
     ///   number 1): min(dot x reflectivePowerED x 0.225 (c1.z), 1), power spec.a x reflectivePowerED x 190 (c0.w).
+    /// - gta_vehicle_interior and gta_vehicle_interior2, deferred_draw (program 5 of both): GB2.x = dot x
+    ///   reflectivePowerED x matDiffuseColor2.w x 0.0025, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w
+    ///   x 0.01953125): (0.005, 10), almost no shine. With paint's numbers instead, et01_ba's Presidente showed light
+    ///   grey seats behind Jim where the game's are near black (#14; the TLAD trace's frame Present 202699634).
     /// matDiffuseColor2.w is taken as its .fxc default, 1 (what the game sets at run time is not traced).
     /// Null for the other vehicle shaders (not read; the page keeps paint's numbers for them).
     /// </summary>
@@ -89,6 +93,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       "gta_vehicle_paint1" or "gta_vehicle_paint2" or "gta_vehicle_paint3" => new[] { 0.15f, 190f, 0f },
       "gta_vehicle_mesh" => new[] { 1f, 50f, 0f },
+      "gta_vehicle_interior" or "gta_vehicle_interior2" => new[] { 0.005f, 10f, 0f },
       "gta_vehicle_vehglass" => new[] { 0.225f, 190f, 1f },
       _ => null,
     };
