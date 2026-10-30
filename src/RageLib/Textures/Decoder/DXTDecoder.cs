@@ -29,6 +29,13 @@ namespace RageLib.Textures.Decoder
 {
   internal static class DXTDecoder
   {
+    // A 5- or 6-bit colour channel to 0..255 by repeating its top bits (31 -> 255, 63 -> 255), as the hardware
+    // expands it. Times 8 or 4 alone left every texture up to 3 % too dark (white 248/252): Bernie's head texture
+    // as the game uploads it (trace GTAIV.trace, call 87354824) is 2.5 % brighter than SparkIV's decode was.
+    private static int Expand5(long c) => (int)((c << 3) | (c >> 2));
+
+    private static int Expand6(long c) => (int)((c << 2) | (c >> 4));
+
     internal static byte[] DecodeDXT1(byte[] data, int width, int height)
     {
       byte[] pixData = new byte[width * height * 4];
@@ -51,13 +58,13 @@ namespace RageLib.Textures.Decoder
           uint code = BitConverter.ToUInt32(data, blockDataStart + 4);
 
           ushort r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
-          r0 = (ushort)(8 * (color0 & 31));
-          g0 = (ushort)(4 * ((color0 >> 5) & 63));
-          b0 = (ushort)(8 * ((color0 >> 11) & 31));
+          r0 = (ushort)Expand5(color0 & 31);
+          g0 = (ushort)Expand6((color0 >> 5) & 63);
+          b0 = (ushort)Expand5((color0 >> 11) & 31);
 
-          r1 = (ushort)(8 * (color1 & 31));
-          g1 = (ushort)(4 * ((color1 >> 5) & 63));
-          b1 = (ushort)(8 * ((color1 >> 11) & 31));
+          r1 = (ushort)Expand5(color1 & 31);
+          g1 = (ushort)Expand6((color1 >> 5) & 63);
+          b1 = (ushort)Expand5((color1 >> 11) & 31);
 
           for (int k = 0; k < 4; k++)
           {
@@ -158,7 +165,7 @@ namespace RageLib.Textures.Decoder
           {
             for (int i = 0; i < 4; i++)
             {
-              alpha[i, j] = (byte)((alphaData[j] & 0xF) * 16);
+              alpha[i, j] = (byte)((alphaData[j] & 0xF) * 17);  // 15 -> 255
               alphaData[j] >>= 4;
             }
           }
@@ -174,13 +181,13 @@ namespace RageLib.Textures.Decoder
           uint code = BitConverter.ToUInt32(data, blockDataStart + 8 + 4);
 
           ushort r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
-          r0 = (ushort)(8 * (color0 & 31));
-          g0 = (ushort)(4 * ((color0 >> 5) & 63));
-          b0 = (ushort)(8 * ((color0 >> 11) & 31));
+          r0 = (ushort)Expand5(color0 & 31);
+          g0 = (ushort)Expand6((color0 >> 5) & 63);
+          b0 = (ushort)Expand5((color0 >> 11) & 31);
 
-          r1 = (ushort)(8 * (color1 & 31));
-          g1 = (ushort)(4 * ((color1 >> 5) & 63));
-          b1 = (ushort)(8 * ((color1 >> 11) & 31));
+          r1 = (ushort)Expand5(color1 & 31);
+          g1 = (ushort)Expand6((color1 >> 5) & 63);
+          b1 = (ushort)Expand5((color1 >> 11) & 31);
 
           for (int k = 0; k < 4; k++)
           {
@@ -344,13 +351,13 @@ namespace RageLib.Textures.Decoder
           uint code = BitConverter.ToUInt32(data, blockDataStart + 8 + 4);
 
           ushort r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
-          r0 = (ushort)(8 * (color0 & 31));
-          g0 = (ushort)(4 * ((color0 >> 5) & 63));
-          b0 = (ushort)(8 * ((color0 >> 11) & 31));
+          r0 = (ushort)Expand5(color0 & 31);
+          g0 = (ushort)Expand6((color0 >> 5) & 63);
+          b0 = (ushort)Expand5((color0 >> 11) & 31);
 
-          r1 = (ushort)(8 * (color1 & 31));
-          g1 = (ushort)(4 * ((color1 >> 5) & 63));
-          b1 = (ushort)(8 * ((color1 >> 11) & 31));
+          r1 = (ushort)Expand5(color1 & 31);
+          g1 = (ushort)Expand6((color1 >> 5) & 63);
+          b1 = (ushort)Expand5((color1 >> 11) & 31);
 
           for (int k = 0; k < 4; k++)
           {
