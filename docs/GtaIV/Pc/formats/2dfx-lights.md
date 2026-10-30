@@ -13,7 +13,8 @@ Models (`.wdr`, `.wdd`, `.wft`) can contain light effects, i.e. lamps and wall l
 | `Distance` (+0x38) | **Radius** of the light | GTAIV.exe 0xC1E200 → 0xABCCD0 |
 | `Range` (+0x3C) | **Strength** | ibid. |
 | Falloff, HotSpot | Outer and inner cone angle of a spot | |
-| Intensity | Additional factor | |
+| `CoronaSize` (+0x40) | Size of its corona, see [Coronas](#coronas) | |
+| Intensity (+0x5C) | Strength of its corona (0.4 for the track spots in Bernie's flat). The light itself doesn't use it | GTAIV.exe 0xC1E200 |
 | Flags (+0x4C) | see below | |
 
 ## Flags
@@ -38,13 +39,36 @@ The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light
 
 - **Interior/exterior:** Bit 0x20 means interior, 0x40 exterior, 0x60 both.
 - **Cutscene lights:** 0x80. If their name starts with `env`, 0x100 is added; with `shd`, 4 is also added (0x9CA7E0).
-- **Corona** (`CoronaSize`, `CoronaHash`): is read but **not supported**; SparkIV draws no coronas. (The bright opening of bc_1's ceiling spots is not a corona but their lens, a gta_emissive material: see #9.)
+- **Corona:** see [Coronas](#coronas). `CoronaHash` is read but not used: every corona seen uses the sprite `corona`. (The bright opening of bc_1's ceiling spots is not a corona but their lens, a gta_emissive material: see #9.)
 - **Cutscene lights and rooms** (observation, 2026-10-23; not confirmed in the exe):
   - A cut light affects characters regardless of the room it is in. Evidence: In et01_aa (section 4, frame 484), `FillLight1_3` is 1.2 m behind the camera and thus behind the wall in the neighbouring room. In the game video it lights the characters in front of the camera.
   - No per-light room check has been found in the game. The stencil rule is confirmed: cut lights hit **only characters**, indoors and outdoors.
     - Indoors: trace GTAIV.3, et01_aa.
     - Outdoors: trace GTAIV.4, et01_ba frame 9350, read out with d3dretrace on 2026-10-23. After `BoothLight_0` (call 145552474) the guard's face rose from 1.72 to 2.69; the booth is unchanged (panel 0.52/0.88/0.94).
   - Since 2026-10-23, SparkIV no longer applies cut lights to any map or prop meshes (`ModelView.html`, `marked < 0 && baked`).
+
+## Coronas
+
+Every 2dfx light also hands in a corona: a soft sprite facing the camera, added to the picture (#18). They can cover much of the frame: in bc_1 the one 1.2 m from the camera lay over the whole upper picture, which made Bernie's flat look 8–9 % too dark "without lights". With the corona draw left out of the game's frame, the game's picture equals SparkIV's across the room.
+
+| What | Value | Source |
+|---|---|---|
+| List | `Light_FromEffect` 0xC1E200 → 0xC1F020, kept per frame by 0xC1EE40, drawn by the code at 0xC1F170 | GTAIV.exe |
+| Sprite | `corona` of `pc\textures\coronas.wtd` (128 × 128 DXT5, clamped) | `platform:/textures/coronas`; `GTAIV.trace`, call 168093 |
+| Colour | The light's bytes | ibid. |
+| Strength | `Intensity` (+0x5C) × the object's fading alpha (+0x63); outside an interior also × SprBght (time cycle column 22) | 0xC1E200, 0xA32640 |
+| Size | `CoronaSize` (+0x40) × 5000 × 0.0005, half a side in metres. 0 draws nothing | 0xC1E200, 0xC1EE40 |
+| Place | Moved towards the camera from the lamp: 1 m for an object in an interior, its size otherwise (× 1 − the strength at 0x103F9A4, taken as 0) | 0xC1E200, 0xC1F5B3; `GTAIV.trace`: 16 of 16 to 1 mm; `GTAIV.1.trace`: 2.003 m and 1.001 m |
+| When | With the light's day/night flags, whether or not the light lights anything. No limit of distance (`GTAIV.1.trace`: 234 m) | 0xC1F9A0 |
+
+The draw (`deferred_lighting` technique `corona`, in `GTAIV.trace` draw 114115754) is ONE / ONE without depth test. The vertex program decides what shows:
+
+- Camera nearer than the corona's size: no test. Faded by sat(0.5 (f / size + 1)), f the distance along the view, and moved out to 0.1 m when closer.
+- Otherwise 12 Poisson points within 2 pixels of its middle are tested against the depth texture, and the corona is scaled by the share in front. At 1 % or less it collapses to a point.
+
+That depth holds only the solid scene: the forward draws before it write to another surface (`0x2cb64c80`, the texture's surface being `0x2db36a00`). So a corona shines through glass. In bc_1 the one in the hall lies behind the flat's glass and still shows.
+
+Not in SparkIV: the object's fading alpha (in `GTAIV.1.trace` only a few far objects, at 0.09–0.40 of 0.5), the types of light that blink by time (+0x58), the strength at 0x103F9A4 and the mirrored `paraboloid_corona`.
 
 ## Which program draws a lamp
 

@@ -47,6 +47,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public Vector3 SkyBottom { get; private init; }
     public Vector4 Water { get; private init; }
     public float FarClip { get; private init; }
+    /// <summary>SprBght (column 22): the strength of the coronas of lamps outside (see the page's gameCoronas).</summary>
+    public float SpriteBrightness { get; private init; }
     public float FogStart { get; private init; }
     public float SunMultiplier { get; private init; }
     /// <summary>How the picture is exposed: the lights' values (with their multipliers, up to 10) times this come out about 0 to 2.</summary>
@@ -227,6 +229,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         SkyTop = Rgb(9),
         SkyBottom = Rgb(12),
         FarClip = V(23),
+        SpriteBrightness = V(22),
         FogStart = V(24),
         Water = new Vector4(Rgb(31), V(34) / 255f),
         SunMultiplier = V(57),
@@ -436,6 +439,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         actorAmbient = ActorAmbient,
         directionalLightW = DirectionalLightW,
         globalScalarsW = GlobalScalarsW,
+        spriteBrightness = SpriteBrightness,
         // gDayNightEffects.x (GTAIV.exe 0x9CB895): seconds of the day / 43200 up to noon, then back down to 0.
         dayNight = hour <= 12 ? Math.Max(hour, 0) / 12f : Math.Max(0, 1 - (hour - 12) / 12f),
         tone = new

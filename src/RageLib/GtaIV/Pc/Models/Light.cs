@@ -44,7 +44,7 @@ namespace RageLib.GtaIV.Pc.Models
     /// <summary>How far it lights (OpenIV: Distance; the same lamps 3.3 to 4 m); 0 where not given.</summary>
     public float Distance { get; private set; }
 
-    /// <summary>How strong (OpenIV: _f58; 1 for most lamps, 0.4 for the track spots in Bernie's flat, up to 7).</summary>
+    /// <summary>How strong its corona is (OpenIV: _f58; 1 for most lamps, 0.4 for the track spots in Bernie's flat, up to 7).</summary>
     public float Intensity { get; private set; }
 
     /// <summary>A spot's inner and outer angle, in degrees, from its axis (half the cone: 50 is 100° across).</summary>

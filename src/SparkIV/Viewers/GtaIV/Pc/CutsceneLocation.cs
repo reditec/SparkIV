@@ -135,6 +135,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public byte[]? LightVolume { get; private set; }
 
+    /// <summary>The coronas' sprite's key (see <see cref="Corona"/>).</summary>
+    public const string CoronaKey = "mlight/corona";
+
+    /// <summary>
+    /// The sprite of the lamps' coronas: "corona" of pc\textures\coronas.wtd (GTAIV.exe: platform:/textures/coronas; 128 x
+    /// 128 DXT5 in the bc_1 trace GTAIV.trace, call 168093), as ModelScene.Raw makes it; null without it.
+    /// </summary>
+    public byte[]? Corona { get; private set; }
+
     /// <summary>
     /// The models' textures in packs of about <see cref="PackBytes"/> each (keys "mpack/0" ...), as the scene
     /// message lists them: the page asks for a few dozen instead of two thousand, one by one (bc_3: 10 s
@@ -174,6 +183,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (key == LightVolumeKey)
       {
         return LightVolume;
+      }
+      if (key == CoronaKey)
+      {
+        return Corona;
       }
       if (key.StartsWith(PackKey, StringComparison.Ordinal))
       {
@@ -643,6 +656,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       catch (Exception)
       {
         // Then no light volumes of that kind.
+      }
+      try
+      {
+        string coronas = Path.Combine(folder, "pc", "textures", "coronas.wtd");
+        if (System.IO.File.Exists(coronas))
+        {
+          using var textures = new RageLib.Textures.TextureFile();
+          textures.Open(coronas);
+          if (textures.Textures.FirstOrDefault(x => string.Equals(Path.GetFileNameWithoutExtension(x.Name.Substring(x.Name.LastIndexOf('/') + 1)), "corona", StringComparison.OrdinalIgnoreCase)) is RageLib.Textures.Texture corona)
+          {
+            location.Corona = ModelScene.Raw(corona);
+          }
+        }
+      }
+      catch (Exception)
+      {
+        // Then no coronas.
       }
       log?.Step("location: water and sky", location.Water.Count / 4 + " water quads");
       return location;
@@ -1340,8 +1370,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// (0 for a light all round). With them the interiors' rooms (by their numbers in the objects' room):
     /// the interior's place, the turn from the scene into it, the box there.
     /// </summary>
-    /// <summary>The "mapLights" message; <paramref name="volumeTexture"/>: the address of <see cref="LightVolume"/>, or null.</summary>
-    public object LightsMessage(string? volumeTexture = null)
+    /// <summary>
+    /// The "mapLights" message; <paramref name="volumeTexture"/> and <paramref name="coronaTexture"/>: the addresses
+    /// of <see cref="LightVolume"/> and <see cref="Corona"/>, or null.
+    /// </summary>
+    public object LightsMessage(string? volumeTexture = null, string? coronaTexture = null)
     {
       var lights = new List<object>();
       foreach (var obj in Objects)
@@ -1362,6 +1395,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             cone = light.Spot ? light.Falloff : 0f,
             hotSpot = light.Spot ? light.HotSpot : 0f,
             intensity = light.Intensity,
+            corona = light.CoronaSize,
             // As GTAIV.exe hands it to the deferred light (0xC1E200 → 0xABCCD0): the radius is Distance
             // (+0x38; none without it), the strength Range (+0x3C); Flags say when it is on (0xC1F9A0).
             radius = light.Distance,
@@ -1387,7 +1421,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         max = new[] { r.Max.X, r.Max.Y, r.Max.Z },
         portals = r.Portals.Select(q => new { centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To }).ToList(),
       }).ToList();
-      return new { type = "mapLights", lights, rooms, volumeTexture };
+      return new { type = "mapLights", lights, rooms, volumeTexture, coronaTexture };
     }
 
     private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));

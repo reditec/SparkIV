@@ -830,7 +830,7 @@ namespace SparkIV.WinUI.Viewers
           Lights.Add(new SceneLight(position, direction, light.Color[0] / 255f, light.Color[1] / 255f, light.Color[2] / 255f,
                                     light.IsSpot, light.Range, light.Falloff, meshIds, light.Distance, light.HotSpot, light.Intensity)
                      {
-                       Flags = light.Flags, VolumeIntensity = light.VolumeIntensity, VolumeSize = light.VolumeSize,
+                       Flags = light.Flags, CoronaSize = light.CoronaSize, VolumeIntensity = light.VolumeIntensity, VolumeSize = light.VolumeSize,
                        Tangent = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(light.Tangent.X, light.Tangent.Y, light.Tangent.Z), at),
                      });
         }
@@ -1337,6 +1337,9 @@ namespace SparkIV.WinUI.Viewers
     /// always; with 0x1 it fades (by day × (1 - N), by night × N); neither, never.
     /// </summary>
     public uint Flags { get; init; }
+
+    /// <summary>How big its corona is (half a side in metres); see the page's gameCoronas.</summary>
+    public float CoronaSize { get; init; }
 
     /// <summary>Its light volume's strength (times Range in the game) and size (times its radius); see RageLib's Light.</summary>
     public float VolumeIntensity { get; init; }
