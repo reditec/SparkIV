@@ -261,8 +261,10 @@
       if (vPosition.z < clipBelow) discard;
       // Beyond the cutscene's draw distance nothing (its [DRAW_DISTANCE] is its camera's far clip, GTAIV.exe
       // 0xD53280): cut off where it lies, not only whole objects (bc_3, section 3: the bridge's far end against
-      // the sky past 89 m). The water left as it was (the sky draws none below the horizon here yet).
-      if (drawReach > 0.0 && !water && !waterGrid && !shadowPass && !lampShadowPass && !parabolic && length(vPosition - eyeAt) > drawReach) discard;
+      // the sky past 89 m). The water left as it was (the sky draws none below the horizon here yet). Its depth
+      // along the view, as a far plane cuts, not its distance: at the picture's sides the game keeps buildings
+      // farther off (bc_3 s2 f786: SupLod_BkN_03, 844 m, at the left edge; the far plane 780 m, GTAIV.1.trace).
+      if (drawReach > 0.0 && !water && !waterGrid && !shadowPass && !lampShadowPass && !parabolic && dot(vPosition - eyeAt, -toEye) > drawReach) discard;
       // Lines have no light of their own: none in the light (its alpha 0), so the post effects take their colour
       // from the picture (lightAt), else the light of the surface behind them showed instead.
       if (lines) { outColor = vec4(color, 1.0); outLight = vec4(0.0); return; }

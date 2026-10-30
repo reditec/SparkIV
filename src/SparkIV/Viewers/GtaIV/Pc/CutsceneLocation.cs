@@ -398,9 +398,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                    index.Sizes.TryGetValue(p.Name, out var own) && Distance(p.Position) <= Math.Min(own.Draw, OutsideModels);
           }
           // A far version as far as the game draws it: its .ide distance times the LOD view distance (see
-          // LodViewDistance), up to the scene's draw distance.
+          // LodViewDistance), if any of it lies within the scene's draw distance (the camera's far plane cuts the
+          // rest): bc_3 s2 f786 (GTAIV.1.trace, draws 136285573/579) shows SupLod_BkN_08 and _03, centres 779
+          // and 844 m off, with the far plane at 780 m.
           float draw = index.Sizes.TryGetValue(p.Name, out var size) ? size.Draw * LodViewDistance : farRadius;
-          return Distance(p.Position) <= Math.Min(draw, farRadius);
+          return Distance(p.Position) <= draw && Distance(p.Position) - Bound(p.Name) <= farRadius;
         }
         var detail = new Dictionary<int, bool>();
         bool WantsDetail(int i)
@@ -419,9 +421,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           if (depth < 4 && WantsDetail(i))
           {
+            bool allIn = true;
             foreach (int c in below[i])
             {
-              Choose(c, true, depth + 1);
+              if (Wanted(c) || WantsDetail(c))
+              {
+                Choose(c, true, depth + 1);
+              }
+              else
+              {
+                allIn = false;
+              }
+            }
+            if (!allIn && (gaveWay || Wanted(i)) && AtHour(index.Placements[i].Name))
+            {
+              chosen.Add(i);
             }
           }
           else if ((gaveWay || Wanted(i)) && AtHour(index.Placements[i].Name))
