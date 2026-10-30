@@ -53,12 +53,33 @@ third field of its `.ide` line) **times the LOD view distance** of the graphics 
 - The detail distance (0x01160E98) gives another value, setting / 99 × 100 + 10 (0x0103F714, via 0xAEBD70); what it
   scales is not checked.
 
-**Evidence:** trace `GTAIV.1.trace` (bc_3, recorded at the highest settings), section 2, frame 786.
+**Evidence:** trace `GTAIV.1.trace` (bc_3), section 2, frame 786.
 - The game shows the roofs of the tower blocks 752 m off across the water. Their distant version `lod_bs_ten01` has
   an `.ide` distance of 550 m, so it is drawn only with a factor of at least 1.37.
 - With the factor 2.0, SparkIV draws them too. The reference's difference drops from 11.00 to 10.66; the other 22 of
   bc_3 and et01_ba stay within 0.03.
+- **Open:** in the same frame `LOD_mhb_cablebas` (also 550 m) 843 m off is not drawn, its district's super LOD
+  instead. That fits a factor of 1.37 to 1.53 rather than 2.0, so the traces may have been recorded at a lower
+  setting.
 
-**In SparkIV:** `CutsceneLocation.LodViewDistance` = 2.0, the highest setting, for the distant versions only. With
-the factor also on the models themselves (and without the 150 m limit `OutsideModels`), bc_3's pier roof came
-back, but et01_ba's toll booth lost its tinted panes. That is open.
+### What the cutscene camera cuts off, and which version of a group is drawn
+
+Found by leaving out draws of the same frame (`d3dretrace --ignore-calls`): the buildings behind the cranes that
+SparkIV missed are the district super LODs `SupLod_BkN_03` and `SupLod_BkN_08` (draws 136285579 and 136285573).
+Their centres are 844 and 779 m off.
+
+- **Far plane:** the cutscene's draw distance is the camera's far plane. The trace's projection gives 780 m there:
+  P22 = −1.0000641, P32 = −0.05, near 0.05 m. A far plane cuts by **depth along the view**, not by distance. At the
+  picture's sides that reaches up to a quarter farther.
+- **Groups:** a distant version counts if any of it (its `.ide` bounding sphere) lies within the draw distance, not
+  only its centre.
+- **Parents:** a parent whose children are only partly in reach stays drawn, and only the children in reach are
+  drawn with it.
+
+**In SparkIV:**
+- `CutsceneLocation.LodViewDistance` = 2.0, the highest setting, for the distant versions only.
+- `Wanted` and `Choose` (groups and parents) and the page's `drawReach` (the depth along the view) follow the rules
+  above.
+- bc_3 s2 f786 10.66 → 10.59, s1 f78.75 −0.03, s3 f357.25 +0.09 (only the sea's mirror); et01_ba unchanged.
+- **Open:** with the factor also on the models themselves (and without the 150 m limit `OutsideModels`), bc_3's pier
+  roof came back (s2 f436.75, s3 f506.5), but et01_ba's toll booth lost its tinted panes.
