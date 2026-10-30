@@ -397,8 +397,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             return Near(p.Name, p.Position) ||
                    index.Sizes.TryGetValue(p.Name, out var own) && Distance(p.Position) <= Math.Min(own.Draw, OutsideModels);
           }
-          float draw = index.Sizes.TryGetValue(p.Name, out var size) ? size.Draw : farRadius;
-          return Distance(p.Position) <= Math.Min(draw, farRadius);
+          // A far version as far as the game draws it: its .ide distance times the LOD view distance (see
+          // LodViewDistance), if any of it lies within the scene's draw distance (the camera's far plane cuts the
+          // rest): bc_3 s2 f786 (GTAIV.1.trace, draws 136285573/579) shows SupLod_BkN_08 and _03, centres 779
+          // and 844 m off, with the far plane at 780 m.
+          float draw = index.Sizes.TryGetValue(p.Name, out var size) ? size.Draw * LodViewDistance : farRadius;
+          return Distance(p.Position) <= draw && Distance(p.Position) - Bound(p.Name) <= farRadius;
         }
         var detail = new Dictionary<int, bool>();
         bool WantsDetail(int i)
@@ -417,9 +421,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           if (depth < 4 && WantsDetail(i))
           {
+            bool allIn = true;
             foreach (int c in below[i])
             {
-              Choose(c, true, depth + 1);
+              if (Wanted(c) || WantsDetail(c))
+              {
+                Choose(c, true, depth + 1);
+              }
+              else
+              {
+                allIn = false;
+              }
+            }
+            if (!allIn && (gaveWay || Wanted(i)) && AtHour(index.Placements[i].Name))
+            {
+              chosen.Add(i);
             }
           }
           else if ((gaveWay || Wanted(i)) && AtHour(index.Placements[i].Name))
@@ -857,6 +873,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     // Outside: how far models (not their far versions) are shown at most, in metres.
     private const float OutsideModels = 150;
+
+    // The game's "LOD view distance" setting as a factor on the far versions' .ide distances, at its highest
+    // setting (99, shown as 100), as the trace references were recorded: GTAIV.exe 0x59EEF0 sets it to
+    // setting / 99 x 1.275 + 0.725 (0x118D838), so 0.725 to 2.0. bc_3's tower blocks 752 m off (lod_bs_ten01,
+    // .ide 550 m) are drawn in the game's frame (s2 f786), here only with this factor.
+    private const float LodViewDistance = 2.0f;
 
     /// <summary>
     /// The map's files of a kind under <paramref name="sub"/> (pc\data ...) as the game loads them. An episode
