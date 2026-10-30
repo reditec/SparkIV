@@ -2912,7 +2912,12 @@
           // Mirrored in the water everything only from the front (the GTA IV trace GTAIV.1, bc_3: CULLMODE CW for all of
           // its ReflectTexture's objects, 74262957 to 74263295): from below the far versions' ground and the pier's deck
           // showed their sunlit tops through themselves, the game's mirror there sky and a dark underside.
-          if (((m.actor && m.baked && (!glassPass || (mat.glass && mat.vehicle))) || mapGlass || forwardMap || reflecting) && !castBox) {
+          // A map's solid objects only from the front as well (TLAD trace GTAIV.2, et01_aa s3 f49.75: all 87 draws of
+          // the G-buffer pass from 78363648 with CULLMODE CW): the potted plant's one-sided leaves (E1elizaLounge4,
+          // gta_default "grass", draw 78363967) showed their backs as leaves the game doesn't show.
+          // (Not the water: its quads are SparkIV's own, made from water.dat, whichever way they face.)
+          const mapSolid = m.baked && !m.actor && !glassPass && !mat.water;
+          if (((m.actor && m.baked && (!glassPass || (mat.glass && mat.vehicle))) || mapGlass || forwardMap || mapSolid || reflecting) && !castBox) {
             gl.enable(gl.CULL_FACE);
             gl.cullFace(gl.BACK);
             gl.frontFace(reflecting ? gl.CW : gl.CCW);
