@@ -58,9 +58,9 @@ third field of its `.ide` line) **times the LOD view distance** of the graphics 
   an `.ide` distance of 550 m, so it is drawn only with a factor of at least 1.37.
 - With the factor 2.0, SparkIV draws them too. The reference's difference drops from 11.00 to 10.66; the other 22 of
   bc_3 and et01_ba stay within 0.03.
+- The traces were recorded at the highest view distance (the user's setting), so the factor is 2.0.
 - **Open:** in the same frame `LOD_mhb_cablebas` (also 550 m) 843 m off is not drawn, its district's super LOD
-  instead. That fits a factor of 1.37 to 1.53 rather than 2.0, so the traces may have been recorded at a lower
-  setting.
+  instead. With 2.0 it would be in reach (1100 m), so another rule decides there (possibly streaming).
 
 ### What the cutscene camera cuts off, and which version of a group is drawn
 
