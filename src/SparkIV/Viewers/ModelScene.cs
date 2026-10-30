@@ -967,6 +967,9 @@ namespace SparkIV.WinUI.Viewers
         layerUvs = new float[vertices.Length * 6];
         layerWeights = new float[vertices.Length * 4];
         colors = new float[vertices.Length * 3];
+        // A vertex colour is a D3DCOLOR (GTA IV's vertex declarations, e.g. Bernie's head in trace GTAIV.trace,
+        // call 83213389: COLOR at offset 32, D3DDECLTYPE_D3DCOLOR): blue in the lowest byte, red in the third,
+        // as the shaders read it (the vertex buffer filled at call 83494538 matched byte for byte).
         for (int i = 0; i < vertices.Length; i++)
         {
           var t = vertices[i].TextureCoordinates;
@@ -979,11 +982,10 @@ namespace SparkIV.WinUI.Viewers
           layerWeights[i * 4 + 1] = t[layers].Y;
           layerWeights[i * 4 + 2] = layers + 1 < Vertex.MaxTextureCoordinates ? t[layers + 1].X : 0;
           layerWeights[i * 4 + 3] = layers + 1 < Vertex.MaxTextureCoordinates ? t[layers + 1].Y : 0;
-          // Red in the lowest byte (OpenIV's export of tmp_ci6_7_beach04: 236 231 231 for 0xffe7e7ec).
           uint color = vertices[i].DiffuseColor;
-          colors[i * 3] = (color & 0xFF) / 255f;
+          colors[i * 3] = ((color >> 16) & 0xFF) / 255f;
           colors[i * 3 + 1] = ((color >> 8) & 0xFF) / 255f;
-          colors[i * 3 + 2] = ((color >> 16) & 0xFF) / 255f;
+          colors[i * 3 + 2] = (color & 0xFF) / 255f;
         }
       }
 
@@ -1015,9 +1017,9 @@ namespace SparkIV.WinUI.Viewers
         for (int i = 0; i < vertices.Length; i++)
         {
           uint color = vertices[i].DiffuseColor;
-          colors[i * 3] = (color & 0xFF) / 255f;
+          colors[i * 3] = ((color >> 16) & 0xFF) / 255f;
           colors[i * 3 + 1] = ((color >> 8) & 0xFF) / 255f;
-          colors[i * 3 + 2] = ((color >> 16) & 0xFF) / 255f;
+          colors[i * 3 + 2] = (color & 0xFF) / 255f;
         }
       }
 
