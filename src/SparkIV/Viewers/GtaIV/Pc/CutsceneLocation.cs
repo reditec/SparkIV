@@ -389,13 +389,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             return false;
           }
           // A far version: named so (lod…, slod…) or the far version of others (SupLOD_Ks3_02, og_BS3blk02a_lod:
-          // bc_3's buildings across the water, 500 m off, were missing as models beyond OutsideModels).
+          // bc_3's buildings across the water, 500 m off, were missing as models beyond 150 m).
           if (!IsFar(p.Name) && !below.ContainsKey(i))
           {
-            // A model near, or as far as the game draws it (its .ide distance), up to OutsideModels: beyond,
-            // its coarse far version (sea floor and shore far versions lie above the water near the shore).
+            // A model near, or as far as the game draws it: its .ide distance times the LOD view distance as
+            // well (the pier's roof in bc_3 s2 f436 and s3 f506 is drawn in the game's frames; it was missing
+            // with the .ide distance alone, up to 150 m); beyond, its coarse far version.
             return Near(p.Name, p.Position) ||
-                   index.Sizes.TryGetValue(p.Name, out var own) && Distance(p.Position) <= Math.Min(own.Draw, OutsideModels);
+                   index.Sizes.TryGetValue(p.Name, out var own) && Distance(p.Position) <= own.Draw * LodViewDistance;
           }
           // A far version as far as the game draws it: its .ide distance times the LOD view distance (see
           // LodViewDistance), if any of it lies within the scene's draw distance (the camera's far plane cuts the
@@ -871,10 +872,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
     }
 
-    // Outside: how far models (not their far versions) are shown at most, in metres.
-    private const float OutsideModels = 150;
-
-    // The game's "LOD view distance" setting as a factor on the far versions' .ide distances, at its highest
+    // The game's "LOD view distance" setting as a factor on the .ide distances, at its highest
     // setting (99, shown as 100), as the trace references were recorded: GTAIV.exe 0x59EEF0 sets it to
     // setting / 99 x 1.275 + 0.725 (0x118D838), so 0.725 to 2.0. bc_3's tower blocks 752 m off (lod_bs_ten01,
     // .ide 550 m) are drawn in the game's frame (s2 f786), here only with this factor.

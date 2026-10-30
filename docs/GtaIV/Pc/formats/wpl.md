@@ -77,9 +77,16 @@ Their centres are 844 and 779 m off.
   drawn with it.
 
 **In SparkIV:**
-- `CutsceneLocation.LodViewDistance` = 2.0, the highest setting, for the distant versions only.
+- `CutsceneLocation.LodViewDistance` = 2.0, the highest setting, on the distant versions and on the models
+  themselves (a model up to its `.ide` distance × 2.0; the former 150 m limit is gone).
 - `Wanted` and `Choose` (groups and parents) and the page's `drawReach` (the depth along the view) follow the rules
   above.
 - bc_3 s2 f786 10.66 → 10.59, s1 f78.75 −0.03, s3 f357.25 +0.09 (only the sea's mirror); et01_ba unchanged.
-- **Open:** with the factor also on the models themselves (and without the 150 m limit `OutsideModels`), bc_3's pier
-  roof came back (s2 f436.75, s3 f506.5), but et01_ba's toll booth lost its tinted panes.
+- With the factor on the models: bc_3's pier roof is back (s2 f436.75 −0.06, s3 f506.5 −0.07), s2 f786 −0.10;
+  et01_ba f1292.25 −0.16, the rest within 0.05.
+- **Pitfall found on the way:** a model whose texture isn't in its own dictionaries makes SparkIV search all
+  dictionaries of its archive's folder. Those were kept for the other models by name alone, but the same name can
+  stand for different dictionaries in different archives: GTA IV's `amenitie.img` (searched for a telegraph pole,
+  `CJ_telgrphpole`, 361 m off) and TLAD's `e1_xref.img` both hold a `bm_tollbooth.wtd`, with a different `bm_glass`.
+  et01_ba's booth then took GTA IV's glass and its panes lost their tint. The dictionaries found by searching are now
+  kept by archive folder and name (`ModelScene.SharedTextures.Searched`).

@@ -173,7 +173,7 @@ namespace SparkIV.WinUI.Viewers
         _folderSearched = true;
         foreach (var file in _folder.OfType<File>().Where(f => f.Name.EndsWith(".wtd", StringComparison.OrdinalIgnoreCase)).Take(MaxDictionariesSearched))
         {
-          OpenDictionary(file);
+          OpenSearchedDictionary(file);
         }
         return FindInDictionaries(name, out source);
       }
@@ -186,7 +186,9 @@ namespace SparkIV.WinUI.Viewers
     private byte[] Png(Texture texture, string source)
     {
       string cacheKey = source + "|" + texture.Name + (_rawTextures ? "|raw" : "");
-      if (_shared != null && source != EmbeddedSource && _shared.Pngs.TryGetValue(cacheKey, out var cached))
+      // (Not one found by searching the folder: its dictionary's name may stand for another elsewhere, see Searched.)
+      bool share = _shared != null && source != EmbeddedSource && !_searched.Contains(source);
+      if (share && _shared!.Pngs.TryGetValue(cacheKey, out var cached))
       {
         return cached;
       }
@@ -197,9 +199,9 @@ namespace SparkIV.WinUI.Viewers
         _shared.TextureSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
         _shared.TexturesMade++;
       }
-      if (_shared != null && source != EmbeddedSource)
+      if (share)
       {
-        _shared.Pngs[cacheKey] = bytes;
+        _shared!.Pngs[cacheKey] = bytes;
       }
       return bytes;
     }
@@ -244,6 +246,13 @@ namespace SparkIV.WinUI.Viewers
     public sealed class SharedTextures : IDisposable
     {
       internal Dictionary<string, TextureFile> Opened { get; } = new Dictionary<string, TextureFile>(StringComparer.OrdinalIgnoreCase);
+      /// <summary>
+      /// The dictionaries opened while searching a folder for a texture still missing (see FindTexture), by their
+      /// folder and name: not by name alone, as another archive may hold a dictionary of the same name that is
+      /// another (GTA IV's amenitie.img and TLAD's e1_xref.img both have a bm_tollbooth.wtd, their bm_glass
+      /// different: a telegraph pole searching the one gave et01_ba's toll booth GTA IV's glass).
+      /// </summary>
+      internal Dictionary<(Directory Folder, string Name), TextureFile> Searched { get; } = new Dictionary<(Directory, string), TextureFile>();
       internal Dictionary<string, byte[]> Pngs { get; } = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
       /// <summary>
       /// Model dictionaries (.wdd) read once for all the models taken from them (a district's far versions:
@@ -260,11 +269,12 @@ namespace SparkIV.WinUI.Viewers
 
       public void Dispose()
       {
-        foreach (var textures in Opened.Values)
+        foreach (var textures in Opened.Values.Concat(Searched.Values))
         {
           textures.Dispose();
         }
         Opened.Clear();
+        Searched.Clear();
         foreach (var models in ModelDictionaries.Values)
         {
           models.Dispose();
@@ -289,6 +299,46 @@ namespace SparkIV.WinUI.Viewers
     }
 
     private readonly HashSet<string> _opened = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // The names of the dictionaries opened by searching the folder (see OpenSearchedDictionary).
+    private readonly HashSet<string> _searched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A dictionary of the folder opened while searching it for a texture still missing: kept for the other
+    /// models by its folder and name (<see cref="SharedTextures.Searched"/>), not standing for a dictionary of
+    /// that name the game gives another model.
+    /// </summary>
+    private void OpenSearchedDictionary(File file)
+    {
+      if (!_opened.Add(file.Name))
+      {
+        return;  // Already among the dictionaries.
+      }
+      TextureFile? textures = null;
+      if (_shared == null || !_shared.Searched.TryGetValue((file.ParentDirectory, file.Name), out textures))
+      {
+        try
+        {
+          long started = System.Diagnostics.Stopwatch.GetTimestamp();
+          textures = new TextureFile();
+          textures.Open(new MemoryStream(file.GetData()));
+          if (_shared != null)
+          {
+            _shared.Searched[(file.ParentDirectory, file.Name)] = textures;
+            _shared.DictionarySeconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
+          }
+        }
+        catch (Exception)
+        {
+          textures?.Dispose();
+          return;
+        }
+      }
+      _dictionaries.Add(textures);
+      _dictionaryNames.Add(file.Name);
+      _searched.Add(file.Name);
+      SourceFiles.Add(file);
+    }
 
     private TextureFile? OpenDictionary(File file)
     {
@@ -563,7 +613,7 @@ namespace SparkIV.WinUI.Viewers
       finally
       {
         // The shared ones are kept for the next model.
-        foreach (var textures in dictionaries.Where(d => shared == null || !shared.Opened.ContainsValue(d)))
+        foreach (var textures in dictionaries.Where(d => shared == null || !shared.Opened.ContainsValue(d) && !shared.Searched.ContainsValue(d)))
         {
           textures.Dispose();
         }
