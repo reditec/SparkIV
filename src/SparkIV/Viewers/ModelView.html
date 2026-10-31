@@ -322,9 +322,12 @@
       // A map *_reflect shader's mirrored surroundings, added to its albedo before it is lit (GTA IV (PC):
       // gta_spec_reflect's G-buffer pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120): its environment
       // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the vertex's normal (the world's z up), x the
-      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower.
+      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower. See-through glass by its
+      // bumped normal (the GTA IV trace GTAIV.trace, bc_1's bedroom pane, PS 0x2cc5d340).
+      vec3 vertexN = n;
+      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       if (useEnv && useTexture) {
-        vec3 r = reflect(normalize(vPosition - eyeAt), n);
+        vec3 r = reflect(normalize(vPosition - eyeAt), textureAlpha ? n : vertexN);
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
         vec3 mirroredEnv = texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
         // Drawn see-through (forward, blended by the texture's x the vertex's alpha), divided by that alpha first,
@@ -334,7 +337,6 @@
         if (textureAlpha) { float seen = base.a * vAlpha; mirroredEnv *= seen >= 0.01 ? 1.0 / seen : 100.0; }
         base.rgb += mirroredEnv;
       }
-      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
@@ -1408,6 +1410,7 @@
   let mapLights = [];
   // The light volumes' lookup texture (lights_occluders.wtd's "volume"), once loaded.
   let lightVolumeLookup = null;
+  let coronaSprite = null, mapCoronas = [];
   // How bright a lamp is: its colour (0 to 1) times its strength as the game adds it to the light.
   const MapLightScale = 0.6;
   const MaxLights = 40;
@@ -1945,11 +1948,12 @@
 
   function setMapLights(list, roomList) {
     rooms = roomList || [];
+    // The coronas (the game's file: gameCoronas), also of lights that light nothing (street lamps by day have none).
+    mapCoronas = (list || []).filter(l => l.corona > 0 && l.intensity > 0).map(l => ({ at: l.position, rgb: l.color, size: l.corona * 2.5, intensity: l.intensity, flags: l.flags || 0, room: roomOf(l.position) }));
     mapLights =(list || []).filter(l => l.range > 0).map(l => ({
       at: l.position, dir: norm(l.direction), range: l.range,
-      // Its colour. Not times _f58 (most likely its strength: 1 for most lamps, 0.4 for Bernie's track
-      // spots): with it the spots stayed far too dark beside the game's pictures of bc_1, without it the
-      // hall, the relief and the rooms come out as bright as there.
+      // Its colour. Not times _f58: that is its corona's strength (GTAIV.exe 0xC1E200; 1 for most lamps, 0.4 for
+      // Bernie's track spots, see gameCoronas).
       color: l.color.map(c => c * MapLightScale),
       // The model's angles are from the spot's axis (bc_1's track spots: 50 outer, 32 inner, so 100° across;
       // read as the whole cone the grey relief in Bernie's flat stayed dull where the game lights it). The
@@ -2019,6 +2023,27 @@
       list.push({ at: m.at, dir: m.dir, tangent: m.tangent, rgb: m.rgb, radius: reach, strength: m.volume[0], cone: m.coneDegrees, lookup });
     }
     return list.length ? { list, lookup: lightVolumeLookup, matrix: vp.matrix, eye: vp.eye, near: vp.near, far: vp.far, exposure: sky ? sky.exposure || 1 : 1 } : null;
+  }
+
+  // The lamps' coronas to draw now (the game's file: gameCoronas): those on by day (flag 0x20, 0xC1F9A0; the page's
+  // scenes are by day) and of the camera's interior as lightVolumesNow takes them. A lamp of an interior: 1 m towards
+  // the camera, as strong as it is; any other its size towards the camera, x SprBght (Light_FromEffect).
+  function coronasNow(vp) {
+    if (!showSceneLights || !coronaSprite || !mapCoronas.length || !visible.size) return null;
+    const camRoom = rooms.length ? roomOf(vp.eye) : -1;
+    const camAt = camRoom >= 0 ? rooms[camRoom].at : null;
+    const otherInterior = r => camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2]);
+    const list = [];
+    for (const m of mapCoronas) {
+      if (!(m.flags & 0x20) || otherInterior(m.room)) continue;
+      const inside = m.room >= 0;
+      const away = [vp.eye[0] - m.at[0], vp.eye[1] - m.at[1], vp.eye[2] - m.at[2]];
+      const d = Math.hypot(away[0], away[1], away[2]);
+      if (d < 1e-3) continue;
+      const pull = (inside ? 1 : m.size) / d;
+      list.push({ at: [0, 1, 2].map(k => m.at[k] + away[k] * pull), rgb: m.rgb, size: m.size, strength: m.intensity * (inside || !sky ? 1 : sky.spriteBrightness ?? 1) });
+    }
+    return list.length ? { list, sprite: coronaSprite, matrix: vp.matrix, eye: vp.eye, right: vp.right, up: vp.up, forward: vp.forward, exposure: sky ? sky.exposure || 1 : 1 } : null;
   }
 
   function cutLightsNow() {
@@ -2651,6 +2676,7 @@
       for (const pass of ["solid", "water", "glass"]) {
         const glassPass = pass === "glass", waterPass = pass === "water";
         if (glassPass && (mapPass || castBox)) continue;
+        if (waterPass && !reflecting && !mapPass && !castBox && typeof gamePost === "object" && gamePost && sceneFramebuffer === gamePost.ms) gameKeepSolidDepth();
         if (waterPass) {
           if (!waterLater) continue;
           gl.bindFramebuffer(gl.READ_FRAMEBUFFER, gamePost.ms);
@@ -2791,6 +2817,8 @@
           // forward, after the deferred lights, with only the lamps the game hands such a draw (see forwardLit:
           // et01_aa's sheer curtain ab_comclub_curttl_projcurtain2_a by Elizabeta's table lamp took its 66 and
           // glowed pink; without any lamps it was too dark).
+          // (In an interior the game's glass program does have lamps: bc_1's bedroom pane, GTAIV.trace, draw 114115710,
+          // takes 4 spots and 2 lamps of the flat. Lit by them here, the pane's picture didn't change.)
           const forwardMap = glassPass && m.baked && !m.actor && !mat.vehicle && !mat.decal && !mat.emissive && outside;
           gl.uniform1i(loc.sceneLights, mapGlass ? 0 : lightsNow.length);
           gl.uniform1i(loc.forwardLit, forwardMap && !mapGlass);
@@ -3228,7 +3256,7 @@
       gl.bindVertexArray(null);
       // Outside: the eye's adaptation to this picture, for the next (the game's file: adaptTone); stopped,
       // drawn again at once with it.
-      if (postOn ? gamePostEnd(w, h, playback.playing, vp.depthOfField, lightVolumesNow(vp)) : outside && adaptTone(w, h, playback.playing)) draw();
+      if (postOn ? gamePostEnd(w, h, playback.playing, vp.depthOfField, lightVolumesNow(vp), coronasNow(vp)) : outside && adaptTone(w, h, playback.playing)) draw();
       // Water in the picture moves all the time, also while the cutscene stands still: the next frame then.
       if (waterShown && !playback.playing) draw();
     });
@@ -3427,6 +3455,13 @@
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
           lightVolumeLookup = t;
+        });
+        // The coronas' sprite, clamped as the bc_1 trace GTAIV.trace draws it (calls 114115745, 746).
+        if (m.coronaTexture && !coronaSprite) loadTexture(m.coronaTexture, t => {
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          coronaSprite = t;
         });
       }
       else if (m.type === "sky") { setSky(m); }

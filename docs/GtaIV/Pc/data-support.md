@@ -95,6 +95,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - Solid emissives in the G-buffer do **not** glow, they are only lit (et01_aa trace, program 14).
   - Transparent or glass emissives (forward-drawn, PS 0x24B6EE60) glow **without** the day/night factor (bc_1 by day: glass bowl glows, fabric shade does not).
   - What exactly the game bases this on (bucket, pass) is not confirmed in the exe. |
+| `gta_glass`: `EnvironmentSampler` | used (since 2026-10-30) | Bernie's bedroom pane (`GTAIV.trace`, draw 114115710, PS 0x2cc5d340): the environment texture × `specularColorFactor` × `reflectivePower` ÷ alpha is added to the albedo and lit with it, read by the normal-mapped normal. Without it the pane was up to 6 levels too dark, while what lies behind it matched to the pixel. Its shader also takes lamps (4 spots and 2 point lights there); lit by them in SparkIV, the pane didn't change, so they aren't used. `gta_glass_emissive` has the sampler too, but the game draws it only as its glow (draw 114115061), so it isn't used there. `gta_glass_spec` has none. |
 | `gta_ped_skin(_blendshape)`: `SubColor`, `SubScatWrap`, `SubScatWidth` | used (since 2026-10-12) | Program 10: albedo + 0.5 × SubColor × texture alpha in a band at the shadow boundary (formula in the code). Stencil value 1 in the GBuffer; pass 1 of the spot lights lights only this value. |
 
 ### Outdoor lighting (measured in the D3D capture `GTAIV.1.trace`, bc_3)

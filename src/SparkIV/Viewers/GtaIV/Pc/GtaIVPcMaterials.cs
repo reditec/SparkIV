@@ -139,8 +139,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120: EnvironmentSampler s2).
     public static readonly uint EnvironmentSampler = GxtFile.Hash("EnvironmentSampler");
 
-    /// <summary>A map shader that adds its environment texture to the albedo (gta_spec_reflect, gta_normal_spec_reflect, ...).</summary>
-    public static bool IsMapReflect(string shader) => shader.Contains("_reflect", StringComparison.OrdinalIgnoreCase) && !IsVehicle(shader);
+    /// <summary>
+    /// A map shader that adds its environment texture to the albedo (gta_spec_reflect, gta_normal_spec_reflect, ...; and
+    /// plain gta_glass, whatever its name says: Bernie's bedroom pane, the GTA IV trace GTAIV.trace, draw 114115710, PS
+    /// 0x2cc5d340). Not gta_glass_spec, which has none, nor gta_glass_emissive: it has the sampler, but the game draws it
+    /// only as its glow (the same trace's lamp glass km_bernilite, draw 114115061: texture x vertex colour x multiplier).
+    /// </summary>
+    public static bool IsMapReflect(string shader) =>
+      (shader.Contains("_reflect", StringComparison.OrdinalIgnoreCase) || shader.Equals("gta_glass", StringComparison.OrdinalIgnoreCase)) && !IsVehicle(shader);
 
     // A vehicle's "matdiffusecolor": (2, slot, slot) a placeholder for one of the vehicle's colours (the
     // game's shader multiplies the texture by it: gta_vehicle_mesh's pixel shader, texture x c66).

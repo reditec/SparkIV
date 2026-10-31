@@ -1215,7 +1215,7 @@ function gamePostBegin(w, h) {
   }
   const post = gamePost;
   if (post.w !== w || post.h !== h) {
-    for (const t of [post.picture, post.light, post.depth, post.quarter, post.blurred]) if (t) gl.deleteTexture(t);
+    for (const t of [post.picture, post.light, post.depth, post.solidDepth, post.quarter, post.blurred]) if (t) gl.deleteTexture(t);
     for (const r of [post.msPicture, post.msLight, post.msDepth]) if (r) gl.deleteRenderbuffer(r);
     const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
     const rb = format => { const r = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, r); gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, format, w, h); return r; };
@@ -1237,6 +1237,14 @@ function gamePostBegin(w, h) {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH24_STENCIL8, w, h, 0, gl.DEPTH_STENCIL, gl.UNSIGNED_INT_24_8, null);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, post.depth, 0);
+    // The depth of the solid scene alone, as it stands before the water and the glass (see gameCoronas).
+    post.solidDepth = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, post.solidDepth);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH24_STENCIL8, w, h, 0, gl.DEPTH_STENCIL, gl.UNSIGNED_INT_24_8, null);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    post.solidFrame = post.solidFrame || gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, post.solidFrame);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, post.solidDepth, 0);
     post.qw = Math.max(1, w >> 2); post.qh = Math.max(1, h >> 2);
     post.quarter = gamePostTarget(post.qw, post.qh, gl.RGBA16F, gl.HALF_FLOAT, gl.LINEAR);
     post.blurred = gamePostTarget(post.qw, post.qh, gl.RGBA16F, gl.HALF_FLOAT, gl.LINEAR);
@@ -1296,8 +1304,9 @@ function gameGrainTexture() {
 // composite). Outside cutscenes its fourth value (0x931560: the toggle at 0x11A28F0, 1 in the game recorded)
 // turns it off, and with it the G-buffer's softening (GB2.w). The pass's motion blur (gDirectionalMotionBlurLength)
 // is 0 in all four traces, so it isn't here.
-// volumes: the lamps' light volumes to add (see gameLightVolumes), or null.
-function gamePostEnd(w, h, playing, depthOfField, volumes) {
+// volumes: the lamps' light volumes to add (see gameLightVolumes), or null; coronas: the lamps' coronas (see
+// gameCoronas), or null.
+function gamePostEnd(w, h, playing, depthOfField, volumes, coronas) {
   const post = gamePost;
   sceneFramebuffer = null;
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, post.ms);
@@ -1309,6 +1318,7 @@ function gamePostEnd(w, h, playing, depthOfField, volumes) {
   if (depthOfField || volumes) gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.STENCIL_TEST); gl.disable(gl.CULL_FACE);
   if (volumes) gameLightVolumes(post, w, h, volumes);
+  if (coronas) gameCoronas(post, w, h, coronas);
   gl.bindVertexArray(post.vao);
   const pass = (shader, frame, vw, vh, textures, set) => {
     gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
@@ -1506,6 +1516,117 @@ function gameLightVolumes(post, w, h, volumes) {
     gl.uniform3f(v.u.color, l.rgb[0] * k, l.rgb[1] * k, l.rgb[2] * k);
     gl.bindVertexArray(m.vao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, m.count);
+  }
+  gl.disable(gl.BLEND);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.bindVertexArray(post.vao);
+}
+
+// The solid scene's depth, kept before the water and the glass are drawn (for gameCoronas).
+function gameKeepSolidDepth() {
+  const post = gamePost;
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, post.ms);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, post.solidFrame);
+  gl.blitFramebuffer(0, 0, post.w, post.h, 0, 0, post.w, post.h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, post.ms);
+}
+
+// Lamps' coronas, added to the light after the scene as the game's deferred_lighting draws them (technique corona;
+// the bc_1 trace GTAIV.trace, f414.25: draw 114115754, ONE / ONE, no depth test, sprite "corona" of coronas.wtd,
+// the depth texture 0x46363ae0 at the vertex sampler 0). That draw alone is what lay over Bernie's flat: without it
+// the game's picture equals SparkIV's across the room. That depth is the solid scene's: the forward draws before it
+// write to another surface (0x2cb64c80, the texture's being 0x2db36a00), so a corona shines through the flat's glass.
+// Every 2dfx light hands one in (Light_FromEffect 0xC1E200 -> 0xC1F020):
+// - its colour the light's bytes, its strength the light's Intensity (+0x5C), for an object outside an interior x the
+//   time cycle's SprBght (0.1 x the column x 10, as 0xAEFEB0 keeps it), x the object's fading alpha (+0x63: not here,
+//   in the bc_3 trace GTAIV.1 only the few far ones at their LOD's distance, 0.09 to 0.40 of 0.5); its size CoronaSize
+//   (+0x40) x 5000 x 0.0005 (0xC1EE40) half a side; those of size 0 (the bc_1 trace's 11 of 16) draw nothing;
+// - its place towards the camera from the lamp, in an interior 1 m (all 16 in that trace to 1 mm, whatever their
+//   size), else its size (x 1 less the modifier's strength 0x103F9A4, taken as 0);
+// - no limit of distance: the bc_3 trace draws them to 234 m, where the object is drawn;
+// - a quad facing the camera (its right and up);
+// - the vertex program (read from the trace, its VS 0x2dc06a80): nearer to the camera than its size, no depth
+//   test; x sat(0.5 (f / size + 1)) for f, its distance along the view, below its size, and below 0.1 m in front moved
+//   out to there. Else 12 points of the Poisson disc 2 pixels round its middle against the frame's depth, x their
+//   share in front, and collapsed to a point where that is 0.01 or less;
+// - the pixel: the sprite x colour x strength. Here x Exposure (the page's light is the game's x Exposure).
+// coronas: { list: [{ at, rgb, size, strength }], sprite, matrix, eye, right, up, forward, exposure }.
+let corona = null;
+function gameCoronas(post, w, h, coronas) {
+  if (!corona) {
+    const vs = `#version 300 es
+      precision highp float;
+      uniform mat4 viewProjection; uniform vec3 eye; uniform vec3 viewRight; uniform vec3 viewUp; uniform vec3 viewForward;
+      uniform vec3 at; uniform float size; uniform vec3 color; uniform vec2 pixel;
+      uniform highp sampler2D depth;
+      out vec2 uv; out vec3 tint;
+      const vec2 Poisson[12] = vec2[12](vec2(-0.326212, -0.40581), vec2(-0.840144, -0.07358), vec2(-0.695914, 0.457137),
+        vec2(-0.203345, 0.620716), vec2(0.96234, -0.194983), vec2(0.473434, -0.480026), vec2(0.519456, 0.767022),
+        vec2(0.185461, -0.893124), vec2(0.507431, 0.064425), vec2(0.89642, 0.412458), vec2(-0.32194, -0.932615),
+        vec2(-0.791559, -0.59771));
+      const vec2 Corners[6] = vec2[6](vec2(-1, -1), vec2(1, -1), vec2(1, 1), vec2(1, 1), vec2(-1, 1), vec2(-1, -1));
+      void main() {
+        vec2 corner = Corners[gl_VertexID];
+        vec3 place = at + (viewRight * corner.x + viewUp * corner.y) * size;
+        float seen = 1.0;
+        if (length(at - eye) < size) {
+          float f = dot(viewForward, at - eye);
+          if (f < size) {
+            seen = clamp(0.5 * (f / size + 1.0), 0.0, 1.0);
+            if (f < 0.1) place += viewForward * (0.1 - f);
+          }
+        } else {
+          vec4 clip = viewProjection * vec4(at, 1.0);
+          vec3 ndc = clip.xyz / clip.w;
+          seen = 0.0;
+          for (int i = 0; i < 12; i++) {
+            vec2 p = clamp(ndc.xy + pixel * Poisson[i] * 2.0, -0.997, 0.997);
+            if (ndc.z * 0.5 + 0.5 < textureLod(depth, p * 0.5 + 0.5, 0.0).r) seen += 1.0 / 12.0;
+          }
+          if (clip.w <= 0.0 || seen <= 0.01) { seen = 0.0; place = at; }
+        }
+        gl_Position = viewProjection * vec4(place, 1.0);
+        tint = color * seen;
+        uv = corner * 0.5 + 0.5;
+      }`;
+    const fs = `#version 300 es
+      precision highp float;
+      in vec2 uv; in vec3 tint; out vec4 outColor;
+      uniform sampler2D sprite;
+      void main() { outColor = vec4(texture(sprite, uv).rgb * tint, 0.0); }`;
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    const u = {};
+    for (const n of ["viewProjection", "eye", "viewRight", "viewUp", "viewForward", "at", "size", "color", "pixel", "depth", "sprite"]) u[n] = gl.getUniformLocation(p, n);
+    corona = { p, u, frame: gl.createFramebuffer(), vao: gl.createVertexArray() };
+  }
+  const c = corona;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, c.frame);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, post.light, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  gl.viewport(0, 0, w, h);
+  gl.useProgram(c.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, post.solidDepth);
+  gl.uniform1i(c.u.depth, 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, coronas.sprite);
+  gl.uniform1i(c.u.sprite, 1);
+  gl.uniformMatrix4fv(c.u.viewProjection, false, coronas.matrix);
+  gl.uniform3fv(c.u.eye, coronas.eye);
+  gl.uniform3fv(c.u.viewRight, coronas.right);
+  gl.uniform3fv(c.u.viewUp, coronas.up);
+  gl.uniform3fv(c.u.viewForward, coronas.forward);
+  gl.uniform2f(c.u.pixel, 1 / w, 1 / h);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.bindVertexArray(c.vao);
+  for (const l of coronas.list) {
+    gl.uniform3fv(c.u.at, l.at);
+    gl.uniform1f(c.u.size, l.size);
+    const k = l.strength * coronas.exposure;
+    gl.uniform3f(c.u.color, l.rgb[0] * k, l.rgb[1] * k, l.rgb[2] * k);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
   gl.disable(gl.BLEND);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);

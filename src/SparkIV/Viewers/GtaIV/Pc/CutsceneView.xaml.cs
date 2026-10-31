@@ -509,7 +509,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _pageWaitFor = "page: the location's textures uploaded";
       }
       Post(scene);
-      Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? Host + CutsceneLocation.LightVolumeKey : null));
+      Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? Host + CutsceneLocation.LightVolumeKey : null,
+                                            _document.Location.Corona != null ? Host + CutsceneLocation.CoronaKey : null));
       // The light of the game's time cycle (at OutsideWeather and OutsideHour), and for each room of
       // the location as its time cycle modifier changes it: the page lights by the one of the room the camera
       // is in, as the game does, inside the same way as outside.
