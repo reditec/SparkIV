@@ -1206,6 +1206,7 @@ namespace SparkIV.WinUI.Viewers
         Bumpiness = VectorParameter(material, GtaIVPcMaterials.Bumpiness)?.X ?? 1,
         SpecularPower = VectorParameter(material, GtaIVPcMaterials.SpecularFactor)?.X ?? 0,
         SpecularIntensity = VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor)?.X ?? 0,
+        SpecularFlat = GtaIVPcMaterials.IsFlatSpecular(shader),
         SpecularMask = mask == null ? new[] { 1f, 0f, 0f } : new[] { mask.Value.X, mask.Value.Y, mask.Value.Z },
         DirtMask = GtaIVPcMaterials.IsDirtDecal(shader)
           ? (VectorParameter(material, GtaIVPcMaterials.DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
@@ -1217,7 +1218,8 @@ namespace SparkIV.WinUI.Viewers
         DirtColor = VectorParameter(material, GtaIVPcMaterials.DirtColor) is { } dirtColour ? new[] { dirtColour.X, dirtColour.Y, dirtColour.Z } : new[] { 0.23f, 0.22f, 0.2f },
         ReflectivePower = (VectorParameter(material, GtaIVPcMaterials.ReflectivePowerED) ?? VectorParameter(material, GtaIVPcMaterials.ReflectivePower))?.X ?? 0,
         HasSpecular2 = vehicle && VectorParameter(material, GtaIVPcMaterials.Specular2ColorIntensityED) != null,
-        VehicleShine = vehicle ? GtaIVPcMaterials.VehicleShineOf(shader) : null,
+        VehicleShine = vehicle ? GtaIVPcMaterials.VehicleShineOf(shader,
+          VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor)?.X ?? 0, VectorParameter(material, GtaIVPcMaterials.SpecularFactor)?.X ?? 0) : null,
         EmissiveMultiplier = GtaIVPcMaterials.IsEmissive(shader) ? VectorParameter(material, GtaIVPcMaterials.EmissiveMultiplier)?.X : null,
         EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
         EmissiveStrong = GtaIVPcMaterials.IsEmissiveStrong(shader),
@@ -1450,6 +1452,9 @@ namespace SparkIV.WinUI.Viewers
     public float SpecularPower { get; init; }
     public float SpecularIntensity { get; init; }
 
+    /// <summary>Whether it shines without a specular map, as if a white one were set (see GtaIV.Pc.GtaIVPcMaterials.IsFlatSpecular).</summary>
+    public bool SpecularFlat { get; init; }
+
     /// <summary>Which channels of the specular map hold the shine (usually red only).</summary>
     public float[] SpecularMask { get; init; } = { 1, 0, 0 };
 
@@ -1524,6 +1529,7 @@ namespace SparkIV.WinUI.Viewers
       bumpiness = Bumpiness,
       specularPower = SpecularPower,
       specularIntensity = SpecularIntensity,
+      specularFlat = SpecularFlat,
       specularMask = SpecularMask,
       dirtMask = DirtMask,
       vehicle = Vehicle,

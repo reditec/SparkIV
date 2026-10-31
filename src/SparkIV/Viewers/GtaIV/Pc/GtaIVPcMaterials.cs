@@ -86,14 +86,27 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     ///   reflectivePowerED x matDiffuseColor2.w x 0.0025, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w
     ///   x 0.01953125): (0.005, 10), almost no shine. With paint's numbers instead, et01_ba's Presidente showed light
     ///   grey seats behind Jim where the game's are near black (#14; the TLAD trace's frame Present 202699634).
+    /// - gta_vehicle_tire, deferred_draw: GB2.x = 0.5 x dot x reflectivePowerED x 1.4 (c1.x) x (1 - dirt) x
+    ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.09765625): (1.4, 50).
+    /// - gta_vehicle_shuts, deferred_draw: GB2.x = dot x reflectivePowerED x matDiffuseColor2.w x 0.075, GB2.y =
+    ///   sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.37109375): (0.15, 190), as paint's.
+    /// - gta_vehicle_badges and gta_vehicle_lightsemissive, deferred_draw: GB2.x = 0.5 x min(dot x reflectivePowerED x
+    ///   0.225, 1) (x (1 - dirt)) x matDiffuseColor2.w, GB2.y as shuts': (0.225, 190), the strength at most 1 (the third
+    ///   number 2).
+    /// - gta_vehicle_chrome, deferred_draw: GB2.x = 0.5 x dot x specularColorFactor x reflectivePowerED x (1 - dirt) x
+    ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x specularFactor x reflectivePowerED x matDiffuseColor2.w / 512): the
+    ///   material's own (specularColorFactor, specularFactor).
     /// matDiffuseColor2.w is taken as its .fxc default, 1 (what the game sets at run time is not traced).
-    /// Null for the other vehicle shaders (not read; the page keeps paint's numbers for them).
+    /// (All read with tools/fxc-dump.py, docs/GtaIV/Pc/formats/fxc.md.) Null for the other vehicle shaders.
     /// </summary>
-    public static float[]? VehicleShineOf(string shader) => shader.ToLowerInvariant() switch
+    public static float[]? VehicleShineOf(string shader, float specularColorFactor, float specularFactor) => shader.ToLowerInvariant() switch
     {
-      "gta_vehicle_paint1" or "gta_vehicle_paint2" or "gta_vehicle_paint3" => new[] { 0.15f, 190f, 0f },
+      "gta_vehicle_paint1" or "gta_vehicle_paint2" or "gta_vehicle_paint3" or "gta_vehicle_shuts" => new[] { 0.15f, 190f, 0f },
       "gta_vehicle_mesh" => new[] { 1f, 50f, 0f },
+      "gta_vehicle_tire" => new[] { 1.4f, 50f, 0f },
       "gta_vehicle_interior" or "gta_vehicle_interior2" => new[] { 0.005f, 10f, 0f },
+      "gta_vehicle_badges" or "gta_vehicle_lightsemissive" => new[] { 0.225f, 190f, 2f },
+      "gta_vehicle_chrome" => new[] { specularColorFactor, specularFactor, 0f },
       "gta_vehicle_vehglass" => new[] { 0.225f, 190f, 1f },
       _ => null,
     };
@@ -103,6 +116,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// takes the light from around by (gta_ped.fxc's vertex shader: 1 + gs2.y x gs2.z x (red x gs.z - 1)).
     /// </summary>
     public static bool IsPed(string shader) => shader.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// gta_normal and rage_default: shine without a specular map. Their G-buffer pass (deferred_draw) writes GB2.x =
+    /// 0.5 x specularColorFactor and GB2.y = sqrt(specularFactor / 512), as gta_normal_spec does with a white
+    /// specular map (tools/fxc-dump.py, docs/GtaIV/Pc/formats/fxc.md).
+    /// </summary>
+    public static bool IsFlatSpecular(string shader) =>
+      shader.Equals("gta_normal", StringComparison.OrdinalIgnoreCase) || shader.Equals("rage_default", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Dirt decals (gta_decal_dirt): colour from the vertices, the texture only says where.</summary>
     public static bool IsDirtDecal(string shader) => shader.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase);

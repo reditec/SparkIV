@@ -197,6 +197,8 @@
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
     uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
     uniform bool useSpecMap; uniform sampler2D specTex; uniform vec3 specMask; uniform float specPower; uniform float specIntensity;
+    // Shine without a specular map, as from a white one (gta_normal, rage_default: GtaIVPcMaterials.IsFlatSpecular).
+    uniform bool specFlat;
     // The normal map's direction turned into the surface: the surface's directions of u and v from how
     // position and texture coordinates change across the screen (the meshes carry no tangents we read).
     vec3 bumped(vec3 n, vec3 p, vec2 uv) {
@@ -360,7 +362,7 @@
       vec3 lampMirrored = reflect(normalize(vPosition - eyeAt), n);
       vec3 lampShine = vec3(0.0);
       float lampPower = 0.0;
-      if (outdoor && !vehicle && useSpecMap && useTexture) lampPower = texture(specTex, vUv).a * specPower * (baked ? 1.0 : 0.75);
+      if (outdoor && !vehicle && (useSpecMap || specFlat) && useTexture) lampPower = (useSpecMap ? texture(specTex, vUv).a : 1.0) * specPower * (baked ? 1.0 : 0.75);
       for (int i = 0; i < 40; i++) {
         if (i >= sceneLights) break;
         // A cutscene's light only on the peds, whatever room it and they stand in: its pass (deferred_lighting.fxc,
@@ -641,6 +643,7 @@
       normalTex: gl.getUniformLocation(program, "normalTex"),
       bumpiness: gl.getUniformLocation(program, "bumpiness"),
       useSpecMap: gl.getUniformLocation(program, "useSpecMap"),
+      specFlat: gl.getUniformLocation(program, "specFlat"),
       specTex: gl.getUniformLocation(program, "specTex"),
       specMask: gl.getUniformLocation(program, "specMask"),
       specPower: gl.getUniformLocation(program, "specPower"),
@@ -867,7 +870,7 @@
       vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0, specular2: m.specular2 || null, vehicleShine: m.vehicleShine || null,
       // Bumps and shine.
       normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
-      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularMask: m.specularMask || [1, 0, 0],
+      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularFlat: m.specularFlat === true, specularMask: m.specularMask || [1, 0, 0],
       dirtMask: m.dirtMask || null, emissive: m.emissive === true,
       // Only gta_emissivestrong's: the night ones' brightness hangs on the time of day (not known here yet).
       emissiveScale: m.emissiveMultiplier && !m.emissiveAtNight ? m.emissiveMultiplier : 0,
@@ -2862,7 +2865,7 @@
           // A map's glass the same where its vertices' alpha came (GTA IV PC's gta_glass_spec, program 20: alpha =
           // texture alpha x vertex alpha x globalScalars.x, blended SRCALPHA / INVSRCALPHA; ModelScene.AddMesh).
           // Other glass, or without its texture, at the page's 0.45 as before.
-          const vehicleGlass = glassPass && mat.glass && mat.vehicle && textured && !!(mat.vehicleShine && mat.vehicleShine[2] > 0.5);
+          const vehicleGlass = glassPass && mat.glass && mat.vehicle && textured && !!(mat.vehicleShine && mat.vehicleShine[2] > 0.5 && mat.vehicleShine[2] < 1.5);
           const mapGlass = glassPass && mat.glass && !mat.vehicle && textured && m.hasAlpha;
           gl.uniform1i(loc.textureAlpha, (glassPass && !mat.glass) || vehicleGlass || mapGlass);
           // Nor the lamps and a cutscene's lights on it: that program has none (its registers: the sun, the light
@@ -2928,6 +2931,7 @@
           // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
           gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
           gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
+          gl.uniform1i(loc.specFlat, textured && !mat.specular && !!mat.specularFlat);
           // A ped's bumps as the game's G-buffer pass makes them (pedBumped; unset from 57a4f88 to #8, so none
           // tilted anything). The other materials' (bumped, its tangent space from the screen, not checked against
           // the game) stay off: on bc_3's harbour wall they made the picture further from the game's.
