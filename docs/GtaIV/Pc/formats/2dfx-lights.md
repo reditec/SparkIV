@@ -63,7 +63,7 @@ Every 2dfx light also hands in a corona: a soft sprite facing the camera, added 
 
 The draw (`deferred_lighting` technique `corona`, in `GTAIV.trace` draw 114115754) is ONE / ONE without depth test. The vertex program decides what shows:
 
-- Camera nearer than the corona's size: no test. Faded by sat(0.5 (f / size + 1)), f the distance along the view, and moved out to 0.1 m when closer.
+- Camera nearer than the corona's size: no test. Faded by sat(0.5 (f / size + 1)), f the distance along the view, and moved out to 0.1 m when closer. The game's near plane is 0.05 m, so such a corona covers the frame. SparkIV's cutscene camera has its near plane at exactly 0.1 m, where the quad was clipped away; its corona program now sets the depth to 0 (no depth test anyway). Seen in bc_3 s3 f140 (`GTAIV.1`, draw 158854529): a pier lamp (`BM_wall_light_02`, colour 255/144/46, strength 0.5, also by day) 2.93 m from the camera, its corona 0.93 m off and 0.81 m behind it, faded to 0.30, adds +0.118 / +0.066 / +0.021 across the whole picture. SparkIV now the same (Bernie's coat 1.615 / 1.536 / 1.232 against 1.610 / 1.531 / 1.227). Visual run: s3 f140 −0.63, f357 −0.52, rest unchanged.
 - Otherwise 12 Poisson points within 2 pixels of its middle are tested against the depth texture, and the corona is scaled by the share in front. At 1 % or less it collapses to a point.
 
 That depth holds only the solid scene: the forward draws before it write to another surface (`0x2cb64c80`, the texture's surface being `0x2db36a00`). So a corona shines through glass. In bc_1 the one in the hall lies behind the flat's glass and still shows.

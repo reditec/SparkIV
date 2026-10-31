@@ -50,6 +50,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>SprBght (column 22): the strength of the coronas of lamps outside (see the page's gameCoronas).</summary>
     public float SpriteBrightness { get; private init; }
     public float FogStart { get; private init; }
+    /// <summary>
+    /// rage_postfx's gDepthFxParams (the fog's pass, before the fog): DesaturationFar (column 48), GammaFar (50),
+    /// DepthFxNear (51), DepthFxFar (52); GTA IV's trace GTAIV.1 at 12:53: 0.973, 1.18, 15.95, 127.7.
+    /// </summary>
+    public Vector4 DepthFx { get; private init; }
     public float SunMultiplier { get; private init; }
     /// <summary>How the picture is exposed: the lights' values (with their multipliers, up to 10) times this come out about 0 to 2.</summary>
     public float Exposure { get; private init; }
@@ -97,14 +102,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>AdaptTime (column 55 x 10): from 1 on the adaptation follows by min(seconds / sqrt(2 x this), 1) a frame; below, at once.</summary>
     public float AdaptTime { get; private init; }
 
-    /// <summary>SkyLightMult (column 60): the fog's colours are the sky's times this (0xAF3A50).</summary>
+    /// <summary>SkyLightMult (column 60, blended between the hours by the larger one's weight squared): the fog's colours are the sky's times this (0xAF3A50).</summary>
     public float SkyLightMultiplier { get; private init; }
     /// <summary>The near fog's amount (column 11, / 255: the alpha packed with the sky bottom at +0x2C).</summary>
     public float NearFogAmount { get; private init; }
     /// <summary>The near fog's colour where a modifier gives one (globalFogColorN), else null: the sky bottom x SkyLightMult.</summary>
     public Vector3? NearFogColor { get; private init; }
 
-    /// <summary>gDirectionalLight.w (GTAIV.exe 0xAC30F0): max(1, (SkyLightMult + SunMult) / DirLightMult), columns 60, 61, 57; scales the sun's shine.</summary>
+    /// <summary>gDirectionalLight.w (GTAIV.exe 0xAC30F0, 0xAC51F0): max(1, (SkyLightMult + SunMult) / DirLightMult), columns 60, 61, 57; scales the sun's shine.</summary>
     public float DirectionalLightW { get; private init; }
     /// <summary>globalScalars.w (0xAC6F70): 0.6 x the 64th number (0 to 4), +0xD8 of the time's values; scales the mirrored surroundings in the shine.</summary>
     public float GlobalScalarsW { get; private init; }
@@ -131,9 +136,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>
     /// The clouds as gta_atmoscatt_clouds draws them, its constants matched in both traces (TLAD's GTAIV.4 at 12:50,
-    /// GTA IV's GTAIV.1 at 10:51): CloudColor (columns 81 to 83), SunsetColor (73 to 75, times column 89: 0 in TLAD's
-    /// trace, where 89 is 0), CloudShadowStrength (84), CloudThreshold (85), CloudBias (86), CloudShadowOffset (87),
-    /// CloudInscatteringRange (88), the detail's scale (90) and strength (91), the thickness (92), CloudFadeOut (94),
+    /// GTA IV's GTAIV.1 at 10:51): CloudColor (columns 81 to 83), SunsetColor (73 to 75, times column 106: its w in
+    /// GTAIV.1 at 13:07, 0.843, the colour 0.843 x columns 73 to 75; 0 in TLAD's trace, where 106 is 0),
+    /// CloudShadowStrength (84), CloudThreshold (85), CloudBias (86), CloudShadowOffset (87), CloudInscatteringRange (88), the detail's scale (90) and strength (91), the thickness (92), CloudFadeOut (94),
     /// TopCloudBiasDetailThresholdHeight (95 to 98) and TopCloudColor (99 to 101 plus 73 to 75).
     /// </summary>
     public Vector3 CloudColor { get; private init; }
@@ -221,6 +226,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       float t = to > from ? (hour - from) / (to - from) : 0;
       float V(int i) => a[i] + (b[i] - a[i]) * t;
       Vector3 Rgb(int i) => new Vector3(V(i), V(i + 1), V(i + 2)) / 255f;
+      // SkyLightMult (column 60) GTAIV.exe 0xAF0DB0 blends unlike the rest: from the smaller value towards the larger
+      // by the larger one's weight squared (its field +0x24; GTA IV's trace GTAIV.1 at 13:07, HDRExposure 23.45 =
+      // 2.85 x (8 + 6.5 x 0.1873^2), not 2.85 x 9.22).
+      float skyLight = b[60] >= a[60] ? a[60] + (b[60] - a[60]) * t * t : b[60] + (a[60] - b[60]) * (1 - t) * (1 - t);
       return new TimeCycle
       {
         AmbientAbove = Rgb(0),
@@ -231,7 +240,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         FarClip = V(23),
         SpriteBrightness = V(22),
         FogStart = V(24),
-        Water = new Vector4(Rgb(31), V(34) / 255f),
+        DepthFx = new Vector4(V(48), V(50), V(51), V(52)),
+        // The water's colour (columns 31 to 34) packed as bytes: 0xAF0DB0 blends them as ints, cut off; water.fxc's
+        // waterColour is them / 256 (GTA IV's trace GTAIV.1 at 12:53: 8, 7, 6, 239 / 256 for 8.39 ... 239).
+        Water = new Vector4(MathF.Floor(V(31)), MathF.Floor(V(32)), MathF.Floor(V(33)), MathF.Floor(V(34))) / 256f,
         SunMultiplier = V(57),
         Exposure = V(35),
         AmbientMultiplierAbove = V(58),
@@ -247,9 +259,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         AdaptedLumMin = V(53),
         AdaptedLumMax = V(54),
         AdaptTime = V(55) * 10,
-        SkyLightMultiplier = V(60),
+        SkyLightMultiplier = skyLight,
         NearFogAmount = V(11) / 255f,
-        DirectionalLightW = Math.Max(1f, (V(60) + V(61)) / Math.Max(V(57), 1e-4f)),
+        DirectionalLightW = Math.Max(1f, (skyLight + V(61)) / Math.Max(V(57), 1e-4f)),
         GlobalScalarsW = 0.6f * Math.Clamp(V(63), 0f, 4f),
         Noise = (int)V(10),
         SkyColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(64), V(65), V(66)) : Vector3.Zero,
@@ -260,7 +272,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         SkySunColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(103), V(104), V(105)) : Vector3.Zero,
         SkySunExposure = a.Length > 119 && b.Length > 119 ? V(119) : 0,
         CloudColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(81), V(82), V(83)) : Vector3.Zero,
-        SunsetColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(73), V(74), V(75)) * V(89) : Vector3.Zero,
+        SunsetColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(73), V(74), V(75)) * V(106) : Vector3.Zero,
         TopCloudColor = a.Length > 119 && b.Length > 119 ? new Vector3(V(99) + V(73), V(100) + V(74), V(101) + V(75)) : Vector3.Zero,
         TopCloud = a.Length > 119 && b.Length > 119 ? new Vector4(V(95), V(96), V(97), V(98)) : Vector4.Zero,
         CloudShape = a.Length > 119 && b.Length > 119 ? new Vector4(V(85), V(86), V(84), V(88)) : Vector4.Zero,
@@ -435,6 +447,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           start = FogStart,
           end = Math.Max(FarClip, FogStart + 1),
           nearAmount = NearFogAmount,
+          depthFx = new[] { DepthFx.X, DepthFx.Y, DepthFx.Z, DepthFx.W },
         },
         actorAmbient = ActorAmbient,
         directionalLightW = DirectionalLightW,
@@ -487,6 +500,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         fogStart = FogStart,
         fogEnd = FarClip,
         water = new[] { Water.X, Water.Y, Water.Z, Water.W },
+        // water.fxc's bottomSkyColour.w: its own colour is waterColour x 0.5 x this (GTAIV.1 at 12:53: 8.146).
+        skyLight = SkyLightMultiplier,
         clouds,
         cloudDetail,
         rooms,

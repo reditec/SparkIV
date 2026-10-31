@@ -596,6 +596,8 @@
       vehicleSpec: gl.getUniformLocation(program, "vehicleSpec"),
       fogNear: gl.getUniformLocation(program, "fogNear"),
       fogParams: gl.getUniformLocation(program, "fogParams"),
+      depthFx: gl.getUniformLocation(program, "depthFx"),
+      depthFxExposure: gl.getUniformLocation(program, "depthFxExposure"),
       skyColor: gl.getUniformLocation(program, "skyColor"),
       skyTopColor: gl.getUniformLocation(program, "skyTopColor"),
       waterWaves: gl.getUniformLocation(program, "waterWaves"),
@@ -2571,7 +2573,7 @@
         gl.uniform1f(loc.hazeStart, Math.min(sky.fogStart, hazeEnd() * 0.5));
         gl.uniform1f(loc.hazeEnd, hazeEnd());
         // In the light's units, as the sun's (times the exposure).
-        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3).map(c => c * (sky.exposure || 1)));
+        gl.uniform3fv(loc.waterColor, sky.water.slice(0, 3).map(c => c * (sky.skyLight ?? 1) * (sky.exposure || 1)));
         gl.uniform1f(loc.waterReflect, sky.waterReflection || 1);
         gl.uniform1f(loc.toneGamma, sky.gamma || 1);
         setToneUniforms();

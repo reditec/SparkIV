@@ -49,6 +49,8 @@ const GameGlsl = Object.freeze({
     uniform vec3 vehicleSpec;
     // The fog (see gameFog): its near colour in light, FogStart, FarClip, NearFogAmount.
     uniform vec3 fogNear; uniform vec3 fogParams;
+    // gDepthFxParams (see gameFog): DesaturationFar, GammaFar, DepthFxNear, DepthFxFar; the page's exposure.
+    uniform vec4 depthFx; uniform float depthFxExposure;
     // The mirrored surroundings' map (see parabolicVertex): being drawn into it, the camera's place (its centre),
     // the map and whether it is there to read (see mirroredAround).
     uniform bool parabolic; uniform vec3 parabolicAt; uniform sampler2D parabolicMap; uniform bool parabolicOn;
@@ -275,6 +277,14 @@ const GameGlsl = Object.freeze({
       return mix(farRamp, nearRamp, fogParams.z) + (fogParams.x > 0.0 ? 0.0 : fogParams.z);
     }
     vec3 gameFog(vec3 light, float distance) {
+      // Before the fog, the same pass's depth effect (gDepthFxParams; GTA IV's trace GTAIV.1, PS at 158854264): from
+      // DepthFxNear to DepthFxFar the colour desaturated towards DesaturationFar and x luma^(GammaFar - 1), the luma
+      // in the game's light (without the page's exposure). Here the water at 16 to 128 m some 5 % lighter.
+      if (depthFx.w > depthFx.z) {
+        float ramp = clamp((distance - depthFx.z) / (depthFx.w - depthFx.z), 0.0, 1.0);
+        float luma = dot(light, vec3(0.2125, 0.7154, 0.0721));
+        light = mix(vec3(luma), light, mix(1.0, depthFx.x, ramp)) * pow(luma / depthFxExposure + 1e-7, ramp * (depthFx.y - 1.0));
+      }
       float farRamp = clamp((distance - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
       vec3 colour = mix(fogNear, gameToneUnmap(hazeColor), farRamp);
       return light + gameFogAmount(distance) * (colour - light);
@@ -515,8 +525,8 @@ const GameGlsl = Object.freeze({
           // The sun's glint as water.fxc's: (saturate(R.l) + 1e-4)^512 x the sun x its shadow x gDirectionalLight.w
           // x 10 (its 10 - 9 x the shore's factor^0.25, that 0 away from the very shore line).
           vec3 glint = sunColor * pow(clamp(dot(bounce, sunDir), 0.0, 1.0) + 1e-4, 512.0) * sunShadow * pedShineScale.x * 10.0;
-          // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's, sunny
-          // at noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
+          // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's x
+          // SkyLightMult, its bottomSkyColour.w; sunny before noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
           // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3);
           // then into the picture as everything else (gameToneMap). The mirrored colour is already in the
           // picture: back to light first (gameToneUnmap).
@@ -909,6 +919,8 @@ function setToneUniforms() {
   const fog = sky.fog || {};
   gl.uniform3fv(loc.fogNear, (fog.nearColor || [0, 0, 0]).map(c => c * (sky.exposure || 1)));
   gl.uniform3f(loc.fogParams, fog.start ?? 150, fog.end ?? 1500, fog.nearAmount ?? 0);
+  gl.uniform4fv(loc.depthFx, fog.depthFx || [1, 1, 0, 0]);
+  gl.uniform1f(loc.depthFxExposure, sky.exposure || 1);
 }
 
 // After a frame is drawn (still in the canvas's buffer): measures it and adapts. While playing at most five
@@ -1587,6 +1599,10 @@ function gameCoronas(post, w, h, coronas) {
           if (clip.w <= 0.0 || seen <= 0.01) { seen = 0.0; place = at; }
         }
         gl_Position = viewProjection * vec4(place, 1.0);
+        // Drawn without a depth test, so its depth is free: kept off the near plane, which lies at 0.1 m for the
+        // cutscene's camera (the game's at 0.05 m) - right where a corona nearer than its size is moved to. Else it
+        // fell away there (bc_3 s3 f140: the pier lamp 0.93 m off, all of the game's picture +0.12 / +0.07 / +0.02).
+        gl_Position.z = 0.0;
         tint = color * seen;
         uv = corner * 0.5 + 0.5;
       }`;
