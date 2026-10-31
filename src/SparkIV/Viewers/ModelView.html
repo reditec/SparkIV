@@ -2701,9 +2701,12 @@
         // see-through: the game adds those glows to the light before its fog pass and the forward draws (TLAD trace
         // GTAIV.3, et01_aa: bulbs and shades from 102288252, the fog at 102288312, the sheer curtain at 102288471),
         // and their depth then keeps what lies behind them out (the curtain behind Elizabeta's table lamp's bulb).
+        // Outside a see-through gta_emissivenight's too (the GTA IV trace GTAIV.1, bc_3's pier lamp globes: glow 99881937
+        // at the same place as, and before, their gta_default shell 99886266): pulled forward and writing its depth, it
+        // keeps that shell out, so the sky shows through the globe instead of a dark ball.
         const glowFirst = id => {
           const m = meshes.get(id), mat = m && materials.get(m.material);
-          return m && mat && m.room >= 0 && mat.emissive && mat.blend && mat.emissiveMultiplier > 0 ? 1 : 0;
+          return m && mat && mat.emissive && mat.blend && (m.room >= 0 ? mat.emissiveMultiplier > 0 : outside && mat.emissiveNight) ? 1 : 0;
         };
         const order = glassPass ? [...visible].sort((a, b) => glowFirst(b) - glowFirst(a)) : visible;
         for (const id of order) {
@@ -2912,7 +2915,12 @@
           // gta_emissive's and gta_emissivenight's pulled forward (-c210, a spot's lens shows over its housing,
           // bc_1 in GTAIV.2, #9). So in its vertex programs in win32_30, all of them.
           const glowShift = mat.emissiveStrong ? 0.0004 : -0.0004;
-          const glowApart = glow > 0 && mat.blend && outside;
+          // A see-through gta_emissivenight is that glow alone, by day too, when nothing of it may be left to see: bc_3's
+          // pier lamp globes (the GTA IV trace GTAIV.1.trace, its 89 vertices: drawn glowing, 99881937, PS 0x2d021580,
+          // ZWRITEENABLE TRUE, and never lit). Lit here, it laid a grey ball over the sky. Its draw stays at no glow:
+          // its depth is what keeps the gta_default shell out (see glowFirst).
+          const nightGlass = mat.emissive && mat.emissiveNight && mat.blend && outside;
+          const glowApart = (glow > 0 || nightGlass) && mat.blend && outside;
           gl.uniform1f(loc.emissiveGlow, glowApart ? 0 : glow);
           // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
           if ((mat.emissiveScale > 0 || mat.emissive) && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
@@ -2966,7 +2974,7 @@
           // Elizabeta's flat, frame 9900) the lamp shades' and bulbs' textures are bound only for their glow draws
           // (SRCALPHA / ONE, from 100730189), never for a lit one; outside (et01_ba's price sign, GTAIV.4) both are
           // drawn. Lit here, the shades took the lamps' light and showed red instead of a pale glow.
-          if (!(glowApart && m.room >= 0)) gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+          if (!(glowApart && (m.room >= 0 || nightGlass))) gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
           if (glassDepth) gl.depthMask(false);
           if (glowApart) {
             const blendFuncs = [gl.BLEND_SRC_RGB, gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(p => gl.getParameter(p));
