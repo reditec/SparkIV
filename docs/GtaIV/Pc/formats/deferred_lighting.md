@@ -13,7 +13,7 @@ The shaders are in `common/shaders/win32_30/`. Disassembled with `d3dcompiler_47
    - Colour: texture × vertex colour × `emissiveMultiplier` × `colorize`; alpha: texture.a × vertex.a × `globalScalars.x`.
    - State: SRCALPHA/ONE, front faces only (CULL CW), writes depth.
    - Comes **before** the fog and all forward-rendered parts.
-5. **Fog** (PS 0x2581A220): share = w · sat(z/start) + (1 − w) · sat((z − start)/(end − start)) (c41), with the view depth z. Also the depth effect `gDepthFxParams` (c16).
+5. **Fog** (PS 0x2581A220): share = w · sat(z/start) + (1 − w) · sat((z − start)/(end − start)) (c41), with the view depth z. Before it the depth effect `gDepthFxParams` (c16 = DesaturationFar, GammaFar, DepthFxNear, DepthFxFar: time cycle columns 48, 50, 51, 52): from near to far the colour towards its luma by DesaturationFar and × luma^(GammaFar − 1); see [../data-support.md](../data-support.md), the water.
 6. **Forward-rendered transparent parts:**
    - Sheer curtain etc. with `gta_normal` forward (PS 0x2493AC20): up to 4 lights, lights without AO, then fog.
    - Draw state: front faces only (CULL CW).
