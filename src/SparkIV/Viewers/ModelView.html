@@ -2972,7 +2972,15 @@
           // ZWRITEENABLE TRUE, and never lit). Lit here, it laid a grey ball over the sky. Its draw stays at no glow:
           // its depth is what keeps the gta_default shell out (see glowFirst).
           const nightGlass = mat.emissive && mat.emissiveNight && mat.blend && outside;
-          const glowApart = (glow > 0 || nightGlass) && mat.blend && outside;
+          // gta_glass_emissive is its glow alone, never lit, in a room or not: in the GTA IV trace GTAIV.trace (bc_1,
+          // Bernie's globe lamp km_bernilite, draw 103012513, PS 0x2c6a3340) texture x vertex colour x
+          // emissiveMultiplier, its alpha the vertex's x globalScalars.x, SRCALPHA / ONE - what is behind shows through.
+          // Lit and blended over it here, the globes were a flat white. A see-through gta_emissivestrong the same: bc_3's
+          // pier wall lamps (BM_wall_light_02, bm_nylamp_bulb; the GTA IV trace GTAIV.1.trace, s1 f292.5) are only
+          // their 19 glow draws (from 88298834, PS 0x2d0200e0: texture x vertex colour x 15, SRCALPHA / ONE), no lit
+          // one and none in the G-buffer; lit as well, their glass was a flat white where the game's is pale grey.
+          const glowGlass = mat.emissive && !mat.emissiveNight && outside && (mat.glass || (mat.emissiveStrong && mat.blend));
+          const glowApart = (glow > 0 || nightGlass) && (mat.blend || glowGlass) && outside;
           gl.uniform1f(loc.emissiveGlow, glowApart ? 0 : glow);
           // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
           if ((mat.emissiveScale > 0 || mat.emissive) && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
@@ -3026,7 +3034,7 @@
           // Elizabeta's flat, frame 9900) the lamp shades' and bulbs' textures are bound only for their glow draws
           // (SRCALPHA / ONE, from 100730189), never for a lit one; outside (et01_ba's price sign, GTAIV.4) both are
           // drawn. Lit here, the shades took the lamps' light and showed red instead of a pale glow.
-          if (!(glowApart && (m.room >= 0 || nightGlass))) gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
+          if (!(glowApart && (m.room >= 0 || nightGlass || glowGlass))) gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
           if (glassDepth) gl.depthMask(false);
           if (glowApart) {
             const blendFuncs = [gl.BLEND_SRC_RGB, gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(p => gl.getParameter(p));
