@@ -292,7 +292,10 @@
         base.a = 1.0;
       }
       if (dirtDecal && useTexture) base = vec4(vColor, dot(base.rgb, dirtMask));
-      if (cutout && alpha >= 1.0 && base.a < 0.35) discard;   // cut-outs (leaves, fences, hair)
+      // Cut-outs (leaves, fences, hair): as the game's G-buffer pass, whose pixel shader (GTAIV.1.trace, 0x22f07a80:
+      // def c0.x 0.176470593, texkill) drops what has alpha up to 45 / 255. bc_3's lattice railings stay almost
+      // solid from afar, where the averaged alpha of their mip levels lies between that and the 0.35 used here before.
+      if (cutout && alpha >= 1.0 && base.a <= 0.17647) discard;
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
       // Drawn into the mirrored surroundings' map (the game's file: parabolicFragment), by the mesh's own normal.
