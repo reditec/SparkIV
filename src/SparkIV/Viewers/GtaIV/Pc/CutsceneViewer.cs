@@ -68,6 +68,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public CutsceneScriptIndex.Entry? Script { get; set; }
 
+    /// <summary>The hour the viewer's user set for the cutscene's start, or null for the script's (else noon).</summary>
+    public float? StartHour { get; set; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
