@@ -1317,7 +1317,7 @@
         const d = Math.hypot(pb[0] - ps[0], pb[1] - ps[1], pb[2] - ps[2]);
         if (d <= nearest && Math.hypot(ps[0], ps[1], ps[2]) >= 0.03) { nearest = d; leader = s; }
       }
-      if (leader < 0) continue;
+      if (leader < 0 || gameHelper(sk, b)) continue;
       const name = (sk.names && sk.names[b]) || "";
       let twistFrom = -1;
       if (/twist/i.test(name)) {
@@ -1325,6 +1325,36 @@
       }
       sk.followers.push({ bone: b, leader, twistFrom });
     }
+    // The ped helper bones the game sets itself, by rule (see gameHelper), when the clip doesn't turn them (a
+    // forearm's twist bone always: its track is ignored).
+    sk.helpers = [];
+    for (let b = 0; b < n; b++) {
+      const h = gameHelper(sk, b);
+      if (h && (h.kind === "foreTwist" || !tracked.has(b))) sk.helpers.push(h);
+    }
+  }
+
+  // The helper bones of GTA IV's peds as the game turns them, read back from its bone palettes (VS c64) over 131 frames
+  // of the bc_1 trace (GTAIV.trace: Bernie, 104 frames before s3 f61 and 27 across the cutscene; all within 0.14°).
+  // X(q) is the Euler x (ZYX) of a bone's local turn, atan2(2(wx + yz), 1 - 2(x² + y²)):
+  // - [LR]_ArmRoll: its upper arm's local turn x Rx(-0.25 X(upper arm));
+  // - [LR]_UpperArmRoll: Rx(180° + 0.15 X(upper arm)) (its rest's 4.9° more are not kept);
+  // - Char_[LR]_ForeTwist: its forearm's local turn x Rx(0.5 (X(hand) - X(hand at rest)), within ±180°);
+  // - Neck_Roll: the head's local turn;
+  // - [LR]_Calf_Roll: none (its rest's 2.4° are not kept).
+  function gameHelper(sk, b) {
+    const name = (sk.names && sk.names[b]) || "";
+    const bone = n => { const i = sk.names ? sk.names.findIndex(x => x && x.toLowerCase() === n.toLowerCase()) : -1; return i; };
+    let m;
+    if ((m = /^([LR])_ArmRoll$/i.exec(name))) { const up = bone("Char_" + m[1].toUpperCase() + "_UpperArm"); return up >= 0 ? { bone: b, kind: "armRoll", up } : null; }
+    if ((m = /^([LR])_UpperArmRoll$/i.exec(name))) { const up = bone("Char_" + m[1].toUpperCase() + "_UpperArm"); return up >= 0 ? { bone: b, kind: "upperArmRoll", up } : null; }
+    if ((m = /^Char_([LR])_ForeTwist$/i.exec(name))) {
+      const s = m[1].toUpperCase(), fore = bone("Char_" + s + "_Forearm"), hand = bone("Char_" + s + "_Hand");
+      return fore >= 0 && hand >= 0 ? { bone: b, kind: "foreTwist", fore, hand } : null;
+    }
+    if (/^Neck_Roll$/i.test(name)) { const head = bone("Char_Head"); return head >= 0 ? { bone: b, kind: "neckRoll", head } : null; }
+    if (/^[LR]_Calf_Roll$/i.test(name)) return { bone: b, kind: "calfRoll" };
+    return null;
   }
 
   // A skeleton from SparkIV, its rest pose worked out once, with a texture for its bone matrices.
@@ -1378,6 +1408,23 @@
       }
       q = qnorm(q);
       for (let k = 0; k < 4; k++) rotation[f.bone * 4 + k] = q[k];
+    }
+    // The ped helper bones by the game's rules (see gameHelper).
+    const eulerX = q => Math.atan2(2 * (q[3] * q[0] + q[1] * q[2]), 1 - 2 * (q[0] * q[0] + q[1] * q[1]));
+    const rx = a => [Math.sin(a / 2), 0, 0, Math.cos(a / 2)];
+    for (const h of sk.helpers || []) {
+      let q;
+      if (h.kind === "armRoll") q = qmul(nowOf(h.up), rx(-0.25 * eulerX(nowOf(h.up))));
+      else if (h.kind === "upperArmRoll") q = rx(Math.PI + 0.15 * eulerX(nowOf(h.up)));
+      else if (h.kind === "foreTwist") {
+        let d = eulerX(nowOf(h.hand)) - eulerX(restOf(h.hand));
+        d = d - 2 * Math.PI * Math.round(d / (2 * Math.PI));
+        q = qmul(nowOf(h.fore), rx(0.5 * d));
+      }
+      else if (h.kind === "neckRoll") q = nowOf(h.head);
+      else q = [0, 0, 0, 1];
+      q = qnorm(q);
+      for (let k = 0; k < 4; k++) rotation[h.bone * 4 + k] = q[k];
     }
     return { position, rotation };
   }
