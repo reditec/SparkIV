@@ -1,7 +1,7 @@
 # Cutscene helper bones: twist and roll (GTA IV, PC)
 
-Status: **used** (forearm twist, arm roll). Applied in `src/SparkIV/Viewers/ModelView.html` (`findFollowers`,
-`sampledPose`).
+Status: **used** (arm roll, upper arm roll, forearm twist, neck roll, calf roll). Applied in
+`src/SparkIV/Viewers/ModelView.html` (`gameHelper`, `findFollowers`, `sampledPose`).
 
 ## What they are
 
@@ -15,15 +15,43 @@ the sleeve:
 | `L_UpperArmRoll` / `R_UpperArmRoll` | 14496 / 14752 | clavicle | at the clavicle |
 | `L_Calf_Roll` / `R_Calf_Roll`, `Neck_Roll` | 14512 / 14768, 14240 | | |
 
-## Rule SparkIV uses
+## Rules SparkIV uses
 
-- A twist or roll bone without a track, at the same place (within 3 cm) under the same parent as a bone with a
-  track, follows that bone's turn away from its rest.
-- A forearm twist bone also takes **half of the hand's turn about the forearm's axis** (x). That is the swing-twist
-  split of the hand's turn away from its rest, taken in the parent's frame.
-- `Char_*_ForeTwist` tracks in a clip are **ignored**.
+The game's rules, read back from its bone palettes (trace `GTAIV.trace`, bc_1, Bernie: 104 frames before s3 f61 and 27
+frames across the cutscene, 2026-10-31; each rule matches every frame as a whole rotation within 0.14°). `X(q)` is the
+Euler x angle (order ZYX) of a bone's **local** rotation, `atan2(2(wx + yz), 1 − 2(x² + y²))`; `Rx(a)` a turn by `a`
+about x.
 
-## Evidence (trace `GTAIV.trace`, bc_1 section 2, 2026-10-30)
+| Bone | Its local rotation |
+|---|---|
+| `L_ArmRoll`, `R_ArmRoll` | its upper arm's × `Rx(−0.25 X(upper arm))` |
+| `L_UpperArmRoll`, `R_UpperArmRoll` | `Rx(180° + 0.15 X(upper arm))` (its rest's further 4.9° are not kept) |
+| `Char_L_ForeTwist`, `Char_R_ForeTwist` | its forearm's × `Rx(0.5 (X(hand) − X(hand at rest)))`, the difference within ±180° |
+| `Neck_Roll` | the head's local rotation |
+| `L_Calf_Roll`, `R_Calf_Roll` | none (its rest's 2.4° are not kept) |
+
+- The upper arm roll bones share the upper arm's twist: what `ArmRoll` loses (0.25 X) is 5/3 of what `UpperArmRoll`
+  gets (0.15 X); found as an exact relation first (residual 0.00° over 27 frames).
+- `Char_*_ForeTwist` tracks in a clip are **ignored**; the other helpers keep a clip's track where it has one.
+- Other twist or roll bones (not named above) without a track, at the same place (within 3 cm) under the same parent as
+  a bone with a track, follow that bone's turn away from its rest (not checked against the game).
+- Before (to 2026-10-31) SparkIV let `ArmRoll` follow the whole upper arm and kept `UpperArmRoll`, `Neck_Roll` and
+  `Calf_Roll` at rest; the forearm twist took half the hand's swing-twist. At bc_1 s3 f61 that put Bernie's helpers 2 to
+  19° off (`Neck_Roll` 19°, `L_ArmRoll` 18°, `R_ArmRoll` 14°, the upper arm rolls 8 to 11°), which shifted the stripes of
+  his tracksuit on the shoulders and upper arms (#48). With the rules all 87 compared bones are within 1.1° (mean 0.35°).
+
+### How it was measured
+
+- Per frame, the palette of each of Bernie's meshes (VS c64, 3 rows per bone, uploaded before its draw) named in the
+  mesh's own bone order (its `BoneMapping`; cutgen `PALETTES=<ped>`), the meshes told apart by their vertex counts.
+- From the skin matrices `S = W × Rest⁻¹` and the rest pose, each bone's local rotation relative to its parent; the
+  rules fitted on them, then checked as whole rotations.
+
+## Earlier evidence (trace `GTAIV.trace`, bc_1 section 2, 2026-10-30)
+
+Superseded for the forearm twist by the rules above (Euler x of the hand's local rotation, not half of its swing-twist):
+they fit all 131 frames compared on 2026-10-31. Whether they also explain the frames left open below (f19, f79, f84.5,
+f990) has not been checked frame by frame.
 
 The bone palettes the game uploads (vertex shader register 64, 3 rows per bone) were compared with SparkIV's skin
 matrices. The comparison used relative matrices, so the placement of the whole figure drops out.
