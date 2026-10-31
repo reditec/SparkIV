@@ -483,12 +483,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private System.Diagnostics.Stopwatch? _pageWait;
     private string? _pageWaitFor;
 
-    // A scene outside: the weather and hour its light is of (CutsceneLocation.Load shows timed objects at it too),
+    // A scene outside: the weather and the hour it starts at (CutsceneLocation.Load shows timed objects at it too),
     // as the mission script playing it forces them (bernie3: FORCE_WEATHER_NOW(1) before bc_3), else noon, sunny
-    // (the .cut gives neither).
+    // (the .cut gives neither); the viewer's user can set another start.
     private string OutsideWeather =>
       _document.GameFolder is string folder && _document.Script is { Weather: >= 0 } script ? TimeCycle.WeatherName(folder, script.Weather) ?? "SUNNY" : "SUNNY";
-    private float OutsideHour => _document.Script?.Hour ?? 12;
+    private float OutsideHour => _document.StartHour ?? _document.Script?.Hour ?? 12;
+    // The game's clock runs on through a cutscene: a game hour took 123.4 s of the cutscene's time in the traces
+    // (gDayNightEffects and the sun's direction per frame: GTAIV.1.trace, bc_3 s1; GTAIV.2.trace, et01_ba).
+    private const double SecondsPerGameHour = 123.4;
+    private float HourNow => (float)((OutsideHour + Now / SecondsPerGameHour) % 24);
+    // The game minute whose sky the page has (it follows the clock, by the minute).
+    private int _clockMinute = -1;
+    private Dictionary<uint, float[]>? _skyModifiers;
     // Whether the location's light from the time cycle was sent (the page then lights and shows it as the game).
     private bool _lit;
     // How far the location's far models were loaded (the [DRAW_DISTANCE] as the game limits it by the time cycle).
@@ -511,19 +518,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Post(scene);
       Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? Host + CutsceneLocation.LightVolumeKey : null,
                                             _document.Location.Corona != null ? Host + CutsceneLocation.CoronaKey : null));
-      // The light of the game's time cycle (at OutsideWeather and OutsideHour), and for each room of
-      // the location as its time cycle modifier changes it: the page lights by the one of the room the camera
-      // is in, as the game does, inside the same way as outside.
-      _lit = false;
-      if (_document.GameFolder is string folder && TimeCycle.Load(folder, OutsideWeather, OutsideHour) is TimeCycle cycle)
-      {
-        var modifiers = _document.Location.Rooms.Any(r => r.Modifier != 0) ? TimeCycle.LoadModifiers(folder) : null;
-        var rooms = _document.Location.Rooms.Select(r =>
-          modifiers != null && modifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(OutsideHour) : null).ToArray();
-        Post(cycle.Message(OutsideHour, _document.Location.Clouds != null ? Host + CutsceneLocation.CloudKey : null,
-                           _document.Location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null, rooms));
-        _lit = true;
-      }
+      _lit = PostSky();
       // The water as the mission script leaves it: the wind it forces, and the sea's swell kept round where the
       // player stands, the mission's marker (CutsceneScriptIndex.Entry), in the page's metres (less the origin).
       var script = _document.Script;
@@ -537,6 +532,28 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _locationVisible = visible;
       PostVisible();
       PostBackground();
+    }
+
+    /// <summary>
+    /// The light of the game's time cycle at the clock (OutsideWeather, HourNow), and for each room of the location
+    /// as its time cycle modifier changes it: the page lights by the one of the room the camera is in, as the game
+    /// does, inside the same way as outside.
+    /// </summary>
+    private bool PostSky()
+    {
+      float hour = HourNow;
+      if (_document.Location is not CutsceneLocation location || _document.GameFolder is not string folder ||
+          TimeCycle.Load(folder, OutsideWeather, hour) is not TimeCycle cycle)
+      {
+        return false;
+      }
+      _skyModifiers ??= location.Rooms.Any(r => r.Modifier != 0) ? TimeCycle.LoadModifiers(folder) : null;
+      var rooms = location.Rooms.Select(r =>
+        _skyModifiers != null && _skyModifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(hour) : null).ToArray();
+      Post(cycle.Message(hour, location.Clouds != null ? Host + CutsceneLocation.CloudKey : null,
+                         location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null, rooms));
+      _clockMinute = (int)(hour * 60);
+      return true;
     }
 
     /// <summary>
@@ -810,6 +827,42 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     #region Controls
 
+    /// <summary>The clock at the time in the scene, forwards and backwards as the time goes, and the sky with it.</summary>
+    private void ShowClock()
+    {
+      int minute = (int)(HourNow * 60);
+      ClockText.Text = (minute / 60).ToString("00") + ":" + (minute % 60).ToString("00");
+      if (_lit && minute != _clockMinute)
+      {
+        PostSky();
+      }
+    }
+
+    private void StartFlyout_Opening(object sender, object e)
+    {
+      _settingStart = true;
+      StartPicker.SelectedTime = TimeSpan.FromHours(OutsideHour);
+      _settingStart = false;
+    }
+
+    private void StartPicker_SelectedTimeChanged(TimePicker sender, TimePickerSelectedValueChangedEventArgs e)
+    {
+      if (!_settingStart && e.NewTime is TimeSpan time)
+      {
+        _document.StartHour = (float)time.TotalHours;
+        ShowClock();
+      }
+    }
+
+    private void StartReset_Click(object sender, RoutedEventArgs e)
+    {
+      _document.StartHour = null;
+      StartFlyout_Opening(sender, e);
+      ShowClock();
+    }
+
+    private bool _settingStart;
+
     private void ShowFrame()
     {
       double now = Now;
@@ -820,6 +873,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _settingSlider = false;
       PlayGlyph.Glyph = ((char)(_playing ? 0xE769 : 0xE768)).ToString();
       ToolTipService.SetToolTip(PlayButton, _playing ? "Pause (space)" : "Play (space)");
+      ShowClock();
 
       // The subtitle said now, over the view and selected in the list (none between them).
       int ms = (int)Math.Round(now * 1000);

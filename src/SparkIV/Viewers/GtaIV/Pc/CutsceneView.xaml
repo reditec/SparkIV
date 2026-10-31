@@ -63,6 +63,17 @@
             <AppBarButton Label="Fit" Click="Fit_Click" ToolTipService.ToolTip="Look at everyone in the scene (or double-click the view)">
                 <AppBarButton.Icon><FontIcon Glyph="&#xE9A6;" /></AppBarButton.Icon>
             </AppBarButton>
+            <AppBarButton Label="Start time" ToolTipService.ToolTip="The time of day the cutscene starts at">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE823;" /></AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <Flyout Opening="StartFlyout_Opening">
+                        <StackPanel Spacing="8">
+                            <TimePicker x:Name="StartPicker" ClockIdentifier="24HourClock" Header="Start time" SelectedTimeChanged="StartPicker_SelectedTimeChanged" />
+                            <Button Content="Reset" Click="StartReset_Click" ToolTipService.ToolTip="Back to the time the mission script sets, else 12:00" />
+                        </StackPanel>
+                    </Flyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
             <AppBarSeparator />
             <AppBarButton Label="Export original" Click="ExportOriginal_Click" ToolTipService.ToolTip="Save the file exactly as it is in the archive">
                 <AppBarButton.Icon><FontIcon Glyph="&#xEDE1;" /></AppBarButton.Icon>
@@ -197,7 +208,15 @@
             </StackPanel>
         </Grid>
 
-        <TextBlock x:Name="Status" Grid.Row="3" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+        <Grid Grid.Row="3" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="Status" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="ClockText" Grid.Column="1" Margin="0,0,4,0" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" ToolTipService.ToolTip="Time of day in the scene" />
+        </Grid>
     </Grid>
 </UserControl>
