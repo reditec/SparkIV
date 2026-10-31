@@ -41,6 +41,28 @@ SRCALPHA / INVSRCALPHA, the table lamp's `gta_emissivestrong` (12) with SRCALPHA
 (`GTAIV.1.trace`, `gta_emissivestrong`, 88298834) with SRCALPHA / ONE. `gta_emissive`'s ps 2 also scales its alpha by
 `globalScalars.x` and `.y` for fading (1 and 1 in those frames: alpha unchanged).
 
+## Shine read from the G-buffer programs
+
+The G-buffer pass (`deferred_draw`) writes the shine into GB2: GB2.x = half the strength, GB2.y² × 512 the power
+(the sun pass takes them back as 2 × GB2.x and GB2.y² × 512).
+
+- `gta_normal` and `rage_default` shine **without a specular map**: GB2.x = 0.5 × `specularColorFactor`, GB2.y =
+  sqrt(`specularFactor` / 512), as `gta_normal_spec` with a white map. bc_3's picnic basket (`csHamper`, `gta_normal`,
+  `GTAIV.1.trace` G-buffer draw 188259798: `specularColorFactor` 0.12, `specularFactor` 15): the game's light after
+  its sun pass (188264545) 1.57 / 1.46 / 1.20, SparkIV 1.40 / 1.37 / 1.18 with it, 1.23 / 1.20 / 1.00 without.
+- The vehicle shaders (strength factor, power factor, as `GtaIVPcMaterials.VehicleShineOf` keeps them): paint1–3 and
+  shuts (0.15, 190), mesh (1, 50), tire (1.4, 50), interior and interior2 (0.005, 10), badges and lightsemissive
+  (0.225, 190, the strength at most 1), vehglass (0.225, 190, forward), chrome the material's own
+  (`specularColorFactor`, `specularFactor`). Tire's and shuts' bumps are × 3 and × 5, not × `bumpiness`.
+
+## Shaders in the cutscenes
+
+51 shaders are used by the reference cutscenes (bc_1, bc_3, the intro, et01_aa, et01_ba) and five TBoGT ones (e2_int,
+gt01_aa, bu01_aa, f1_aa, br01_aa); TLAD and TBoGT have no shader files of their own. Their G-buffer passes are 44
+different programs, their forward `draw` passes 36, their `unlit_draw` passes 11. Not yet checked against SparkIV:
+the decals (they write GB2 by their colour-write masks), the cube-map reflect shaders (`dcl_cube`; SparkIV reads a
+2D map), terrain, trees, wire, parallax, hair and the emissives' G-buffer program.
+
 ## Format
 
 Little-endian. A string is a length byte (with its terminating zero) and its characters.

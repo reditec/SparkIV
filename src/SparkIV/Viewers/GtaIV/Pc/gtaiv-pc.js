@@ -188,10 +188,12 @@ const GameGlsl = Object.freeze({
       // specularColorFactor, GB2.y = sqrt(spec map alpha x specularFactor / 512), so the power spec map alpha x
       // specularFactor; gta_default writes GB2.x 0, no shine): et01_ba's booth's chrome slot box (gta_spec_reflect)
       // mirrors the sky as in the game's sun pass (TLAD trace GTAIV.4, call 145514802, the same program).
+      // gta_normal and rage_default the same without a specular map, as from a white one (their deferred_draw: GB2.x =
+      // 0.5 x specularColorFactor, GB2.y = sqrt(specularFactor / 512); specFlat).
       vec3 pedShine = vec3(0.0);
-      if (outdoor && !vehicle && useSpecMap && useTexture) {
-        vec4 spec = texture(specTex, vUv);
-        float shineAmount = (baked ? 0.5 : 0.25) * dot(spec.rgb, specMask) * specIntensity + 0.5 * pedRim * pedRim;
+      if (outdoor && !vehicle && (useSpecMap || specFlat) && useTexture) {
+        vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
+        float shineAmount = (baked ? 0.5 : 0.25) * (useSpecMap ? dot(spec.rgb, specMask) : 1.0) * specIntensity + 0.5 * pedRim * pedRim;
         float power = spec.a * specPower * (baked ? 1.0 : 0.75);
         vec3 view = normalize(vPosition - eyeAt);
         vec3 mirroredDir = reflect(view, n);
@@ -358,7 +360,9 @@ const GameGlsl = Object.freeze({
       // A vehicle's shine in the sun (outside) or the view's light, as the game's vehicle shaders give it to
       // its lighting.
       vec3 vehicleShine = vec3(0.0);
-      bool vehicleGlass = vehicleSpec.z > 0.5;
+      // vehicleSpec.z: 0 a deferred vehicle shader, 1 the forward glass, 2 a deferred one whose strength is at most 1
+      // (gta_vehicle_badges, gta_vehicle_lightsemissive: min(dot x reflectivePowerED x 0.225, 1)).
+      bool vehicleGlass = vehicleSpec.z > 0.5 && vehicleSpec.z < 1.5;
       // (The glass also without a spec map, as 1: which texture the game binds to an unset SpecSampler is not
       // traced.)
       if (vehicle && (vehicleGlass || (useSpecMap && useTexture)) && reflectivePower > 0.0) {
@@ -366,6 +370,7 @@ const GameGlsl = Object.freeze({
         // How strong and how sharp, by the shader (vehicleSpec, from its pixel programs: paint 0.15 and 190,
         // vehicle_mesh 1 and 50, vehglass 0.225 and 190; GtaIVPcMaterials.VehicleShineOf).
         float strength = dot(spec.rgb, specMask) * vehicleSpec.x * reflectivePower;
+        if (vehicleSpec.z > 1.5) strength = min(strength, 1.0);
         float power = spec.a * vehicleSpec.y * reflectivePower;
         vec3 view = normalize(vPosition - eyeAt);
         vec3 mirrored = reflect(view, n);
