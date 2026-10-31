@@ -3040,7 +3040,13 @@
             const blendFuncs = [gl.BLEND_SRC_RGB, gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(p => gl.getParameter(p));
             const blendWas = gl.isEnabled(gl.BLEND), offsetWas = gl.isEnabled(gl.POLYGON_OFFSET_FILL), cullWas = gl.isEnabled(gl.CULL_FACE);
             const depthMaskWas = gl.getParameter(gl.DEPTH_WRITEMASK), depthFuncWas = gl.getParameter(gl.DEPTH_FUNC);
-            gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+            // A see-through gta_emissive's glow is blended over what is behind it, not added: its unlit_draw pass sets
+            // SRCALPHA / INVSRCALPHA, all the other emissives' SRCALPHA / ONE (gta_emissive.fxc, gta_emissivestrong.fxc,
+            // ..., docs/GtaIV/Pc/formats/fxc.md). So in the GTA IV trace GTAIV.trace (bc_1 s2 f1174): Bernie's ceiling
+            // spot ld_bernspot1 (multiplier 16, draw 129309611, PS 0x2d0b1c40 = gta_emissive.fxc ps 2). Added, the spot's
+            // shade came out white where the game's keeps its bluish inside.
+            const glowOver = !mat.emissiveStrong && !mat.emissiveNight && !mat.glass;
+            gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, glowOver ? gl.ONE_MINUS_SRC_ALPHA : gl.ONE);
             gl.disable(gl.POLYGON_OFFSET_FILL);
             // Only its near faces, once: the glow draws cull back faces and write their depth (TLAD trace GTAIV.3,
             // et01_aa's bulbs from 102288252: CULLMODE CW, ZWRITEENABLE TRUE, ZFUNC LESSEQUAL). Without, a bulb's
