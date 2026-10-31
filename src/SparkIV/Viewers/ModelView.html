@@ -322,9 +322,12 @@
       // A map *_reflect shader's mirrored surroundings, added to its albedo before it is lit (GTA IV (PC):
       // gta_spec_reflect's G-buffer pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120): its environment
       // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the vertex's normal (the world's z up), x the
-      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower.
+      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower. See-through glass by its
+      // bumped normal (the GTA IV trace GTAIV.trace, bc_1's bedroom pane, PS 0x2cc5d340).
+      vec3 vertexN = n;
+      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       if (useEnv && useTexture) {
-        vec3 r = reflect(normalize(vPosition - eyeAt), n);
+        vec3 r = reflect(normalize(vPosition - eyeAt), textureAlpha ? n : vertexN);
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
         vec3 mirroredEnv = texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
         // Drawn see-through (forward, blended by the texture's x the vertex's alpha), divided by that alpha first,
@@ -334,7 +337,6 @@
         if (textureAlpha) { float seen = base.a * vAlpha; mirroredEnv *= seen >= 0.01 ? 1.0 / seen : 100.0; }
         base.rgb += mirroredEnv;
       }
-      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
       // The light from around, dimmed on terrain by the vertex colour (red by day; hollows and the foot of
       // rocks darker), as the game's gta_terrain_va_*lyr shaders pass it on to the lighting; then the light
       // from the side.
@@ -2815,6 +2817,8 @@
           // forward, after the deferred lights, with only the lamps the game hands such a draw (see forwardLit:
           // et01_aa's sheer curtain ab_comclub_curttl_projcurtain2_a by Elizabeta's table lamp took its 66 and
           // glowed pink; without any lamps it was too dark).
+          // (In an interior the game's glass program does have lamps: bc_1's bedroom pane, GTAIV.trace, draw 114115710,
+          // takes 4 spots and 2 lamps of the flat. Lit by them here, the pane's picture didn't change.)
           const forwardMap = glassPass && m.baked && !m.actor && !mat.vehicle && !mat.decal && !mat.emissive && outside;
           gl.uniform1i(loc.sceneLights, mapGlass ? 0 : lightsNow.length);
           gl.uniform1i(loc.forwardLit, forwardMap && !mapGlass);
