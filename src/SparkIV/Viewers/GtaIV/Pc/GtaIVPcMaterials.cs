@@ -118,12 +118,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public static bool IsPed(string shader) => shader.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// gta_normal and rage_default: shine without a specular map. Their G-buffer pass (deferred_draw) writes GB2.x =
-    /// 0.5 x specularColorFactor and GB2.y = sqrt(specularFactor / 512), as gta_normal_spec does with a white
-    /// specular map (tools/fxc-dump.py, docs/GtaIV/Pc/formats/fxc.md).
+    /// gta_normal, rage_default and the decals gta_decal_glue, gta_normal_decal and gta_decal_dirt: shine without a
+    /// specular map. Their G-buffer pass (deferred_draw) writes GB2.x = 0.5 x specularColorFactor and GB2.y =
+    /// sqrt(specularFactor / 512), as gta_normal_spec does with a white specular map (the decals blended by their
+    /// alpha; tools/fxc-dump.py, docs/GtaIV/Pc/formats/fxc.md).
     /// </summary>
-    public static bool IsFlatSpecular(string shader) =>
-      shader.Equals("gta_normal", StringComparison.OrdinalIgnoreCase) || shader.Equals("rage_default", StringComparison.OrdinalIgnoreCase);
+    public static bool IsFlatSpecular(string shader) => shader.ToLowerInvariant() is
+      "gta_normal" or "rage_default" or "gta_decal_glue" or "gta_normal_decal" or "gta_decal_dirt";
+
+    /// <summary>
+    /// gta_trees: its G-buffer pass (deferred_draw) writes GB2 = (0, 0.5, 0.5, 0) whatever the vertex: no shine and the
+    /// light from around x 0.5 (its vertex program works out the vertex colour's AO, the pixel program doesn't use it).
+    /// </summary>
+    public static bool IsTree(string shader) => shader.Equals("gta_trees", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Dirt decals (gta_decal_dirt): colour from the vertices, the texture only says where.</summary>
     public static bool IsDirtDecal(string shader) => shader.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase);
