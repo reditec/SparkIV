@@ -49,6 +49,8 @@ const GameGlsl = Object.freeze({
     uniform vec3 vehicleSpec;
     // The fog (see gameFog): its near colour in light, FogStart, FarClip, NearFogAmount.
     uniform vec3 fogNear; uniform vec3 fogParams;
+    // The far fog's colour (globalFogColor) in the page's light.
+    uniform vec3 fogFar;
     // gDepthFxParams (see gameFog): DesaturationFar, GammaFar, DepthFxNear, DepthFxFar; the page's exposure.
     uniform vec4 depthFx; uniform float depthFxExposure;
     // The mirrored surroundings' map (see parabolicVertex): being drawn into it, the camera's place (its centre),
@@ -137,7 +139,7 @@ const GameGlsl = Object.freeze({
         float far0 = clamp((distance0 - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
         float alpha0 = clamp(base.a * vAlpha, 0.0, 1.0) * clamp((64.0 - distance0) * 0.25, 0.0, 1.0);
         if (alpha0 <= 0.0) discard;
-        outColor = vec4(mix(lit0, gameToneUnmap(hazeColor), far0), alpha0);
+        outColor = vec4(mix(lit0, fogFar, far0), alpha0);
         outLight = vec4(0.0);
         return;
   `,
@@ -302,7 +304,7 @@ const GameGlsl = Object.freeze({
         light = mix(vec3(luma), light, mix(1.0, depthFx.x, ramp)) * pow(luma / depthFxExposure + 1e-7, ramp * (depthFx.y - 1.0));
       }
       float farRamp = clamp((distance - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
-      vec3 colour = mix(fogNear, gameToneUnmap(hazeColor), farRamp);
+      vec3 colour = mix(fogNear, fogFar, farRamp);
       return light + gameFogAmount(distance) * (colour - light);
     }
     // Back from the picture to light (without a colour shift, as at noon; what was clipped stays at 1).
@@ -576,7 +578,7 @@ const GameGlsl = Object.freeze({
           // Water higher up than the sea (its vertex shader's o1.w = saturate((z - 1 - waterRenderSimParam.z) x 0.5),
           // that z 0 in the traces) mirrors the far fog's colour instead (globalFogColor; here the haze's).
           float upHigh = clamp((vPosition.z + waterZ - 1.0) * 0.5, 0.0, 1.0);
-          vec3 mirroredWater = mix(mirroredLight * waterReflect, gameToneUnmap(hazeColor), upHigh);
+          vec3 mirroredWater = mix(mirroredLight * waterReflect, fogFar, upHigh);
           vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredWater + glint)
                           + sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * waterShadow * 0.05;
           // The near field's foam over it (r0.z): 3 x (the sun's light x f.x + the light from around x f.y), by the
@@ -971,6 +973,7 @@ function setToneUniforms() {
   gl.uniform2f(loc.pedShineScale, sky.directionalLightW ?? 1, sky.globalScalarsW ?? 0);
   const fog = sky.fog || {};
   gl.uniform3fv(loc.fogNear, (fog.nearColor || [0, 0, 0]).map(c => c * (sky.exposure || 1)));
+  gl.uniform3fv(loc.fogFar, farFogLight());
   gl.uniform3f(loc.fogParams, fog.start ?? 150, fog.end ?? 1500, fog.nearAmount ?? 0);
   gl.uniform4fv(loc.depthFx, fog.depthFx || [1, 1, 0, 0]);
   gl.uniform1f(loc.depthFxExposure, sky.exposure || 1);
