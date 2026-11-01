@@ -678,6 +678,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return location;
     }
 
+    /// <summary>The height of the scene's origin the water's corners are taken from (their world z = theirs + this).</summary>
+    public float WaterOriginZ { get; private set; }
+
+    /// <summary>The water's corners' colours from water.dat (red, green, blue), one per corner of <see cref="Water"/>.</summary>
+    public List<Vector3> WaterColors { get; } = new List<Vector3>();
+
     /// <summary>The water quads of the game's common\data\water.dat that reach the area, cut to it.</summary>
     private void AddWater(string folder, Vector3 origin, float radius)
     {
@@ -686,6 +692,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
+      WaterOriginZ = origin.Z;
       foreach (string line in System.IO.File.ReadLines(path))
       {
         // Four corners of 7 numbers (x y z and four not needed here), then two more.
@@ -704,6 +711,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         foreach (var c in corners)
         {
           Water.Add(new Vector3(Math.Clamp(c.X, origin.X - radius, origin.X + radius), Math.Clamp(c.Y, origin.Y - radius, origin.Y + radius), c.Z) - origin);
+        }
+        // Each corner's other four numbers: its colour as water.fxc's vertex shader takes it (v2: red and blue weigh
+        // the near field's foam; the sea's 0 0 1 0.99).
+        for (int k = 0; k < 4; k++)
+        {
+          WaterColors.Add(new Vector3(v[k * 7 + 3], v[k * 7 + 4], v[k * 7 + 5]));
         }
       }
     }
@@ -1333,6 +1346,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           ["id"] = water, ["glass"] = true, ["water"] = true, ["cutout"] = false, ["blend"] = false, ["decal"] = false, ["hidden"] = false,
           ["texture"] = null, ["color"] = new JsonArray(0.18f, 0.38f, 0.42f),
           ["normal"] = WaterSurface != null ? url(WaterKey) : null,
+          // (Its points' world height less theirs: water.fxc fades the mirror by the world z.)
+          ["worldZ"] = WaterOriginZ,
         });
         var positions = Water.SelectMany(p => new[] { p.X, p.Y, p.Z }).ToArray();
         var indices = new List<ushort>();
@@ -1347,6 +1362,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           ["id"] = id, ["material"] = water, ["background"] = true,
           ["positions"] = Floats(positions),
           ["normals"] = Floats(Water.SelectMany(_ => new[] { 0f, 0f, 1f }).ToArray()),
+          ["colors"] = Floats(WaterColors.SelectMany(c => new[] { c.X, c.Y, c.Z }).ToArray()),
           ["indices"] = Convert.ToBase64String(MemoryMarshal.AsBytes(indices.ToArray().AsSpan())),
         });
         visible.Add(id);

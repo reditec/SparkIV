@@ -147,11 +147,16 @@
     uniform sampler2D tex; uniform bool useTexture; uniform bool hasNormal; uniform vec3 color;
     // A vehicle's paint on its texture (its shader: texture x matDiffuseColor, the vehicle's colour); white else.
     uniform vec3 paint;
+    // gta_vehicle_paint3's second layer (on tex1, the second texture coordinates): x paint2, laid over by its alpha.
+    uniform bool paint2On; uniform vec4 paint2;
     // A vehicle's shader (as the game's gta_vehicle_*): its dirt (texture's red x the vehicle's dirt mixes the
     // colour towards dirtColor), its shine and mirrored surroundings by the shader (see the game's file:
     // vehicleShine, vehicleSpec).
     uniform bool vehicle; uniform bool useDirt; uniform sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
     uniform bool useEnv; uniform sampler2D envTex;
+    // Whether the mirrored surroundings are weighted by the specular map and specularColorFactor (the shader has that
+    // parameter) or by reflectivePower alone (gta_reflect, gta_normal_reflect ...).
+    uniform bool envSpecular;
     // gta_vehicle_paint2's second shine: its colour (the vehicle's third) and the exponent's and strength's
     // factors (see CutsceneMessages.Scene); none while the strength's is 0.
     uniform vec3 spec2Color; uniform vec2 spec2Scale;    uniform vec3 light; uniform vec3 toEye; uniform float alpha; uniform bool lines; uniform bool cutout; uniform bool stipple;
@@ -197,7 +202,7 @@
     uniform float emissiveScale; uniform float emissiveGlow; uniform bool glowOnly;
     // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
-    uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness;
+    uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness; uniform float parallax;
     uniform bool useSpecMap; uniform sampler2D specTex; uniform vec3 specMask; uniform float specPower; uniform float specIntensity;
     // Shine without a specular map, as from a white one (gta_normal, rage_default: GtaIVPcMaterials.IsFlatSpecular).
     uniform bool specFlat;
@@ -224,7 +229,7 @@
     // draw 84486442); written to GBuffer1 rounded down to 1/64 (floor(64 (n + 1)) / 128 in its 10-bit channels,
     // the rest in its alpha), read as 2 x - 0.99999 and normalised (the lamps' programs, the TLAD trace GTAIV.3:
     // 102287953; GTA IV's cutscene lights also read the rest from the alpha, GTAIV.2 PS 0x26b13980).
-    vec3 pedBumped(vec3 n, vec4 t, vec2 uv) {
+    vec3 pedBumpedRaw(vec3 n, vec4 t, vec2 uv) {
       vec4 raw = texture(normalTex, uv);
       vec2 xy = 1.0 - raw.w - raw.x >= 0.0 ? raw.wy : raw.xy;
       vec2 k = (xy - 0.5) * bumpiness;
@@ -232,9 +237,11 @@
       // (The map's and props' the same: gta_normal_spec's deferred_draw vs 4 makes the binormal cross(tangent, normal)
       // x w as well.)
       vec3 b = cross(t.xyz, n) * t.w;
-      vec3 g = normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
-      // Drawn forward (see-through: a map's glass), as is - its program uses the normal without the G-buffer's rounding
-      // (gta_glass's draw, ps 1: nrm of the sum).
+      return normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
+    }
+    // The bent normal as the lighting reads it back: rounded as the G-buffer stores it; drawn forward (see-through: a
+    // map's glass) as it is - its program uses it without that rounding (gta_glass's draw, ps 1: nrm of the sum).
+    vec3 gBufferRounded(vec3 g) {
       if (textureAlpha) return g;
       vec3 stored = round(floor(64.0 * (g + 1.0)) / 128.0 * 1023.0) / 1023.0;
       return normalize(stored * 2.0 - 0.99999);
@@ -250,6 +257,8 @@
     uniform bool reflectOn; uniform sampler2D reflectTex; uniform vec2 screenSize; uniform float clipBelow;
     // reflectTex holds the mirrored scene's light (premultiplied, its alpha what was drawn), not its picture.
     uniform bool reflectLight;
+    // (waterZ: what to add to the water's z for its world height.)
+    uniform float waterZ;
     uniform bool water; uniform bool waterWaves; uniform sampler2D waterSim; uniform highp sampler2D dynamicWater; uniform vec2 dynamicMin; uniform vec3 waterColor;
     // The scene's depth before the water (for its see-through, see the game's file: water), the depth's range and
     // the time cycle's water alpha (waterColour.w); off where there is none (reflections, without post effects).
@@ -283,7 +292,18 @@
         float isWater = inside ? texture(waterMask, q).r : 0.0;
         if (waterGrid ? isWater < 0.5 : isWater >= 0.5) discard;
       }
-      vec4 base = useTexture ? texture(tex, vUv) * vec4(paint, 1.0) : vec4(color, 1.0);
+      // gta_parallax_specmap (deferred_draw): the texture and the normal map at uv + (height x s - 0.5 s) x V.xy, the
+      // height the normal map's alpha, V the view to the camera in the tangent frame (its vertex shader's o8:
+      // tangent, cross(tangent, normal) x w, normal), normalised; the specular map at uv.
+      vec2 uvP = vUv;
+      if (parallax > 0.0 && useNormalMap && useTexture && dot(vTangent.xyz, vTangent.xyz) > 0.25) {
+        vec3 pn = normalize(vNormal), pt = normalize(vTangent.xyz), pe = eyeAt - vPosition;
+        vec3 pv = vec3(dot(pt, pe), dot(cross(pt, pn) * vTangent.w, pe), dot(pn, pe));
+        uvP += (texture(normalTex, vUv).a * parallax - 0.5 * parallax) * pv.xy / max(length(pv), 1e-5);
+      }
+      vec4 base = useTexture ? texture(tex, uvP) * vec4(paint, 1.0) : vec4(color, 1.0);
+      // gta_vehicle_paint3 (deferred_draw): lrp(TextureSampler2 x matDiffuseColor2's alpha, it, texture x matDiffuseColor).
+      if (paint2On && useTexture) { vec4 l = texture(tex1, vUv1) * paint2; base.rgb = mix(base.rgb, l.rgb, clamp(l.a, 0.0, 1.0)); }
       if (vehicle) base.rgb *= vColor;
       float dirtAmount = 0.0;
       if (vehicle && useDirt && dirtLevel > 0.0) {
@@ -304,7 +324,21 @@
       // Cut-outs (leaves, fences, hair): as the game's G-buffer pass, whose pixel shader (GTAIV.1.trace, 0x22f07a80:
       // def c0.x 0.176470593, texkill) drops what has alpha up to 45 / 255. bc_3's lattice railings stay almost
       // solid from afar, where the averaged alpha of their mip levels lies between that and the 0.35 used here before.
-      if (cutout && alpha >= 1.0 && base.a <= 0.17647) discard;
+      // (The texture's alpha x the vertex's, as the map shaders' deferred_draw; also in the opaque bucket, see
+      // GtaIVPcMaterials.DrawingOf.)
+      if (cutout && !tree && alpha >= 1.0 && base.a * vAlpha <= 0.17647) discard;
+      // A tree's leaves (gta_trees' deferred_draw, ps 1): no alpha threshold, its texture's alpha picks a stipple level
+      // (alpha x 3.996: row its whole part, column a quarter of the rest, as gta_ped's) and of each 8 x 8 pixels only
+      // that level's share stays (stipple.wtd all_stips: kept of 64); spread here in an ordered 8 x 8 pattern.
+      if (tree && alpha >= 1.0) {
+        const float keptOf64[16] = float[16](0.0, 6.0, 8.0, 12.0, 11.0, 12.0, 16.0, 24.0, 32.0, 40.0, 48.0, 52.0, 52.0, 56.0, 58.0, 64.0);
+        float level = clamp(base.a, 0.0, 1.0) * 3.996;
+        int index = int(floor(level)) * 4 + int(floor(fract(level) * 4.0));
+        ivec2 q = ivec2(gl_FragCoord.xy) & 7;
+        int qx = q.x ^ q.y;
+        int order = ((qx & 1) << 5) | ((q.x & 1) << 4) | ((qx & 2) << 2) | ((q.x & 2) << 1) | ((qx & 4) >> 1) | ((q.x & 4) >> 2);
+        if (float(order) >= keptOf64[index]) discard;
+      }
       // Without normals in the mesh, the face's own normal.
       vec3 n = hasNormal ? normalize(vNormal) : normalize(cross(dFdx(vPosition), dFdy(vPosition)));
       // Drawn into the mirrored surroundings' map (the game's file: parabolicFragment), by the mesh's own normal.
@@ -330,18 +364,25 @@
       // Drawn into a lamp's shadow map (the game's file: lampShadowFragment).
       if (lampShadowPass) { ${GameGlsl.lampShadowFragment} }
       // Both sides lit: the normal turned to the camera, then bent by the normal map.
-      if (dot(n, eyeAt - vPosition) < 0.0) n = -n;
+      // (Not a tree's: gta_trees' G-buffer pass writes its vertex normal as it is on both sides.)
+      if (!tree && dot(n, eyeAt - vPosition) < 0.0) n = -n;
       // A map *_reflect shader's mirrored surroundings, added to its albedo before it is lit (GTA IV (PC):
       // gta_spec_reflect's G-buffer pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120): its environment
-      // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the vertex's normal (the world's z up), x the
-      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower. See-through glass by its
-      // bumped normal (the GTA IV trace GTAIV.trace, bc_1's bedroom pane, PS 0x2cc5d340).
+      // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the normal - the bent one, before the G-buffer's
+      // rounding, where the shader has a normal map (gta_normal_reflect, gta_normal_spec_reflect, the glass) - x the
+      // specular map's channels in specMapIntMask x specularColorFactor x reflectivePower; a shader without
+      // specularColorFactor (gta_reflect, gta_normal_reflect and its decal, gta_normal_cubemap_reflect) x
+      // reflectivePower alone (their deferred_draw: mad oC0, env, reflectivePower, albedo; envSpecular).
       vec3 vertexN = n;
-      if (useNormalMap && useTexture) n = dot(vTangent.xyz, vTangent.xyz) > 0.25 ? pedBumped(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, vUv) : bumped(n, vPosition, vUv);
+      vec3 envN = n;
+      if (useNormalMap && useTexture) {
+        if (dot(vTangent.xyz, vTangent.xyz) > 0.25) { envN = pedBumpedRaw(dot(n, vNormal) < 0.0 ? -vNormal : vNormal, vTangent, uvP); n = gBufferRounded(envN); }
+        else { n = bumped(n, vPosition, uvP); envN = n; }
+      }
       if (useEnv && useTexture) {
-        vec3 r = reflect(normalize(vPosition - eyeAt), textureAlpha ? n : vertexN);
+        vec3 r = reflect(normalize(vPosition - eyeAt), envN);
         vec4 spec = useSpecMap ? texture(specTex, vUv) : vec4(1.0);
-        vec3 mirroredEnv = texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * dot(spec.rgb, specMask) * specIntensity * reflectivePower;
+        vec3 mirroredEnv = texture(envTex, -0.5 * (r.xz / max(length(r), 1e-5) + 1.0)).rgb * (envSpecular ? dot(spec.rgb, specMask) * specIntensity : 1.0) * reflectivePower;
         // Drawn see-through (forward, blended by the texture's x the vertex's alpha), divided by that alpha first,
         // 100 times below 0.01, so it shows whole on clear glass: the GTA IV trace GTAIV.2's glass table top in
         // Bernie's flat (bc_1 s2 f84, draw 76996856, PS 0x25b4ebe0: r5 = env x 1/alpha + albedo, then x the light);
@@ -452,7 +493,11 @@
         // as the game's see-through map materials light them (gta_normal's forward program, PS 0x2493ac20).)
         vec3 lampLight = sceneLightColor[i].rgb * reach * spot;
         lit += lampLight * max(dot(n, l), 0.0);
-        if (lampPower > 0.0) lampShine += lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
+        // Drawn forward, its shine as the forward programs have it (gta_spec's draw: the light x saturate(n.l) x
+        // |R.l|^(the power / 4)); a cutscene's light on a ped as the G-buffer's.
+        if (lampPower > 0.0) lampShine += forwardLit
+          ? lampLight * clamp(dot(n, l), 0.0, 1.0) * pow(abs(dot(l, lampMirrored)), lampPower * 0.25)
+          : lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
       }
       // The shine, where the surface faces half way between the light and the camera: how bright from the
       // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
@@ -560,6 +605,7 @@
       dirtLevel: gl.getUniformLocation(program, "dirtLevel"),
       reflectivePower: gl.getUniformLocation(program, "reflectivePower"),
       useEnv: gl.getUniformLocation(program, "useEnv"),
+      envSpecular: gl.getUniformLocation(program, "envSpecular"),
       envTex: gl.getUniformLocation(program, "envTex"),
       spec2Color: gl.getUniformLocation(program, "spec2Color"),
       spec2Scale: gl.getUniformLocation(program, "spec2Scale"),      light: gl.getUniformLocation(program, "light"),
@@ -582,6 +628,8 @@
       tex2: gl.getUniformLocation(program, "tex2"),
       tex3: gl.getUniformLocation(program, "tex3"),
       layerOn: gl.getUniformLocation(program, "layerOn"),
+      paint2On: gl.getUniformLocation(program, "paint2On"),
+      paint2: gl.getUniformLocation(program, "paint2"),
       outdoor: gl.getUniformLocation(program, "outdoor"),
       sunDir: gl.getUniformLocation(program, "sunDir"),
       sunColor: gl.getUniformLocation(program, "sunColor"),
@@ -591,6 +639,7 @@
       hazeStart: gl.getUniformLocation(program, "hazeStart"),
       hazeEnd: gl.getUniformLocation(program, "hazeEnd"),
       water: gl.getUniformLocation(program, "water"),
+      waterZ: gl.getUniformLocation(program, "waterZ"),
       waterColor: gl.getUniformLocation(program, "waterColor"),
       waterReflect: gl.getUniformLocation(program, "waterReflect"),
       toneGamma: gl.getUniformLocation(program, "toneGamma"),
@@ -650,6 +699,7 @@
       useNormalMap: gl.getUniformLocation(program, "useNormalMap"),
       normalTex: gl.getUniformLocation(program, "normalTex"),
       bumpiness: gl.getUniformLocation(program, "bumpiness"),
+      parallax: gl.getUniformLocation(program, "parallax"),
       useSpecMap: gl.getUniformLocation(program, "useSpecMap"),
       specFlat: gl.getUniformLocation(program, "specFlat"),
       specTex: gl.getUniformLocation(program, "specTex"),
@@ -669,6 +719,7 @@
       shadowCascade: gl.getUniformLocation(program, "shadowCascade"),
       shadowRef: gl.getUniformLocation(program, "shadowRef"),
       shadowBias: gl.getUniformLocation(program, "shadowBias"),
+      shadowBlend: gl.getUniformLocation(program, "shadowBlend"),
       shadowOn: gl.getUniformLocation(program, "shadowOn"),
       shadowMap: gl.getUniformLocation(program, "shadowMap"),
       shadowBox: gl.getUniformLocation(program, "shadowBox"),
@@ -875,17 +926,21 @@
     const material = {
       texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true, noWater: m.noWater === true,
       color: m.paint || m.color || hsl(hue, 0.25, 0.62), paint: m.paint || [1, 1, 1], layerCount, layers: [null, null, null],
+      paint2Tex: null, paint2: m.paint2 || [1, 1, 1, 1],
       vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0, specular2: m.specular2 || null, vehicleShine: m.vehicleShine || null,
       // Bumps and shine.
-      normal: null, specular: null, bumpiness: m.bumpiness ?? 1,
-      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularFlat: m.specularFlat === true, specularMask: m.specularMask || [1, 0, 0],
+      normal: null, specular: null, bumpiness: m.bumpiness ?? 1, parallax: m.parallax || 0,
+      specularPower: m.specularPower || 0, specularIntensity: m.specularIntensity || 0, specularFlat: m.specularFlat === true, envSpecular: m.envSpecular !== false, specularMask: m.specularMask || [1, 0, 0],
       dirtMask: m.dirtMask || null, emissive: m.emissive === true,
       // Only gta_emissivestrong's: the night ones' brightness hangs on the time of day (not known here yet).
       emissiveScale: m.emissiveMultiplier && !m.emissiveAtNight ? m.emissiveMultiplier : 0,
       // Outside as the game's (see emissiveGlow): its multiplier, and whether it shines only at night.
       emissiveMultiplier: m.emissiveMultiplier || 0, emissiveNight: m.emissiveAtNight === true,
       // gta_emissivestrong: its glow pushed back by zShift, the other emissives' pulled forward (see glowShift).
-      emissiveStrong: m.emissiveStrong === true, tree: m.tree === true,
+      emissiveStrong: m.emissiveStrong === true, tree: m.tree === true, worldZ: m.worldZ || 0,
+      // Into the sun's shadow map blended by its texture's alpha (see shadowTarget): the see-through, decal and
+      // cut-out buckets, drawn there by their own wd_draw; not a tree's (gta_trees' wd_draw blends nothing).
+      alphaShadow: [1, 2, 3].includes(m.drawBucket) && m.tree !== true && m.vehicle !== true,
       // Skin: SubColor (r, g, b), SubScatWrap, SubScatWidth, or null.
       subSurface: m.subSurface || null,
     };
@@ -895,6 +950,7 @@
     if (m.specular) loadTexture(m.specular, t => material.specular = t);
     if (m.environment) loadTexture(m.environment, t => material.environment = t);
     if (m.dirtTexture && m.dirtLevel > 0) loadTexture(m.dirtTexture, t => material.dirt = t);
+    if (m.paint2Texture) loadTexture(m.paint2Texture, t => material.paint2Tex = t);
     (m.layers || []).forEach((url, i) => { if (url && i < 3) loadTexture(url, t => material.layers[i] = t); });
   }
 
@@ -1585,6 +1641,10 @@
     // .y, HDRExposureClamp), the page's exposure; off without them (then the picture alone, as before).
     uniform bool skyHdrOn; uniform vec3 skyColorH; uniform vec3 azimuthH; uniform vec3 azimuthEastH; uniform vec2 azimuthHS;
     uniform vec3 sunColorH; uniform vec4 skyHdr; uniform float pageExposure;
+    // The near fog's colour (globalFogColorN, in the page's light) and NearFogAmount (globalFogParams.w).
+    uniform vec3 skyFogNear; uniform float skyNearFog;
+    // The far fog's colour in the page's light (gtaWaterColor, the same as globalFogColor in the traces).
+    uniform vec3 skyFarFog;
     // Its clouds (TimeCycle.cs: CloudColor, SunsetColor, TopCloudColor, TopCloudBiasDetailThresholdHeight;
     // CloudThreshold, CloudBias, CloudShadowStrength, CloudInscatteringRange; the thickness, the detail's scale and
     // strength, CloudFadeOut; CloudShadowOffset), from the noise rage_perlinnoise makes (PERLIN_FRAGMENT) and the
@@ -1660,8 +1720,8 @@
         // saturate(0.5 cos - 0.0625) x SunSize) x 0.5) x 4 (cos to the sun, a = saturate((1 - HDRSunExposure.y) x (12.58 cos -
         // 11.616)), b = saturate(0.9375 - 0.0625 cos), SunSize 1 in both traces; the disc's term x SunCentre.z, 0
         // there); then (sun + sun^4) x HDRSunExposure.x + saturate(saturate(1 - s) x HDRSunExposure.x x the sky's
-        // colour), the sun = s x SunColor; x HDRExposure, at most HDRExposureClamp; no haze (the post's fog leaves
-        // the sky out). Here in the page's light (x its exposure). Then the clouds over it, as the pixel program
+        // colour), the sun = s x SunColor; x HDRExposure, at most HDRExposureClamp; of the post's fog only the near
+        // fog's share (below). Here in the page's light (x its exposure). Then the clouds over it, as the pixel program
         // works them out (below).
         vec3 skyV = skyColorH + mix(azimuthEastH, azimuthH, 0.5 * dir.x + 0.5) * (1.0 - clamp(dir.z * azimuthHS.x, 0.0, 1.0)) * azimuthHS.y;
         float c = dot(dir, sunDir);
@@ -1702,6 +1762,17 @@
           glow = mix(glow, mix(cloud, topCloudColorH, top), clamp(dir.z * 4.0 - cloudDetailH.w, 0.0, 1.0) * total);
         }
         outLight = vec4(min(glow * skyHdr.x, vec3(skyHdr.w)) * pageExposure, 1.0);
+        // rage_postfx's fog pass (ps 20) on the sky too, there without the distance: + NearFogAmount (globalFogParams.w)
+        // x (the near fog's colour - it); not on the map of the surroundings nor the water's mirror, which don't go
+        // through it (skyNearFog 0 there).
+        // Below the horizon the dome fades towards gtaWaterColor (the far fog's colour in the traces) by
+        // saturate((gtaSkyDomeFade.x - y) x .y), (0, 0.00025): y the dome's height there - the game's dome is 10000 m
+        // across, 2000 m high and stretched twice below the horizon (gWorld; its vertex program's y - saturate(-y)).
+        if (dir.z < 0.0) {
+          float t = inversesqrt(dot(dir.xy, dir.xy) * 1e-8 + dir.z * dir.z / 1.6e7);
+          outLight.rgb = mix(outLight.rgb, skyFarFog, clamp(-dir.z * t * 0.00025, 0.0, 1.0));
+        }
+        if (!toMap) outLight.rgb = mix(outLight.rgb, skyFogNear, skyNearFog);
         if (toMap) outColor = outLight;
       }
     }`;
@@ -1792,14 +1863,15 @@
   }
 
   let skyProgram = null, skyLoc = null, skyQuad = null, skyBuffer = null, cloudTex = null, cloudDetailTex = null;
-  // toMap: into the mirrored surroundings' map (its light; only with the game's sky).
-  function drawSky(matrix, eyeAt, toMap = false) {
+  // toMap: into the mirrored surroundings' map (its light; only with the game's sky); mirrored: into the water's
+  // mirror (as the game's ReflectTexture, before its post effects: without their fog's share).
+  function drawSky(matrix, eyeAt, toMap = false, mirrored = false) {
     if (!skyProgram) {
       skyProgram = createProgram(SKY_VERTEX, SKY_FRAGMENT);
       skyLoc = ["inverseViewProjection", "eye", "horizon", "zenith", "sunDir", "haze", "hasClouds", "clouds", "detail",
                 "skyHdrOn", "skyColorH", "azimuthH", "azimuthEastH", "azimuthHS", "sunColorH", "skyHdr", "pageExposure",
                 "cloudsOn", "perlin", "cloudColorH", "sunsetH", "topCloudColorH", "topCloudH", "cloudShapeH", "cloudDetailH",
-                "cloudShadowOffsetH", "cloudEdgeH", "toMap"]
+                "cloudShadowOffsetH", "cloudEdgeH", "toMap", "skyFogNear", "skyNearFog", "skyFarFog"]
         .reduce((o, n) => (o[n] = gl.getUniformLocation(skyProgram, n), o), { corner: gl.getAttribLocation(skyProgram, "corner") });
       skyQuad = gl.createVertexArray();
       gl.bindVertexArray(skyQuad);
@@ -1828,6 +1900,10 @@
       gl.uniform3fv(skyLoc.sunColorH, h.sunColor);
       gl.uniform4f(skyLoc.skyHdr, h.exposure, h.sunExposure[0], h.sunExposure[1], h.clamp);
       gl.uniform1f(skyLoc.pageExposure, sky.exposure || 1);
+      const fog = sky.fog || {};
+      gl.uniform3fv(skyLoc.skyFogNear, (fog.nearColor || [0, 0, 0]).map(c => c * (sky.exposure || 1)));
+      gl.uniform1f(skyLoc.skyNearFog, mirrored ? 0 : fog.nearAmount ?? 0);
+      gl.uniform3fv(skyLoc.skyFarFog, farFogLight());
       if (perlin) {
         gl.uniform3fv(skyLoc.cloudColorH, h.cloudColor);
         gl.uniform3fv(skyLoc.sunsetH, h.sunsetColor);
@@ -1887,6 +1963,17 @@
   }
   function hazeColour() {
     return sky.horizon;
+  }
+  // The far fog's colour in light (the page's): the haze's colour taken back through the tone mapping, as the main
+  // shader's gameToneUnmap(hazeColor) does it.
+  function farFogLight() {
+    const t = sky.tone || {};
+    const cc = (t.colorCorrect || [0.5, 0.5, 0.5]).map(c => Math.max(c * 2, 1e-4));
+    const gamma = sky.gamma || 1, saturation = t.saturation ?? 1;
+    const m = hazeColour().map((p, i) => p / cc[i]);
+    const L = Math.pow(Math.max(m[0] * 0.2125 + m[1] * 0.7154 + m[2] * 0.0721, 1e-5), 1 / gamma);
+    const k = Math.pow(Math.min(Math.max(L, 1e-5), 1), gamma - 1);
+    return m.map(v => Math.max((v / k - (1 - saturation) * L) / Math.max(saturation, 1e-3), 0) / (toneScaleUsed * (1 + (t.bloom ?? 0) * 0.25)));
   }
 
   // A column-major 4x4 matrix's inverse.
@@ -2681,8 +2768,9 @@
       // objects reaching above the camera, as the game draws it (no people, no vehicles, nothing below the camera).
       // castBox: into a cascade of the sun's shadow map (the game's file: sunShadowCascades) - whatever is solid
       // and lies across its box on the light's u and v (people and vehicles too).
-      // castCast: only the cast into it (else only the map's objects).
-      const drawMeshes = (reflecting, matrix, eyeNow, mapPass, castBox, castCast) => {
+      // castCast: only the cast into it (else only the map's objects); castAlpha: only the map's see-through, decal and
+      // cut-out materials, blended by their texture's alpha (else only the rest, solid; see shadowTarget).
+      const drawMeshes = (reflecting, matrix, eyeNow, mapPass, castBox, castCast, castAlpha) => {
       // Only what can be in the picture: a map object (it stands still) whose bounding sphere is inside the
       // view (the six planes of the view-projection); actors move, they are always drawn. Mirrored, not what
       // lies under the water nor what would come out smaller than a few pixels (each frame draws the scene twice).
@@ -2755,6 +2843,8 @@
           gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(true);
         }
         else if (glassPass) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); }
+        // (The shadow map's see-through phase blended SRCALPHA / INVSRCALPHA, writing depth, as the game's wd_draw.)
+        else if (castBox && castAlpha && shadowMapState && shadowMapState.blend) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(true); }
         else { gl.disable(gl.BLEND); gl.depthMask(true); }
         if (glassPass && waterLater) {
           gl.uniform1i(loc.waterBehindOn, false);
@@ -2793,7 +2883,13 @@
           // Glass and what is see-through by its texture after everything solid, without writing depth.
           // Outside the water is drawn whole (its overlapping quads see-through came out lighter where two lay).
           const seeThrough = (mat.glass && !(mat.water && outside)) || (mat.blend && showTextures && !!mat.texture);
-          if (waterLater && mat.water && outside) { if (!waterPass) continue; }
+          if (castBox) {
+            // Into the sun's shadow map (in its solid pass only): the cast solid (not its see-through parts), the
+            // map's objects each in its phase.
+            if (waterPass) continue;
+            if (m.actor ? seeThrough || castAlpha : (mat.alphaShadow === true) !== !!castAlpha) continue;
+          }
+          else if (waterLater && mat.water && outside) { if (!waterPass) continue; }
           else if (waterPass || seeThrough !== glassPass) continue;
           // Into the mirrored surroundings' map: only what its shader reads (texture or colour, terrain layers, the
           // vertex colours' AO; the rest is the same throughout that pass, set before it).
@@ -2804,6 +2900,7 @@
             gl.uniform1i(loc.hasNormal, m.hasNormal);
             gl.uniform3fv(loc.color, mat.color);
             gl.uniform1i(loc.baked, m.baked && !mat.vehicle);
+            gl.uniform1i(loc.paint2On, false);
             const layered = m.layered && textured && mat.layerCount > 1;
             gl.uniform1i(loc.layers, layered ? mat.layerCount : 1);
             if (layered) {
@@ -2823,13 +2920,15 @@
             gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0);
             continue;
           }
-          // Into the sun's shadow map: only its shape and where its texture cuts it out (the rest is the same
-          // throughout that pass, set before it).
+          // Into the sun's shadow map: its shape, nothing cut out; the see-through, decal and cut-out materials with
+          // their texture's alpha to blend by (the rest is the same throughout that pass, set before it).
           if (castBox) {
-            const cut = mat.cutout === true && showTextures && !!mat.texture;
-            gl.uniform1i(loc.useTexture, cut);
-            gl.uniform1i(loc.cutout, cut);
-            if (cut) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
+            const blended = !!castAlpha && showTextures && !!mat.texture;
+            gl.uniform1i(loc.useTexture, blended);
+            gl.uniform1i(loc.cutout, false);
+            gl.uniform1i(loc.tree, false);
+            gl.uniform1i(loc.shadowBlend, blended);
+            if (blended) gl.bindTexture(gl.TEXTURE_2D, mat.texture);
             useSkin(m);
             if (!m.hasAlpha && loc.vertexAlpha >= 0) gl.vertexAttrib1f(loc.vertexAlpha, 1);
             gl.bindVertexArray(m.vao);
@@ -2911,6 +3010,7 @@
           gl.uniform1f(loc.reflectivePower, mat.reflectivePower || 0);
           // A map *_reflect shader's environment texture: on unit 4 (the third terrain layer's, which it hasn't).
           gl.uniform1i(loc.useEnv, textured && !!mat.environment && !mat.vehicle);
+          gl.uniform1i(loc.envSpecular, mat.envSpecular !== false);
           if (textured && mat.environment && !mat.vehicle) {
             gl.uniform1i(loc.envTex, 4);
             gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, mat.environment); gl.activeTexture(gl.TEXTURE0);
@@ -2922,6 +3022,7 @@
           const vehicleSpec = mat.vehicleShine || [0.15, 190, 0];
           gl.uniform3fv(loc.vehicleSpec, vehicleSpec);
           gl.uniform1i(loc.water, mat.water === true);
+          gl.uniform1f(loc.waterZ, mat.worldZ || 0);
           gl.uniform1i(loc.waterWaves, mat.water === true && !!mat.normal);
           if (mat.water && outside && !reflecting) waterShown = true;
           gl.uniform1i(loc.lines, false);
@@ -2936,6 +3037,14 @@
             });
             gl.activeTexture(gl.TEXTURE0);
           }
+          // gta_vehicle_paint3's second layer on unit 2 (the first terrain layer's, which it hasn't).
+          const painted2 = m.layered && textured && !layered && !!mat.paint2Tex;
+          gl.uniform1i(loc.paint2On, painted2);
+          if (painted2) {
+            gl.uniform4fv(loc.paint2, mat.paint2);
+            gl.uniform1i(loc.tex1, 2);
+            gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, mat.paint2Tex); gl.activeTexture(gl.TEXTURE0);
+          }
           // Bumps and shine: the normal map on unit 5, the specular map on unit 6.
           gl.uniform1i(loc.useNormalMap, textured && !!mat.normal);
           gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
@@ -2945,6 +3054,7 @@
           // deferred_draw is the same). Without tangents (bumped, its tangent space from the screen, not
           // checked against the game) they stay off: on bc_3's harbour wall that made the picture further from the game's.
           gl.uniform1f(loc.bumpiness, m.pedBumps ? mat.bumpiness ?? 1 : 0);
+          gl.uniform1f(loc.parallax, m.pedBumps ? mat.parallax : 0);
           gl.uniform1f(loc.specPower, mat.specularPower || 0);
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
@@ -3026,7 +3136,8 @@
           // the G-buffer pass from 78363648 with CULLMODE CW): the potted plant's one-sided leaves (E1elizaLounge4,
           // gta_default "grass", draw 78363967) showed their backs as leaves the game doesn't show.
           // (Not the water: its quads are SparkIV's own, made from water.dat, whichever way they face.)
-          const mapSolid = m.baked && !m.actor && !glassPass && !mat.water;
+          // (Not a tree's: gta_trees' deferred_draw has two passes, CULLMODE CCW then CW - both sides.)
+          const mapSolid = m.baked && !m.actor && !glassPass && !mat.water && !mat.tree;
           if (((m.actor && m.baked && (!glassPass || (mat.glass && mat.vehicle))) || mapGlass || forwardMap || mapSolid || reflecting) && !castBox) {
             gl.enable(gl.CULL_FACE);
             gl.cullFace(gl.BACK);
@@ -3144,7 +3255,6 @@
       gl.uniform1i(loc.shadowMap, 11);
       if (shadowMapNow) {
         gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
-        const full = shadowMapNow.size * 4, size = shadowMapNow.size;
         gl.uniform3fv(loc.shadowU, shadowSet.u);
         gl.uniform3fv(loc.shadowV, shadowSet.v);
         gl.uniform3fv(loc.shadowH, shadowSet.h);
@@ -3156,29 +3266,35 @@
         gl.uniform1f(loc.alpha, 1.0);
         gl.disable(gl.CULL_FACE);
         gl.disable(gl.POLYGON_OFFSET_FILL);
-        const cascades = cast => shadowSet.boxes.forEach((box, k) => {
-          gl.viewport(k * size, 0, size, size);
-          gl.uniform4fv(loc.shadowCascade, box);
+        const cascade = (k, cast, alphaPhase) => {
+          gl.uniform4fv(loc.shadowCascade, shadowSet.boxes[k]);
           gl.uniform1f(loc.shadowBias, ShadowBias[k]);
-          drawMeshes(false, vp.matrix, vp.eye, false, box, cast);
-        });
-        gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapNow.frame);
-        gl.viewport(0, 0, full, size);
-        gl.clearColor(-1e9, -1e9, 0, 0);
-        // The map's objects (red) only when the cascades or what is shown change (nothing there: lower than anything).
+          drawMeshes(false, vp.matrix, vp.eye, false, shadowSet.boxes[k], cast, alphaPhase);
+        };
+        // The map's objects (kept per cascade at 4096) only when the cascades or what is shown change: cleared to
+        // -100, the solid ones, then the see-through, decal and cut-out ones blended over them by their alpha.
         const shadowKey = [shadowSet.boxes.flat().map(v => v.toFixed(3)).join(), shadowSet.h.join(), shadowSet.ref.toFixed(3), visible.size, drawDistanceNow(), hazeEnd()].join("|");
         if (shadowKey !== shadowMapNow.key) {
           shadowMapNow.key = shadowKey;
-          gl.colorMask(true, false, false, false);
-          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-          cascades(false);
+          for (let k = 0; k < 4; k++) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapNow.workFrame);
+            gl.viewport(0, 0, shadowMapNow.big, shadowMapNow.big);
+            gl.clearColor(-100, 0, 0, 0);
+            gl.depthMask(true);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.uniform1i(loc.shadowBlend, false);
+            cascade(k, false, false);
+            cascade(k, false, true);
+            gl.disable(gl.BLEND);
+            gl.uniform1i(loc.shadowBlend, false);
+            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, shadowMapNow.workFrame);
+            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, shadowMapNow.staticFrames[k]);
+            gl.blitFramebuffer(0, 0, shadowMapNow.big, shadowMapNow.big, 0, 0, shadowMapNow.big, shadowMapNow.big, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+          }
         }
-        // The cast (green) each frame, with a depth of its own.
-        gl.colorMask(false, true, false, false);
-        gl.viewport(0, 0, full, size);
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        cascades(true);
-        gl.colorMask(true, true, true, true);
+        // The cast each frame per cascade, then the mean of max(map, cast) over 2 x 2 into the map (R16F).
+        shadowConvert(shadowMapNow, k => { gl.uniform1i(loc.shadowPass, true); gl.uniform1i(loc.shadowBlend, false); cascade(k, true, false); });
+        gl.clearColor(0, 0, 0, 0);
         gl.uniform1i(loc.shadowPass, false);
         gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, shadowMapNow.texture); gl.activeTexture(gl.TEXTURE0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
@@ -3250,7 +3366,7 @@
         // p' = (x, y, 2 level - z): the view-projection times that mirror.
         const mirror = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 2 * level, 1]);
         const mirrored = multiply4(vp.matrix, mirror), mirroredEye = [vp.eye[0], vp.eye[1], 2 * level - vp.eye[2]];
-        drawSky(mirrored, mirroredEye);
+        drawSky(mirrored, mirroredEye, false, true);
         gl.uniformMatrix4fv(loc.viewProjection, false, mirrored);
         gl.uniform3fv(loc.eyeAt, mirroredEye);
         // Cut half a metre under the water, as the game's clip plane for it (the GTA IV trace GTAIV.1, bc_3: set at
