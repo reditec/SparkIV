@@ -50,18 +50,34 @@ The G-buffer pass (`deferred_draw`) writes the shine into GB2: GB2.x = half the 
   sqrt(`specularFactor` / 512), as `gta_normal_spec` with a white map. bc_3's picnic basket (`csHamper`, `gta_normal`,
   `GTAIV.1.trace` G-buffer draw 188259798: `specularColorFactor` 0.12, `specularFactor` 15): the game's light after
   its sun pass (188264545) 1.57 / 1.46 / 1.20, SparkIV 1.40 / 1.37 / 1.18 with it, 1.23 / 1.20 / 1.00 without.
+- The decals `gta_decal_glue`, `gta_normal_decal` and `gta_decal_dirt` the same, without a map (blended by their alpha;
+  glue writes GB2 whole, the other two only GB2.xy, keeping the AO beneath: colour-write masks 0x7 and 0x3).
 - The vehicle shaders (strength factor, power factor, as `GtaIVPcMaterials.VehicleShineOf` keeps them): paint1–3 and
   shuts (0.15, 190), mesh (1, 50), tire (1.4, 50), interior and interior2 (0.005, 10), badges and lightsemissive
   (0.225, 190, the strength at most 1), vehglass (0.225, 190, forward), chrome the material's own
   (`specularColorFactor`, `specularFactor`). Tire's and shuts' bumps are × 3 and × 5, not × `bumpiness`.
 
+## AO read from the G-buffer programs
+
+GB2.z is the AO the sun and ambient pass dims the light from around by.
+
+- Most map shaders: the vertex colour's (red by day, green by night, by `gDayNightEffects`; terrain the same, worked
+  out in its vertex program).
+- `gta_trees`: always 0.5 (GB2 = 0, 0.5, 0.5, 0; its vertex program works out the vertex colour's AO, the pixel
+  program doesn't use it). Albedo the texture alone, stencil 3.
+- `gta_emissive`, `gta_emissivestrong`, `gta_emissivenight` (their solid G-buffer pass): `globalScalars.z` (0.996 in
+  the traces), not the vertex colour, which only colours their glow. Albedo texture × `colorize`, no shine.
+
 ## Shaders in the cutscenes
 
 51 shaders are used by the reference cutscenes (bc_1, bc_3, the intro, et01_aa, et01_ba) and five TBoGT ones (e2_int,
 gt01_aa, bu01_aa, f1_aa, br01_aa); TLAD and TBoGT have no shader files of their own. Their G-buffer passes are 44
-different programs, their forward `draw` passes 36, their `unlit_draw` passes 11. Not yet checked against SparkIV:
-the decals (they write GB2 by their colour-write masks), the cube-map reflect shaders (`dcl_cube`; SparkIV reads a
-2D map), terrain, trees, wire, parallax, hair and the emissives' G-buffer program.
+different programs, their forward `draw` passes 36, their `unlit_draw` passes 11. Checked against SparkIV
+and matching: the map shaders with a specular map, terrain, wire. Not yet matched: the cube-map reflect shaders
+(`gta_normal_cubemap_reflect`, `gta_normal_spec_cubemap_reflect`: `dcl_cube`; SparkIV reads a 2D map), parallax
+(`gta_parallax_specmap`: its texture coordinates offset by `parallaxScaleBias`), and the peds' sorted hair
+(`gta_hair_sorted_alpha_exp`: a G-buffer pass of zeros for depth and stencil, then the hair forward with alpha test 100
+and blending).
 
 ## Format
 

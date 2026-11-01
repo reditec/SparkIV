@@ -161,6 +161,8 @@
     uniform bool textureAlpha;
     // A dirt decal (gta_decal_dirt): the texture's channels in dirtMask say how much shows, the colour is the vertices'.
     uniform bool dirtDecal; uniform vec3 dirtMask;
+    // A tree's (gta_trees: its AO always 0.5, GtaIVPcMaterials.IsTree).
+    uniform bool tree;
     // A map object in its place (a cutscene's location): lit mostly by the light baked into its vertex colours
     // (red: as the game's shaders pass it on to the lighting), the view's own light only a little.
     uniform bool baked;
@@ -619,6 +621,7 @@
       clipBelow: gl.getUniformLocation(program, "clipBelow"),
       textureAlpha: gl.getUniformLocation(program, "textureAlpha"),
       dirtDecal: gl.getUniformLocation(program, "dirtDecal"),
+      tree: gl.getUniformLocation(program, "tree"),
       baked: gl.getUniformLocation(program, "baked"),
       grade: gl.getUniformLocation(program, "grade"),
       dirtMask: gl.getUniformLocation(program, "dirtMask"),
@@ -877,7 +880,7 @@
       // Outside as the game's (see emissiveGlow): its multiplier, and whether it shines only at night.
       emissiveMultiplier: m.emissiveMultiplier || 0, emissiveNight: m.emissiveAtNight === true,
       // gta_emissivestrong: its glow pushed back by zShift, the other emissives' pulled forward (see glowShift).
-      emissiveStrong: m.emissiveStrong === true,
+      emissiveStrong: m.emissiveStrong === true, tree: m.tree === true,
       // Skin: SubColor (r, g, b), SubScatWrap, SubScatWidth, or null.
       subSurface: m.subSurface || null,
     };
@@ -2940,6 +2943,7 @@
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);
           gl.uniform3fv(loc.specMask, mat.specularMask || [1, 0, 0]);
           gl.uniform1i(loc.dirtDecal, !!mat.dirtMask);
+          gl.uniform1i(loc.tree, !!mat.tree);
           // A vehicle of the cast lit as the cast is (its vertex colours are its paint's, not baked light).
           gl.uniform1i(loc.baked, m.baked && !mat.vehicle);
           const actorNow = m.actor ? cast.get(m.actor) : null;

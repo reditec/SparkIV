@@ -157,7 +157,10 @@ const GameGlsl = Object.freeze({
       vec3 aroundLight = mix(ambientAbove, ambientBelow, clamp(0.5 - 0.5 * n.z, 0.0, 1.0));
       float sunLit = clamp((dot(n, sunDir) - 0.25) * 1.3333333, 0.0, 1.0);
       // (x the room's AmbientDownMult for what moves: peds, a cutscene's props; see TimeCycle.ActorAmbient)
-      float ao = clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0) * actorAmbient;
+      // (A tree's 0.5 whatever its vertex: gta_trees' G-buffer pass writes GB2.z = 0.5, see the uniform tree. A solid
+      // emissive's 1: gta_emissive's, _strong's and _night's deferred_draw write GB2.z = globalScalars.z, not the
+      // vertex colour, which only colours their glow; globalScalars.z taken as 1, 0.996 in the GTA IV traces.)
+      float ao = (tree ? 0.5 : emissive && !textureAlpha ? 1.0 : clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0)) * actorAmbient;
       // A ped's rim on top, as its G-buffer pass writes it (gta_ped's PS 0x25ee22a0 in the TLAD trace GTAIV.3, Malc's
       // body at 102287002, and gta_ped_skin's): of v.n (the camera's view to the point, the normal after the normal
       // map) rim = 1 + 2 v.n where v.n <= 0 (else 1), x the vertex shader's gs2.w x green, at least 0; GB2.z (the AO

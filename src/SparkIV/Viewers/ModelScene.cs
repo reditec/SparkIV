@@ -1223,6 +1223,7 @@ namespace SparkIV.WinUI.Viewers
         EmissiveMultiplier = GtaIVPcMaterials.IsEmissive(shader) ? VectorParameter(material, GtaIVPcMaterials.EmissiveMultiplier)?.X : null,
         EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
         EmissiveStrong = GtaIVPcMaterials.IsEmissiveStrong(shader),
+        Tree = GtaIVPcMaterials.IsTree(shader),
         SubSurface = VectorParameter(material, GtaIVPcMaterials.SubColor) is { } sub && VectorParameter(material, GtaIVPcMaterials.SubScatWidth) is { } width
           ? new[] { sub.X, sub.Y, sub.Z, VectorParameter(material, GtaIVPcMaterials.SubScatWrap)?.X ?? 0, width.X }
           : null,
@@ -1501,6 +1502,9 @@ namespace SparkIV.WinUI.Viewers
     public bool EmissiveAtNight { get; init; }
     public bool EmissiveStrong { get; init; }
 
+    /// <summary>Whether it is a tree's (gta_trees: the light from around x 0.5, see GtaIV.Pc.GtaIVPcMaterials.IsTree).</summary>
+    public bool Tree { get; init; }
+
     /// <summary>gta_ped_skin's light through the skin: SubColor (r, g, b), SubScatWrap, SubScatWidth; or null.</summary>
     public float[]? SubSurface { get; init; }
 
@@ -1519,6 +1523,7 @@ namespace SparkIV.WinUI.Viewers
       emissiveMultiplier = EmissiveMultiplier,
       emissiveAtNight = EmissiveAtNight,
       emissiveStrong = EmissiveStrong,
+      tree = Tree,
       subSurface = SubSurface,
       texture = TextureKey == null ? null : url(TextureKey),
       color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),
