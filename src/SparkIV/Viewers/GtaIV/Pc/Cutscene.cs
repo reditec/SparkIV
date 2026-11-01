@@ -47,16 +47,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public List<string> Flags { get; } = new List<string>();
 
     /// <summary>
-    /// Seconds the game fades in from black at the start: none with FLAG_DONT_FADE_IN. How long isn't in the
-    /// file (the game's own); assumed.
+    /// Seconds the game fades in from black at the start: 0.8 (GTAIV.exe Cut_StartSection 0x9C9180: the screen
+    /// faded in over 800 ms), none with FLAG_DONT_FADE_IN.
     /// </summary>
-    public float FadeIn => HasFlag("DONT_FADE_IN") ? 0f : 0.5f;
+    public float FadeIn => HasFlag("DONT_FADE_IN") ? 0f : 0.8f;
 
     /// <summary>
-    /// Seconds the game fades out to black at the end: LONG_FADE_OUT, SHORT_FADE_OUT, none with
-    /// FLAG_DONT_FADE_OUT, else its usual one. How long isn't in the file; assumed.
+    /// Seconds before the last section's end the game starts fading out to black (GTAIV.exe 0x9C62A0 and
+    /// 0x9C2760): 0.8, LONG_FADE_OUT 2.5, SHORT_FADE_OUT 0.25 (SHORT tested last, so it wins), none with
+    /// FLAG_DONT_FADE_OUT. The fade itself takes 60 ms less (FadeOutLength). In the GTA IV trace GTAIV.1 (bc_3, LONG):
+    /// a black quad over the picture, its alpha rising 1.68 a frame, 45 / 255 at s3 f975 (from 962 to 1037: 45.3).
     /// </summary>
-    public float FadeOut => HasFlag("DONT_FADE_OUT") ? 0f : HasFlag("LONG_FADE_OUT") ? 2f : HasFlag("SHORT_FADE_OUT") ? 0.5f : 1f;
+    public float FadeOut => HasFlag("DONT_FADE_OUT") ? 0f : HasFlag("SHORT_FADE_OUT") ? 0.25f : HasFlag("LONG_FADE_OUT") ? 2.5f : 0.8f;
+
+    /// <summary>Seconds the fade out takes (GTAIV.exe 0x9C2760: the screen faded over FadeOut - 60 ms).</summary>
+    public float FadeOutLength => Math.Max(0f, FadeOut - 0.06f);
 
     // Flags come with and without FLAG_ (FLAG_USE_ONE_AUDIO, USE_ONE_AUDIO).
     private bool HasFlag(string name) => Flags.Any(f => f.EndsWith(name, StringComparison.OrdinalIgnoreCase));
@@ -706,6 +711,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// each actor's skeleton and clip, the camera. Notes say what was missing.
     /// </summary>
     /// <param name="earlier">The sections played before it: their [VEHICLE_REMOVAL] parts stay off (see below).</param>
+    /// <summary>
+    /// The fades of a section, in its frames (frames of the section, fps its frame rate): in from black at the start of
+    /// the first until inEnd, out to black in the last from outStart to outEnd (-1: none), as CutFile.FadeIn,
+    /// FadeOut and FadeOutLength give them.
+    /// </summary>
+    public static object Fade(CutFile cut, int index, int frames, float fps)
+    {
+      var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
+      return new
+      {
+        type = "fade",
+        inEnd = index == 0 ? cut.FadeIn * fps : 0,
+        outStart,
+        outEnd = outStart < 0 ? -1 : outStart + cut.FadeOutLength * fps,
+      };
+    }
+
     public static (object Timeline, object Cast, object? Camera, List<string> Notes) Section(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad,
                                                                                          IEnumerable<CutSection>? earlier = null)
     {
