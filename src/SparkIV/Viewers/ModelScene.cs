@@ -1014,6 +1014,17 @@ namespace SparkIV.WinUI.Viewers
       float[]? layerUvs = null, layerWeights = null, colors = null;
       int layers = material >= 0 && material < Materials.Count ? Materials[material].LayerCount : 1;
       int texcoords = mesh.VertexDeclaration.Elements.TakeWhile(e => e.Stream != -1).Count(e => e.Usage == VertexElementUsage.TextureCoordinate);
+      // gta_vehicle_paint3's second layer: on the second texture coordinates (as layer 1's; no cover).
+      if (layers == 1 && texcoords >= 2 && material >= 0 && material < Materials.Count && Materials[material].Paint2Key != null)
+      {
+        layerUvs = new float[vertices.Length * 6];
+        layerWeights = new float[vertices.Length * 4];
+        for (int i = 0; i < vertices.Length; i++)
+        {
+          layerUvs[i * 6] = vertices[i].TextureCoordinates[1].X;
+          layerUvs[i * 6 + 1] = vertices[i].TextureCoordinates[1].Y;
+        }
+      }
       if (layers > 1 && texcoords >= layers + 1)
       {
         layerUvs = new float[vertices.Length * 6];
@@ -1050,7 +1061,7 @@ namespace SparkIV.WinUI.Viewers
       float[]? alphas = null;
       bool hasColor = mesh.VertexDeclaration.Elements.TakeWhile(e => e.Stream != -1).Any(e => e.Usage == VertexElementUsage.Color && e.UsageIndex == 0);
       if (hasColor && material >= 0 && material < Materials.Count &&
-          (Materials[material].Blend || Materials[material].Glass && !Materials[material].Vehicle))
+          (Materials[material].Blend || Materials[material].Cutout || Materials[material].Glass && !Materials[material].Vehicle))
       {
         alphas = new float[vertices.Length];
         for (int i = 0; i < vertices.Length; i++)
@@ -1206,14 +1217,23 @@ namespace SparkIV.WinUI.Viewers
         SpecularKey = specularKey,
         EnvironmentKey = environmentKey,
         Bumpiness = VectorParameter(material, GtaIVPcMaterials.Bumpiness)?.X ?? 1,
+        Parallax = VectorParameter(material, GtaIVPcMaterials.ParallaxScaleBias)?.X ?? 0,
         SpecularPower = VectorParameter(material, GtaIVPcMaterials.SpecularFactor)?.X ?? 0,
         SpecularIntensity = VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor)?.X ?? 0,
         SpecularFlat = GtaIVPcMaterials.IsFlatSpecular(shader),
+        // The mirrored surroundings weighted by specularColorFactor only where the shader has it (gta_reflect,
+        // gta_normal_reflect: reflectivePower alone; their deferred_draw).
+        EnvSpecular = VectorParameter(material, GtaIVPcMaterials.SpecularColorFactor) != null,
         SpecularMask = mask == null ? new[] { 1f, 0f, 0f } : new[] { mask.Value.X, mask.Value.Y, mask.Value.Z },
         DirtMask = GtaIVPcMaterials.IsDirtDecal(shader)
           ? (VectorParameter(material, GtaIVPcMaterials.DirtDecalMask) is var dirt && dirt != null ? new[] { dirt.Value.X, dirt.Value.Y, dirt.Value.Z } : new[] { 1f, 0f, 0f })
           : null,
         PaintSlot = VectorParameter(material, GtaIVPcMaterials.MatDiffuseColor) is { X: 2 } paint && paint.Y >= 1 && paint.Y <= 6 ? (int)paint.Y : 0,
+        Paint2Key = vehicle && !neverDrawn && TextureParameter(material, GtaIVPcMaterials.TextureSampler2) is string paint2Name
+          ? AddTexture(paint2Name, embedded, Materials.Count + "_p.png") : null,
+        Paint2Slot = VectorParameter(material, GtaIVPcMaterials.MatDiffuseColor2) is { X: 2 } paint2 && paint2.Y >= 1 && paint2.Y <= 6 ? (int)paint2.Y : 0,
+        Paint2 = VectorParameter(material, GtaIVPcMaterials.MatDiffuseColor2) is { } colour2 && colour2.X != 2
+          ? new[] { colour2.X, colour2.Y, colour2.Z, colour2.W } : new[] { 1f, 1f, 1f, 1f },
         Vehicle = vehicle,
         DirtKey = vehicle && !neverDrawn && TextureParameter(material, GtaIVPcMaterials.DirtSampler) is string dirtName
           ? AddTexture(dirtName, embedded, Materials.Count + "_d.png") : null,
@@ -1458,6 +1478,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Whether it shines without a specular map, as if a white one were set (see GtaIV.Pc.GtaIVPcMaterials.IsFlatSpecular).</summary>
     public bool SpecularFlat { get; init; }
 
+    /// <summary>Whether its mirrored surroundings are weighted by the specular map and specularColorFactor (the shader has that parameter), else by reflectivePower alone.</summary>
+    public bool EnvSpecular { get; init; } = true;
+
     /// <summary>Which channels of the specular map hold the shine (usually red only).</summary>
     public float[] SpecularMask { get; init; } = { 1, 0, 0 };
 
@@ -1472,6 +1495,25 @@ namespace SparkIV.WinUI.Viewers
     /// colours (GTAIV.exe 0xD25D80: 1 to 4 its carcols colours, 5 white, 6 the third again); 0 for others.
     /// </summary>
     public int PaintSlot { get; init; }
+
+    /// <summary>
+    /// gta_parallax_specmap's parallaxScaleBias s (0 for others): its deferred_draw reads the texture and the normal
+    /// map at uv + (height x s - 0.5 s) x V.xy, the height the normal map's alpha, V the normalised view from the
+    /// point to the camera in the tangent frame (tangent, cross(tangent, normal) x w, normal); the specular map at uv.
+    /// </summary>
+    public float Parallax { get; init; }
+
+    /// <summary>
+    /// gta_vehicle_paint3's second layer: its texture (TextureSampler2, on the mesh's second texture coordinates),
+    /// laid over by its alpha x <see cref="Paint2"/>'s; null for others.
+    /// </summary>
+    public string? Paint2Key { get; init; }
+
+    /// <summary>The second layer's vehicle colour (matDiffuseColor2 (2, slot, slot)), as <see cref="PaintSlot"/>; 0 for none.</summary>
+    public int Paint2Slot { get; init; }
+
+    /// <summary>The second layer's colour (matDiffuseColor2, RGBA) when it isn't a vehicle colour.</summary>
+    public float[] Paint2 { get; init; } = { 1f, 1f, 1f, 1f };
 
     /// <summary>
     /// A vehicle's shader (gta_vehicle_*): lit as the game's (gta_vehicle_paint2's pixel shader: the texture
@@ -1526,6 +1568,7 @@ namespace SparkIV.WinUI.Viewers
       emissiveAtNight = EmissiveAtNight,
       emissiveStrong = EmissiveStrong,
       tree = Tree,
+      drawBucket = DrawBucket,
       subSurface = SubSurface,
       texture = TextureKey == null ? null : url(TextureKey),
       color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),
@@ -1534,14 +1577,18 @@ namespace SparkIV.WinUI.Viewers
       specular = SpecularKey == null ? null : url(SpecularKey),
       environment = EnvironmentKey == null ? null : url(EnvironmentKey),
       bumpiness = Bumpiness,
+      parallax = Parallax,
       specularPower = SpecularPower,
       specularIntensity = SpecularIntensity,
       specularFlat = SpecularFlat,
+      envSpecular = EnvSpecular,
       specularMask = SpecularMask,
       dirtMask = DirtMask,
       vehicle = Vehicle,
       dirtTexture = DirtKey == null ? null : url(DirtKey),
       dirtColor = DirtColor,
+      paint2Texture = Paint2Key == null ? null : url(Paint2Key),
+      paint2 = Paint2,
       reflectivePower = ReflectivePower,
       vehicleShine = VehicleShine,
     };

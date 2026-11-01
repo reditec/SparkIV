@@ -436,6 +436,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             node["paint"] = new JsonArray(actor.Paint[material.PaintSlot - 1].Select(c => (JsonNode)c).ToArray());
           }
+          if (actor.Paint != null && material.Paint2Slot > 0)
+          {
+            node["paint2"] = new JsonArray(actor.Paint[material.Paint2Slot - 1].Append(1f).Select(c => (JsonNode)c).ToArray());
+          }
           if (material.Vehicle)
           {
             node["dirtLevel"] = actor.Dirt;

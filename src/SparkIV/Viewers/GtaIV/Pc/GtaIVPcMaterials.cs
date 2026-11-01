@@ -38,9 +38,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// emissive (5 see-through), 29 and 30 vehicles' no-splash and no-water planes.
     /// </summary>
     public static Drawing DrawingOf(int drawBucket, string shader, bool glass) => new Drawing(
-      // See-through texels cut out (leaves, fences, hair): the cut-out bucket. Opaque ones keep them (peds'
-      // skin: its alpha holds something else, the face would be gone).
-      Cutout: drawBucket == 3,
+      // See-through texels cut out (leaves, fences, hair): the cut-out bucket, and the map shaders' opaque and
+      // emissive ones too: their deferred_draw (gta_default, _spec, _normal..., _reflect..., the cubemap and
+      // parallax ones, rage_default, the emissives; win32_30) kills what has texture alpha x vertex alpha x
+      // globalScalars.x up to 45 / 255 (def 0.176470593, texkill) whatever the bucket. Not peds' (their skin's
+      // alpha holds something else), vehicles', terrain's, decals' or glass'.
+      Cutout: drawBucket == 3 || drawBucket is 0 or 4 && CutsInGBuffer(shader),
       // Drawn over what is behind it by its texture's alpha (see-through, decals); glass has its own way.
       Blend: !glass && drawBucket is 1 or 2 or 5,
       // A person's see-through part (gta_ped, bucket 1), drawn as the game draws it: gta_ped.fxc's technique
@@ -59,6 +62,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       NoWater: drawBucket == 30,
       // Glowing (lamp shades, signs, windows at night): shown at full brightness, not lit.
       Emissive: drawBucket is 4 or 5);
+
+    /// <summary>The map shaders whose G-buffer pass (deferred_draw) cuts out alpha up to 45 / 255 (see DrawingOf).</summary>
+    public static bool CutsInGBuffer(string shader) => shader.ToLowerInvariant() is
+      "gta_default" or "gta_cutout_fence" or "gta_spec" or "gta_normal" or "gta_normal_spec" or "gta_reflect" or
+      "gta_normal_reflect" or "gta_spec_reflect" or "gta_normal_spec_reflect" or "gta_normal_cubemap_reflect" or
+      "gta_normal_spec_cubemap_reflect" or "gta_parallax_specmap" or "rage_default" or "gta_emissive" or
+      "gta_emissivenight" or "gta_emissivestrong";
 
     /// <summary>The buckets of planes the game never draws (boats' no-splash and no-water planes): no real textures.</summary>
     public static bool IsNeverDrawn(int drawBucket) => drawBucket is 29 or 30;
@@ -90,9 +100,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.09765625): (1.4, 50).
     /// - gta_vehicle_shuts, deferred_draw: GB2.x = dot x reflectivePowerED x matDiffuseColor2.w x 0.075, GB2.y =
     ///   sqrt(spec.a x reflectivePowerED x matDiffuseColor2.w x 0.37109375): (0.15, 190), as paint's.
-    /// - gta_vehicle_badges and gta_vehicle_lightsemissive, deferred_draw: GB2.x = 0.5 x min(dot x reflectivePowerED x
-    ///   0.225, 1) (x (1 - dirt)) x matDiffuseColor2.w, GB2.y as shuts': (0.225, 190), the strength at most 1 (the third
-    ///   number 2).
+    /// - gta_vehicle_badges and gta_vehicle_lightsemissive (bucket 1: drawn forward, technique draw): strength
+    ///   min(dot x reflectivePowerED x 0.225, 1), power spec.a x reflectivePowerED x 190 (the third number 3; see
+    ///   vehicleShine in gtaiv-pc.js).
     /// - gta_vehicle_chrome, deferred_draw: GB2.x = 0.5 x dot x specularColorFactor x reflectivePowerED x (1 - dirt) x
     ///   matDiffuseColor2.w, GB2.y = sqrt(spec.a x specularFactor x reflectivePowerED x matDiffuseColor2.w / 512): the
     ///   material's own (specularColorFactor, specularFactor).
@@ -105,7 +115,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       "gta_vehicle_mesh" => new[] { 1f, 50f, 0f },
       "gta_vehicle_tire" => new[] { 1.4f, 50f, 0f },
       "gta_vehicle_interior" or "gta_vehicle_interior2" => new[] { 0.005f, 10f, 0f },
-      "gta_vehicle_badges" or "gta_vehicle_lightsemissive" => new[] { 0.225f, 190f, 2f },
+      "gta_vehicle_badges" or "gta_vehicle_lightsemissive" => new[] { 0.225f, 190f, 3f },
       "gta_vehicle_chrome" => new[] { specularColorFactor, specularFactor, 0f },
       "gta_vehicle_vehglass" => new[] { 0.225f, 190f, 1f },
       _ => null,
@@ -179,6 +189,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // A vehicle's "matdiffusecolor": (2, slot, slot) a placeholder for one of the vehicle's colours (the
     // game's shader multiplies the texture by it: gta_vehicle_mesh's pixel shader, texture x c66).
     public static readonly uint MatDiffuseColor = GxtFile.Hash("matDiffuseColor");
+
+    // gta_vehicle_paint3's second layer (its deferred_draw: lrp(TextureSampler2 x matDiffuseColor2 on texture
+    // coordinates 2, its alpha, texture x matDiffuseColor) x the vertex colour): the texture and its colour,
+    // (2, slot, slot) a vehicle colour as matDiffuseColor's.
+    public static readonly uint TextureSampler2 = GxtFile.Hash("TextureSampler2");
+    public static readonly uint MatDiffuseColor2 = GxtFile.Hash("matDiffuseColor2");
+
+    // gta_parallax_specmap's "parallaxScaleBias": how far its deferred_draw shifts the texture coordinates by the
+    // height in the normal map's alpha (see SceneMaterial.Parallax).
+    public static readonly uint ParallaxScaleBias = GxtFile.Hash("parallaxScaleBias");
 
     // "dirtdecalmask": which of a dirt decal's texture channels says where the dirt is (gta_decal_dirt).
     public static readonly uint DirtDecalMask = GxtFile.Hash("dirtDecalMask");

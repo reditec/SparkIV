@@ -60,6 +60,7 @@ const GameGlsl = Object.freeze({
     // (shadowPass) less the cascade's bias.
     uniform bool shadowOn; uniform highp sampler2D shadowMap; uniform vec3 shadowU; uniform vec3 shadowV; uniform vec3 shadowH;
     uniform vec4 shadowBox[4]; uniform vec3 viewForward; uniform float shadowRef; uniform bool shadowPass; uniform float shadowBias;
+    uniform bool shadowBlend;
     // The lamps' shadows (see lampShadow, lampShadowTarget): their maps, each light's in it (its slot, -1 none),
     // whether they are there to read; drawing into a lamp's (lampShadowPass) its place and radius.
     uniform highp sampler2D lampShadowMap; uniform float sceneLightShadow[40]; uniform bool lampShadowOn;
@@ -78,8 +79,9 @@ const GameGlsl = Object.freeze({
   shadowFragment: `
         // Its pixel shader (0x23CFA7A0): the height along the sun (gShadowMatrix's fourth column), here less the
         // cascade's bias (the game's cascades' fourth constant is that much lower than the sun pass's).
+        // A see-through, decal or cut-out material blended in by its texture's alpha (its own wd_draw, see shadowTarget).
         float stored0 = dot(vPosition, shadowH) - shadowRef - shadowBias;
-        outColor = vec4(stored0, stored0, 0.0, 1.0);
+        outColor = vec4(stored0, 0.0, 0.0, shadowBlend ? clamp(base.a, 0.0, 1.0) : 1.0);
         outLight = vec4(0.0);
         return;
   `,
@@ -159,8 +161,12 @@ const GameGlsl = Object.freeze({
       // (x the room's AmbientDownMult for what moves: peds, a cutscene's props; see TimeCycle.ActorAmbient)
       // (A tree's 0.5 whatever its vertex: gta_trees' G-buffer pass writes GB2.z = 0.5, see the uniform tree. A solid
       // emissive's 1: gta_emissive's, _strong's and _night's deferred_draw write GB2.z = globalScalars.z, not the
-      // vertex colour, which only colours their glow; globalScalars.z taken as 1, 0.996 in the GTA IV traces.)
-      float ao = (tree ? 0.5 : emissive && !textureAlpha ? 1.0 : clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0)) * actorAmbient;
+      // vertex colour, which only colours their glow; globalScalars.z taken as 1, 0.996 in the GTA IV traces.
+      // A vehicle's the vertex colour's luminance: every gta_vehicle_* deferred_draw writes GB2.z = dot(colour,
+      // LuminanceConstants 0.2125/0.7154/0.0721) x globalScalars.z.)
+      float ao = (tree ? 0.5 : emissive && !textureAlpha ? 1.0
+                : vehicle ? clamp(dot(vColor, vec3(0.2125, 0.7154, 0.0721)), 0.0, 1.0)
+                : clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0)) * actorAmbient;
       // A ped's rim on top, as its G-buffer pass writes it (gta_ped's PS 0x25ee22a0 in the TLAD trace GTAIV.3, Malc's
       // body at 102287002, and gta_ped_skin's): of v.n (the camera's view to the point, the normal after the normal
       // map) rim = 1 + 2 v.n where v.n <= 0 (else 1), x the vertex shader's gs2.w x green, at least 0; GB2.z (the AO
@@ -205,12 +211,17 @@ const GameGlsl = Object.freeze({
         vec3 mapDir = normalize(mirroredDir + view * clamp(away * 0.02, 0.0, 1.0));
         vec3 skyLight = mirroredAround(mapDir, 4.0 - 4.0 * clamp(power / 230.0, 0.0, 1.0));
         float nearby = 1.0 - clamp(away * 0.01, 0.0, 1.0);
-        if (glassForward) {
-          // A map's glass instead by its own forward pass (gta_glass_spec program 20, the trace's booth panes from
-          // call 145517152): dot(spec map, specMapIntMask) x specularColorFactor x the sun x its shadow x
-          // (saturate(R.l) + 1e-4)^(spec map alpha x specularFactor + 1e-4) x gDirectionalLight.w; no mirrored
-          // surroundings (glass isn't in the G-buffer the sun pass reads).
-          pedShine = 2.0 * shineAmount * sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4) * pedShineScale.x;
+        if (glassForward || forwardLit || (stipple && textureAlpha)) {
+          // A map's glass and other see-through materials, and a ped's see-through parts (gta_ped, bucket 1), instead
+          // by their own forward pass (gta_glass_spec program 20, the trace's booth panes from call 145517152;
+          // gta_spec's and gta_ped's draw the same): dot(spec map, specMapIntMask) x specularColorFactor x (the sun x
+          // its shadow x (saturate(R.l) + 1e-4)^(spec map alpha x specularFactor + 1e-4) x gDirectionalLight.w + the
+          // lamps' shine, see lampShine); not the G-buffer's halving or the peds' 0.75 on the power, no rim and no
+          // mirrored surroundings (they aren't in the G-buffer the sun pass reads).
+          float forwardAmount = (useSpecMap ? dot(spec.rgb, specMask) : 1.0) * specIntensity;
+          float forwardPower = spec.a * specPower;
+          pedShine = forwardAmount * (sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, forwardPower + 1e-4) * pedShineScale.x
+                   + (forwardLit ? lampShine : vec3(0.0)));
         } else {
           pedShine = 2.0 * shineAmount * (sunColor * sunShadow * pow(clamp(dot(mirroredDir, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4) * 2.0 * pedShineScale.x
                    + 10.0 * pedShineScale.y * ao * fresnel * skyLight * clamp(mapDir.z * 5.0, 0.0, 1.0) * nearby
@@ -342,8 +353,8 @@ const GameGlsl = Object.freeze({
       float up0 = dot(P, shadowH) - shadowRef;
       float lit = 0.0;
       for (int i = 0; i < 12; i++) {
-        vec2 stored = texture(shadowMap, uv + ShadowTaps[i] / 2048.0).rg;
-        lit += up0 >= max(stored.r, stored.g) ? 1.0 : 0.0;
+        float stored = texture(shadowMap, uv + ShadowTaps[i] / 2048.0).r;
+        lit += up0 >= stored ? 1.0 : 0.0;
       }
       float away = dist / 175.0;
       return clamp(lit / 12.0 + 1.5 * away * away, 0.0, 1.0);
@@ -402,6 +413,17 @@ const GameGlsl = Object.freeze({
             // The view's own light (SparkIV's, not the game's): as the sun's term.
             vehicleShine = s * 4.0 * pow(clamp(dot(mirrored, light), 0.0, 1.0) + 1e-4, power + 1e-4) * vec3(1.0);
           }
+        } else if (outdoor && vehicleSpec.z > 2.5) {
+          // gta_vehicle_badges and _lightsemissive, drawn forward (bucket 1; technique draw): f = (1 - |v.n|)^4,
+          // s = min(dot x reflectivePowerED x 0.225, 1) x (1 - dirt) x saturate(0.5 f + 0.5); the sun x
+          // gDirectionalLight.w x (saturate(R.l) + 1e-4)^(spec.a x reflectivePowerED x 190 + 1e-4) x its shadow x s;
+          // the mirrored map (level 0) x saturate(5 R.z) x (1.6 f + 0.4) x 18 x reflectivePowerED x AO x s² (no
+          // globalScalars.w, unlike vehglass); not divided by the alpha.
+          float f = pow(1.0 - abs(dot(view, n)), 4.0);
+          float s = min(strength, 1.0) * (1.0 - dirtAmount) * clamp(0.5 * f + 0.5, 0.0, 1.0);
+          vec3 skyLight = mirroredAround(mirrored, 0.0);
+          vehicleShine = s * pedShineScale.x * sunColor * sunShadow * pow(clamp(dot(mirrored, sunDir), 0.0, 1.0) + 1e-4, power + 1e-4)
+                       + s * s * vehicleAo * skyLight * clamp(mirrored.z * 5.0, 0.0, 1.0) * (1.6 * f + 0.4) * 18.0 * reflectivePower;
         } else if (outdoor) {
           // Paint and the other deferred vehicle shaders: their G-buffer (paint1 program 13) GB2.x = 0.5 x
           // strength x (1 - dirt) (x matDiffuseColor2.w, taken as 1), GB2.y² x 512 = the power, GB2.z = AO;
@@ -440,11 +462,10 @@ const GameGlsl = Object.freeze({
   `,
   // A see-through part kept by stipple: changes a (discards below the alpha test).
   stipple: `
-          // A person's see-through part as gta_ped.fxc's forward shader: alpha test at 100 / 255, then of the
-          // pixels only the share its stipple level keeps (stipple.wtd all_stips: kept of 64 per level,
-          // level = alpha x 3.996 - row its whole part, column a quarter of the rest), each blended by
-          // alpha. Here as that share of the alpha, without the 8 x 8 pattern.
-          if (a < 100.0 / 255.0) discard;
+          // A person's see-through part as gta_ped.fxc's forward shader: of the pixels only the share its stipple
+          // level keeps (stipple.wtd all_stips: kept of 64 per level, level = alpha x 3.996 - row its whole part,
+          // column a quarter of the rest), each blended by alpha. Here as that share of the alpha, without the 8 x 8
+          // pattern. (Its pass's alpha test at 100 cuts nothing: the engine's ALPHAFUNC stays ALWAYS, fxc.md.)
           const float kept[16] = float[16](0.0, 6.0, 8.0, 12.0, 11.0, 12.0, 16.0, 24.0, 32.0, 40.0, 48.0, 52.0, 52.0, 56.0, 58.0, 64.0);
           float level = min(a, 1.0) * 3.996;
           int index = int(floor(level)) * 4 + int(floor(fract(level) * 4.0));
@@ -464,6 +485,8 @@ const GameGlsl = Object.freeze({
           vec3 view = normalize(lifted - eyeAt);
           vec3 lightNormal = vec3(0.0, 0.0, 1.0);
           vec3 mirrorNormal = lightNormal;
+          float nearWeight = vColor.b * 0.25;
+          float nearField = max(1.0 - dot(eyeAt - lifted, eyeAt - lifted) / 900.0, 0.0) * nearWeight;
           if (waterWaves) {
             vec2 p = vPosition.xy;
             float distance2 = dot(eyeAt - lifted, eyeAt - lifted);
@@ -472,7 +495,8 @@ const GameGlsl = Object.freeze({
             vec2 middle = texture(waterSim, p * 0.01).zw - 0.5;
             vec2 small = (texture(waterSim, p * 0.0454545).zw - 0.5) * near;
             vec2 lightSlope = big * 0.0512 * (1.0 - near) + middle * 0.256 + small * 0.116363637;
-            vec2 mirrorSlope = big * 0.2048 * (1.0 - near) + middle * 1.024 + small * 0.465454549;
+            // (The big waves alike in both: water.fxc ps 2 scales all four of that read by 0.0512.)
+            vec2 mirrorSlope = big * 0.0512 * (1.0 - near) + middle * 1.024 + small * 0.465454549;
             // The sea's swell (dynamicWaterStep) within 50 m, to both: the slope of its heights 2 m to either
             // side (as the game's vertex normals), faded over its window's last 10 m as the heights are.
             vec2 inWindow = p - dynamicMin;
@@ -485,6 +509,11 @@ const GameGlsl = Object.freeze({
               lightSlope += swell;
               mirrorSlope += swell;
             }
+            // The near field (water.fxc ps 2's r0.z): within 30 m the mirror's slope drawn towards the dynamic height
+            // map's normal - taken as calm, the surface's own, flat - by its vertices' weight (vertex shader o2.w:
+            // (min(red⁴ x 16, 1) x (1 - |n.z|^64) x 0.75 + 0.25) x blue, the height map's factor 1 where it lies on the
+            // surface; the sea's colour 0 0 1: 0.25) x (1 - d² / 900).
+            mirrorSlope *= 1.0 - nearField;
             lightNormal = normalize(vec3(lightSlope, 1.00001));
             mirrorNormal = normalize(vec3(mirrorSlope, 1.00001));
           }
@@ -502,7 +531,8 @@ const GameGlsl = Object.freeze({
           // by the gentle slopes (the light's above), turned towards the view where the water is shallow - (1 -
           // saturate(d / (saturate(depth^1.125 x 0.02) + 0.05)))², the view x -0.5 of that onto the slope; the
           // sun's light and its glint by the steep ones (the mirror's above).
-          float viewDepth = length(eyeAt - vPosition);
+          // (The view depth, not the distance: water.fxc takes the clip w, its vertex shader's o1.z.)
+          float viewDepth = max(dot(vPosition - eyeAt, viewForward), 1e-3);
           float shore = 1.0 - clamp(behindDepth / (clamp(pow(viewDepth, 1.125) * 0.02, 0.0, 1.0) + 0.05), 0.0, 1.0);
           shore *= shore;
           vec3 gentleNormal = waterWaves ? normalize(vec3(lightNormal.xy / max(lightNormal.z, 1e-4) - 0.5 * view.xy * shore, 1.00001 - 0.5 * view.z * shore)) : lightNormal;
@@ -518,7 +548,7 @@ const GameGlsl = Object.freeze({
             // picture (across, up) times 0.5 / (0.03 x the distance), at most twice; the sky where nothing was drawn.
             vec3 across = normalize(cross(view, vec3(0.0, 0.0, 1.0)) + 1e-5);
             vec2 ahead = normalize(view.xy + 1e-5);
-            float shift = min(0.5 / (0.03 * max(length(eyeAt - vPosition), 1.0)), 2.0);
+            float shift = min(0.5 / (0.03 * viewDepth), 2.0);
             vec2 at = gl_FragCoord.xy / screenSize + vec2(dot(gentleNormal.xy, across.xy), dot(gentleNormal.xy, ahead)) * shift;
             // Kept on the water's side of the horizon as water.fxc keeps it: its vertex shader projects the point
             // 2000 m ahead (along the camera's look, level) on the water's plane, its pixel shader holds the read's v
@@ -532,7 +562,10 @@ const GameGlsl = Object.freeze({
           }
           // The sun's glint as water.fxc's: (saturate(R.l) + 1e-4)^512 x the sun x its shadow x gDirectionalLight.w
           // x 10 (its 10 - 9 x the shore's factor^0.25, that 0 away from the very shore line).
-          vec3 glint = sunColor * pow(clamp(dot(bounce, sunDir), 0.0, 1.0) + 1e-4, 512.0) * sunShadow * pedShineScale.x * 10.0;
+          // Its shadow where water.fxc reads it: at the point a metre up, that metre x (1 - 0.0004 d²) (its r0.z).
+          float shadowNear = max(1.0 - dot(eyeAt - lifted, eyeAt - lifted) * 0.0004, 0.0);
+          float waterShadow = outdoor ? gameSunShadow(vec3(lifted.xy, (lifted.z + waterZ) * shadowNear - waterZ)) : 1.0;
+          vec3 glint = sunColor * pow(clamp(dot(bounce, sunDir), 0.0, 1.0) + 1e-4, 512.0) * waterShadow * pedShineScale.x * (10.0 - 9.0 * pow(nearField, 0.25));
           // As water.fxc, in light (as the game adds it up in its HDR buffer): its own colour (timecyc's x
           // SkyLightMult, its bottomSkyColour.w; sunny before noon black) x 0.5, the reflection times waterReflectionScale with the glint, half of it by
           // Fresnel, and a twentieth of the sun's light by the light's slope, saturate((n.l - 0.25) x 4/3);
@@ -540,8 +573,20 @@ const GameGlsl = Object.freeze({
           // picture: back to light first (gameToneUnmap).
           // (With the mirrored scene's light as the game's HDR ReflectTexture: taken as it is, unclipped.)
           vec3 mirroredLight = reflectLight && reflectOn ? gameToneUnmap(mirrored) * (1.0 - clamp(mirroredScene.a, 0.0, 1.0)) + mirroredScene.rgb : gameToneUnmap(mirrored);
-          vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredLight * waterReflect + glint)
-                          + sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * 0.05;
+          // Water higher up than the sea (its vertex shader's o1.w = saturate((z - 1 - waterRenderSimParam.z) x 0.5),
+          // that z 0 in the traces) mirrors the far fog's colour instead (globalFogColor; here the haze's).
+          float upHigh = clamp((vPosition.z + waterZ - 1.0) * 0.5, 0.0, 1.0);
+          vec3 mirroredWater = mix(mirroredLight * waterReflect, gameToneUnmap(hazeColor), upHigh);
+          vec3 waterLight = waterColor * 0.5 + 0.5 * fresnel * (mirroredWater + glint)
+                          + sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * waterShadow * 0.05;
+          // The near field's foam over it (r0.z): 3 x (the sun's light x f.x + the light from around x f.y), by the
+          // mirror's normal, f = the simulation's height and speed at p x 0.05 x (0.25 x weight + 0.25) + 0.25.
+          if (waterWaves && nearField > 0.0) {
+            vec2 f = texture(waterSim, vPosition.xy * 0.05).xy * (0.25 * nearWeight + 0.25) + 0.25;
+            vec3 foamSun = sunColor * clamp((dot(mirrorNormal, sunDir) - 0.25) * 1.3333333, 0.0, 1.0) * waterShadow;
+            vec3 foamAround = mix(ambientAbove, ambientBelow, clamp(0.5 - 0.5 * mirrorNormal.z, 0.0, 1.0));
+            waterLight = mix(waterLight, 3.0 * (foamSun * f.x + foamAround * f.y), nearField);
+          }
           lightOut = gameFog(waterLight, distance);
           rgb = gameToneMap(lightOut);
           a = 1.0;
@@ -1005,33 +1050,107 @@ function sunShadowCascades(vp, sun) {
   return { u, v, h, ref: dot3(vp.eye, h), boxes };
 }
 
-// The sun's shadow map as the game keeps it: the four cascades side by side, 2048 x 2048 each (8192 x 2048; the game
-// draws each at 4096 x 4096 into R32F and averages 2 x 2 into R16F, 0x23CFA700 - here drawn at 2048 into R32F
-// directly, read unfiltered), with a depth; null where the browser can't draw into floats. Two heights per texel:
-// red the map's objects (still: drawn again only when the cascades change), green the cast (drawn each frame into
-// a cleared green); gameSunShadow takes the higher.
+// The sun's shadow map as the game makes it (GTA IV's trace GTAIV.1, bc_3; TLAD's GTAIV.2, et01_ba): each cascade
+// drawn at 4096 x 4096 into R32F - cleared to -100 (cascadeConvert ps 1), what is solid without its texture
+// (shadowZDir: the height along the sun, gShadowMatrix's fourth column, camera-relative), then the see-through,
+// decal and cut-out materials by their own wd_draw, blended SRCALPHA / INVSRCALPHA by texture alpha x
+// globalScalars.x (nothing cut: the engine's alpha test passes everything, fxc.md) - and averaged 2 x 2 into the
+// 2048 x 2048 R16F map the sun pass reads (cascadeConvert ps 2). Here the map's objects kept per cascade at 4096
+// (R32F, drawn again only when the cascades change), the cast drawn each frame into a work target at 4096, and each
+// frame per cascade the mean of max(map, cast) over 2 x 2 into the four cascades side by side (8192 x 2048 R16F).
+// Null where the browser can't draw into floats.
 let shadowMapState = null;
 function shadowTarget() {
   if (shadowMapState !== null) return shadowMapState || null;
   if (!gl.getExtension("EXT_color_buffer_float") || gl.getParameter(gl.MAX_TEXTURE_SIZE) < 8192) { shadowMapState = false; return null; }
-  const size = 2048;
-  const texture = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, size * 4, size);
-  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
-  gl.bindTexture(gl.TEXTURE_2D, null);
+  // (Blending into R32F needs it; without, the see-through ones are drawn whole.)
+  const blend = !!gl.getExtension("EXT_float_blend");
+  const size = 2048, big = 4096;
+  const texture2D = (format, w, h) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, w, h);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return t;
+  };
+  const frameOf = (t, depth) => {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    if (depth) gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+    return gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE ? f : null;
+  };
   const depth = gl.createRenderbuffer();
   gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
-  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, size * 4, size);
-  const frame = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, frame);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
-  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, big, big);
+  const work = texture2D(gl.R32F, big, big), workFrame = frameOf(work, depth);
+  const statics = [0, 1, 2, 3].map(() => texture2D(gl.R32F, big, big));
+  const staticFrames = statics.map(t => frameOf(t, null));
+  const texture = texture2D(gl.R16F, size * 4, size), frame = frameOf(texture, null);
   gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
-  if (!complete) { shadowMapState = false; return null; }
-  shadowMapState = { texture, frame, size, key: null };
+  if (!workFrame || !frame || staticFrames.some(f => !f)) { shadowMapState = false; return null; }
+  // The 2 x 2 mean of max(map, cast), as cascadeConvert ps 2 (its four reads half a texel off, x 0.25).
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, `#version 300 es
+    in vec2 corner; void main() { gl_Position = vec4(corner, 0.0, 1.0); }`], [gl.FRAGMENT_SHADER, `#version 300 es
+    precision highp float;
+    uniform highp sampler2D still; uniform highp sampler2D moving;
+    out vec4 outColor;
+    void main() {
+      ivec2 at = ivec2(gl_FragCoord.xy) % ${size} * 2;
+      float sum = 0.0;
+      for (int i = 0; i < 4; i++) {
+        ivec2 t = at + ivec2(i & 1, i >> 1);
+        sum += max(texelFetch(still, t, 0).r, texelFetch(moving, t, 0).r);
+      }
+      outColor = vec4(sum * 0.25, 0.0, 0.0, 1.0);
+    }`]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    gl.attachShader(p, s);
+  }
+  gl.bindAttribLocation(p, 0, "corner");
+  gl.linkProgram(p);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  shadowMapState = { texture, frame, size, big, work, workFrame, statics, staticFrames, blend, key: null,
+                     convert: { p, vao, still: gl.getUniformLocation(p, "still"), cast: gl.getUniformLocation(p, "moving") } };
   return shadowMapState;
+}
+
+// Each cascade's cast drawn (drawCast(k) into the bound work target) and averaged with the kept map into the map.
+function shadowConvert(state, drawCast) {
+  for (let k = 0; k < 4; k++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, state.workFrame);
+    gl.viewport(0, 0, state.big, state.big);
+    gl.clearColor(-1e9, 0, 0, 0);
+    gl.depthMask(true);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    drawCast(k);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, state.frame);
+    gl.viewport(k * state.size, 0, state.size, state.size);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+    gl.useProgram(state.convert.p);
+    // (On units 12 and 13, given back as they were.)
+    gl.activeTexture(gl.TEXTURE12); const was12 = gl.getParameter(gl.TEXTURE_BINDING_2D); gl.bindTexture(gl.TEXTURE_2D, state.statics[k]);
+    gl.activeTexture(gl.TEXTURE13); const was13 = gl.getParameter(gl.TEXTURE_BINDING_2D); gl.bindTexture(gl.TEXTURE_2D, state.work);
+    gl.uniform1i(state.convert.still, 12); gl.uniform1i(state.convert.cast, 13);
+    gl.bindVertexArray(state.convert.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, was12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, was13);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(program);
+  }
 }
 
 // The mirrored surroundings' map as the game keeps it (the TLAD trace GTAIV.4 and bc_3's GTAIV.1): 1024 x 1024
