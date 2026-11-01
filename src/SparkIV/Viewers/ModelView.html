@@ -229,6 +229,8 @@
       vec2 xy = 1.0 - raw.w - raw.x >= 0.0 ? raw.wy : raw.xy;
       vec2 k = (xy - 0.5) * bumpiness;
       float z = sqrt(abs(1.0 - dot(xy, xy)));
+      // (The map's and props' the same: gta_normal_spec's deferred_draw vs 4 makes the binormal cross(tangent, normal)
+      // x w as well.)
       vec3 b = cross(t.xyz, n) * t.w;
       vec3 g = normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
       vec3 stored = round(floor(64.0 * (g + 1.0)) / 128.0 * 1023.0) / 1023.0;
@@ -2936,8 +2938,9 @@
           gl.uniform1i(loc.useSpecMap, textured && !!mat.specular);
           gl.uniform1i(loc.specFlat, textured && !mat.specular && !!mat.specularFlat);
           // A ped's bumps as the game's G-buffer pass makes them (pedBumped; unset from 57a4f88 to #8, so none
-          // tilted anything). The other materials' (bumped, its tangent space from the screen, not checked against
-          // the game) stay off: on bc_3's harbour wall they made the picture further from the game's.
+          // tilted anything); the map's and props' the same way along their vertex tangents (pedBumped: gta_normal_spec's
+          // deferred_draw is the same). Without tangents (bumped, its tangent space from the screen, not
+          // checked against the game) they stay off: on bc_3's harbour wall that made the picture further from the game's.
           gl.uniform1f(loc.bumpiness, m.pedBumps ? mat.bumpiness ?? 1 : 0);
           gl.uniform1f(loc.specPower, mat.specularPower || 0);
           gl.uniform1f(loc.specIntensity, mat.specularIntensity || 0);

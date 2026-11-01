@@ -890,9 +890,11 @@ namespace SparkIV.WinUI.Viewers
       var positions = new float[vertices.Length * 3];
       var normals = mesh.VertexHasNormal ? new float[vertices.Length * 3] : null;
       // A ped's normal map is laid along its vertices' tangents (gta_ped's deferred program, vs04 + ps05): those,
-      // turned as the normals, and the binormal's side (w).
+      // turned as the normals, and the binormal's side (w). The map's and props' the same way (gta_normal,
+      // gta_normal_spec ... deferred_draw: the normal, the tangent and cross(tangent, normal) x w; read with
+      // tools/fxc-dump.py), not a vehicle's (its own vertex programs).
       var tangents = normals != null && vertices.Length > 0 && vertices[0].Tangent != null && material >= 0 && material < Materials.Count &&
-                     GtaIVPcMaterials.IsPed(Materials[material].Shader) && Materials[material].NormalKey != null
+                     Materials[material].NormalKey != null && !GtaIVPcMaterials.IsVehicle(Materials[material].Shader)
         ? new float[vertices.Length * 4] : null;
       var uvs = mesh.VertexHasTexture ? new float[vertices.Length * 2] : null;
       // Turned round about Z: x and y change sign (a turn, not a mirror, so the triangles keep their side).
