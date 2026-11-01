@@ -352,7 +352,7 @@
         float sunM = clamp((dot(n, sunDir) - 0.25) * 1.3333333, 0.0, 1.0);
         float aoM = clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0);
         float farM = clamp((length(vPosition - eyeAt) - fogParams.x) / max(fogParams.y - fogParams.x, 1.0), 0.0, 1.0);
-        vec3 litM = mix(base.rgb * (aroundM * aoM + sunColor * sunM), gameToneUnmap(hazeColor), farM);
+        vec3 litM = mix(base.rgb * (aroundM * aoM + sunColor * sunM), fogFar, farM);
         float aM = clamp(base.a * vAlpha, 0.0, 1.0);
         if (aM <= 0.0) discard;
         outColor = vec4(gameToneMap(litM) * aM, aM);
@@ -653,6 +653,7 @@
       glassForward: gl.getUniformLocation(program, "glassForward"),
       vehicleSpec: gl.getUniformLocation(program, "vehicleSpec"),
       fogNear: gl.getUniformLocation(program, "fogNear"),
+      fogFar: gl.getUniformLocation(program, "fogFar"),
       fogParams: gl.getUniformLocation(program, "fogParams"),
       depthFx: gl.getUniformLocation(program, "depthFx"),
       depthFxExposure: gl.getUniformLocation(program, "depthFxExposure"),
@@ -1840,7 +1841,9 @@
                      noise: gl.getUniformLocation(program, "noise"), at: gl.getUniformLocation(program, "Phase") };
     }
     // Made anew only when its Phase moved (with the cutscene's time).
-    const phase = PhaseStart + (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour;
+    // (From the cutscene's start Phase where it is known: sky.cloudPhase, from a trace; its rate checked there -
+    // et01_ba f1292.25 to f1394.75, GTAIV.2.trace: +0.0485, as computed.)
+    const phase = (sky.cloudPhase ?? PhaseStart) + (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour;
     if (phase === perlinPass.phase) return perlinPass.texture;
     perlinPass.phase = phase;
     const viewport = gl.getParameter(gl.VIEWPORT), blend = gl.isEnabled(gl.BLEND);
@@ -1964,9 +1967,10 @@
   function hazeColour() {
     return sky.horizon;
   }
-  // The far fog's colour in light (the page's): the haze's colour taken back through the tone mapping, as the main
-  // shader's gameToneUnmap(hazeColor) does it.
+  // The far fog's colour in light (the page's): the time cycle's globalFogColor (TimeCycle.cs, fog.farColor) x the
+  // exposure; without it the haze's colour taken back through the tone mapping.
   function farFogLight() {
+    if (sky.fog && sky.fog.farColor) return sky.fog.farColor.map(c => c * (sky.exposure || 1));
     const t = sky.tone || {};
     const cc = (t.colorCorrect || [0.5, 0.5, 0.5]).map(c => Math.max(c * 2, 1e-4));
     const gamma = sky.gamma || 1, saturation = t.saturation ?? 1;

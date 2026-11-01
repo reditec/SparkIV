@@ -422,7 +422,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <param name="rooms">Per room of the location (in its list) its own message (the time cycle as the room's
     /// modifier changes it), or null for none.</param>
-    public object Message(float hour, string? clouds = null, string? cloudDetail = null, object?[]? rooms = null)
+    /// <param name="cloudPhase">The clouds' noise Phase at the cutscene's start (rage_perlinnoise's Phase: the game's
+    /// running time, of no file - known from a trace), or null for the page's own.</param>
+    public object Message(float hour, string? clouds = null, string? cloudDetail = null, object?[]? rooms = null, float? cloudPhase = null)
     {
       var sunDirection = SunDirection(hour);
       static float[] A(Vector3 v) => new[] { v.X, v.Y, v.Z };
@@ -444,6 +446,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         fog = new
         {
           nearColor = A(NearFogColor ?? SkyBottom * SkyLightMultiplier),
+          // globalFogColor (c42, the far fog; also the sky dome's gtaWaterColor and water.fxc's bottomSkyColour x .w):
+          // (SkyColor + AzimuthStrength x AzimuthColor) x SkyLightMult - in the traces exactly so (bc_1, GTAIV.trace:
+          // 8.144 / 9.262 / 10.094 at 12:16; et01_ba, GTAIV.2.trace: 7.349 / 10.971 / 14.600 at 14:00). Null without the
+          // sky's columns (then the page's haze).
+          farColor = SkyColor == Vector3.Zero ? null : A((SkyColor + AzimuthStrength * AzimuthColor) * SkyLightMultiplier),
           start = FogStart,
           end = Math.Max(FarClip, FogStart + 1),
           nearAmount = NearFogAmount,
@@ -504,6 +511,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         skyLight = SkyLightMultiplier,
         clouds,
         cloudDetail,
+        cloudPhase,
         rooms,
       };
     }

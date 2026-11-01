@@ -604,7 +604,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         try
         {
-          string sky = Path.Combine(folder, "pc", "textures", "skydome.wtd");
+          string sky = PlatformTexture(folder, "skydome.wtd");
           if (System.IO.File.Exists(sky))
           {
             using var textures = new RageLib.Textures.TextureFile();
@@ -623,7 +623,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         try
         {
-          string surface = Path.Combine(folder, "pc", "textures", "water.wtd");
+          string surface = PlatformTexture(folder, "water.wtd");
           if (System.IO.File.Exists(surface))
           {
             using var textures = new RageLib.Textures.TextureFile();
@@ -641,7 +641,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       try
       {
-        string occluders = Path.Combine(folder, "pc", "textures", "lights_occluders.wtd");
+        string occluders = PlatformTexture(folder, "lights_occluders.wtd");
         if (System.IO.File.Exists(occluders))
         {
           using var textures = new RageLib.Textures.TextureFile();
@@ -659,7 +659,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       try
       {
-        string coronas = Path.Combine(folder, "pc", "textures", "coronas.wtd");
+        string coronas = PlatformTexture(folder, "coronas.wtd");
         if (System.IO.File.Exists(coronas))
         {
           using var textures = new RageLib.Textures.TextureFile();
@@ -676,6 +676,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       log?.Step("location: water and sky", location.Water.Count / 4 + " water quads");
       return location;
+    }
+
+    /// <summary>
+    /// A file of pc\textures (platform:/textures): the folder's own, else the base game's above it - the episodes
+    /// (GTAIV\TLAD, GTAIV\TBoGT) have no skydome, water, lights_occluders or coronas of their own and the game takes
+    /// GTA IV's (TLAD's GTAIV.2.trace: et01_ba's clouds drawn from them; without them its sky here had none).
+    /// </summary>
+    private static string PlatformTexture(string folder, string name)
+    {
+      string own = Path.Combine(folder, "pc", "textures", name);
+      if (System.IO.File.Exists(own))
+      {
+        return own;
+      }
+      string? parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(folder));
+      string shared = parent != null ? Path.Combine(parent, "pc", "textures", name) : own;
+      return System.IO.File.Exists(shared) ? shared : own;
     }
 
     /// <summary>The height of the scene's origin the water's corners are taken from (their world z = theirs + this).</summary>

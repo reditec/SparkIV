@@ -273,7 +273,13 @@ quads have 0 0 0 0 there: no near field, as in the game.
 dome is 10000 m across and 2000 m high (`gWorld`), its vertex program stretching it twice below the horizon. Then
 `rage_postfx` ps 20 lays NearFogAmount × (`globalFogColorN` − sky) on it (bc_3 0.157; bc_1, et01_ba 0) — both in
 SparkIV since 2026-11-01. `rage_perlinnoise` ps 1 = SparkIV's noise; its `Phase` is the game's running time (bc_3
-4712.98; SparkIV starts at TLAD's 593.25), which places the clouds.
+4712.98; SparkIV starts at TLAD's 593.25 unless a trace gives the cutscene's: et01_ba 594.754), which places the clouds;
+it grows by the cloud speed × seconds / 120 (et01_ba f1292.25 to f1394.75: +0.0485, as computed). The noise textures
+(`skydome.wtd`) are the base game's in the episodes too.
+
+`globalFogColor` (the far fog, = `gtaWaterColor`, = water's `bottomSkyColour` × `.w`) is (SkyColor + AzimuthStrength ×
+AzimuthColor) × SkyLightMult: `GTAIV.trace` bc_1 8.144 / 9.262 / 10.094, `GTAIV.2.trace` et01_ba 7.349 / 10.971 /
+14.600, both exactly (`TimeCycle`'s `fog.farColor` since 2026-11-01).
 
 ## Format
 
