@@ -233,6 +233,9 @@
       // x w as well.)
       vec3 b = cross(t.xyz, n) * t.w;
       vec3 g = normalize(n * z + t.xyz * k.x + b * k.y + 1e-5);
+      // Drawn forward (see-through: a map's glass), as is - its program uses the normal without the G-buffer's rounding
+      // (gta_glass's draw, ps 1: nrm of the sum).
+      if (textureAlpha) return g;
       vec3 stored = round(floor(64.0 * (g + 1.0)) / 128.0 * 1023.0) / 1023.0;
       return normalize(stored * 2.0 - 0.99999);
     }
