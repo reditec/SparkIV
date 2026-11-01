@@ -1308,6 +1308,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             node["normals"] = Floats(Transform(mesh.Normals, obj.Place, false));
           }
+          // Its normal map's tangents turned the same way (x, y, z and the binormal's side w).
+          if (mesh.Tangents != null)
+          {
+            var tangents = (float[])mesh.Tangents.Clone();
+            for (int i = 0; i + 3 < tangents.Length; i += 4)
+            {
+              var t = Vector3.Normalize(Vector3.TransformNormal(new Vector3(tangents[i], tangents[i + 1], tangents[i + 2]), obj.Place));
+              tangents[i] = t.X; tangents[i + 1] = t.Y; tangents[i + 2] = t.Z;
+            }
+            node["tangents"] = Floats(tangents);
+          }
           node.Remove("skinBones");
           node.Remove("skinWeights");
           meshes.Add(node);

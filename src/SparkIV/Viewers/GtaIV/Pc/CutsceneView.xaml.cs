@@ -608,13 +608,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // How far the game draws, shot by shot (the map beyond isn't drawn).
         new { type = "drawDistance", steps = cut.DrawDistanceSteps(index, _fps) },
         // The fade in at the start of the first section, out at the end of the last (in the section's frames).
-        new
-        {
-          type = "fade",
-          inEnd = index == 0 ? cut.FadeIn * _fps : 0,
-          outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, _frames - 1 - cut.FadeOut * _fps) : -1,
-          outEnd = _frames - 1,
-        },
+        CutsceneMessages.Fade(cut, index, _frames, _fps),
       };
       if (_frame > 0)
       {

@@ -73,11 +73,22 @@ GB2.z is the AO the sun and ambient pass dims the light from around by.
 51 shaders are used by the reference cutscenes (bc_1, bc_3, the intro, et01_aa, et01_ba) and five TBoGT ones (e2_int,
 gt01_aa, bu01_aa, f1_aa, br01_aa); TLAD and TBoGT have no shader files of their own. Their G-buffer passes are 44
 different programs, their forward `draw` passes 36, their `unlit_draw` passes 11. Checked against SparkIV
-and matching: the map shaders with a specular map, terrain, wire. Not yet matched: the cube-map reflect shaders
-(`gta_normal_cubemap_reflect`, `gta_normal_spec_cubemap_reflect`: `dcl_cube`; SparkIV reads a 2D map), parallax
-(`gta_parallax_specmap`: its texture coordinates offset by `parallaxScaleBias`), and the peds' sorted hair
-(`gta_hair_sorted_alpha_exp`: a G-buffer pass of zeros for depth and stencil, then the hair forward with alpha test 100
-and blending).
+and matching: the map shaders with a specular map, terrain, wire.
+
+**Normal maps** (`gta_normal*`, `gta_spec*` with a bump map, the decals, props): the G-buffer pass tilts the normal as
+the peds' does: the map's x and y (its alpha for x where 1 − alpha − x ≥ 0), k = (xy − 0.5) × `bumpiness`, z = sqrt(|1 −
+x² − y²|), normal × z + tangent × k.x + binormal × k.y with the binormal cross(tangent, normal) × w (deferred_draw vs 4 of
+`gta_normal_spec`). Since 2026-11-01 SparkIV does this for the map and props too, along the vertex tangents (before,
+their bumps were off).
+
+Not matched, by choice:
+- the cube-map reflect shaders (`gta_normal_cubemap_reflect`, `gta_normal_spec_cubemap_reflect`: `dcl_cube`; SparkIV
+  reads their cube texture as a 2D map) — six placements in the scenes counted;
+- parallax (`gta_parallax_specmap`: the texture coordinates moved by (bump alpha × s − 0.5 s) × the view in tangent
+  space, s = `parallaxScaleBias`) — two distant placements in bc_3;
+- the peds' sorted hair (`gta_hair_sorted_alpha_exp`): deferred_draw pass 0 writes zeros (depth and stencil only), pass 1
+  the hair, stippled only by `globalScalars.x`; then `draw` forward with alpha test 100 and blending. Which alpha test
+  the engine sets for pass 1 is not in the file (to be read from a trace).
 
 ## Format
 
