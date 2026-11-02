@@ -43,6 +43,113 @@
   const canvas = document.getElementById("view");
   const message = document.getElementById("message");
   const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, alpha: true, stencil: true });
+  if (gl) skipRedundantCalls(gl);
+
+  // The renderer sets each mesh's uniforms and states in full before its draw (about 50 calls a draw; a big cutscene's
+  // frame at the harbour: 276,000 calls for 5,900 draws, 75 ms on the CPU). Here a call that sets what is already
+  // set returns at once: uniforms by their location (each program keeps its own values), switches, cull and blend
+  // states, the texture bound per unit and the vertex array.
+  function skipRedundantCalls(gl) {
+    const uniforms = new WeakMap();
+    const same = (kept, values) => {
+      if (kept === undefined || kept.length !== values.length) return false;
+      for (let i = 0; i < values.length; i++) if (kept[i] !== values[i]) return false;
+      return true;
+    };
+    const scalar = name => {
+      const set = gl[name].bind(gl);
+      gl[name] = (location, ...values) => {
+        if (location === null || location === undefined) return;
+        if (same(uniforms.get(location), values)) return;
+        uniforms.set(location, values);
+        set(location, ...values);
+      };
+    };
+    const vector = name => {
+      const set = gl[name].bind(gl);
+      gl[name] = (location, ...rest) => {
+        if (location === null || location === undefined) return;
+        const values = rest[rest.length - 1];
+        if (rest.length === 1 && values.length <= 64 && same(uniforms.get(location), values)) return;
+        uniforms.set(location, rest.length === 1 && values.length <= 64 ? Array.from(values) : undefined);
+        set(location, ...rest);
+      };
+    };
+    for (const n of ["uniform1i", "uniform1f", "uniform2f", "uniform3f", "uniform4f", "uniform2i"]) scalar(n);
+    for (const n of ["uniform1fv", "uniform2fv", "uniform3fv", "uniform4fv", "uniform1iv"]) vector(n);
+    const matrix = gl.uniformMatrix4fv.bind(gl);
+    gl.uniformMatrix4fv = (location, transpose, values) => {
+      if (location === null || location === undefined) return;
+      if (!transpose && same(uniforms.get(location), values)) return;
+      uniforms.set(location, transpose ? undefined : Array.from(values));
+      matrix(location, transpose, values);
+    };
+    // A program linked again forgets its values: its locations are then new objects, so nothing kept applies.
+    const switches = new Map(), enable = gl.enable.bind(gl), disable = gl.disable.bind(gl);
+    gl.enable = cap => { if (switches.get(cap) !== true) { switches.set(cap, true); enable(cap); } };
+    gl.disable = cap => { if (switches.get(cap) !== false) { switches.set(cap, false); disable(cap); } };
+    const once1 = name => {
+      const set = gl[name].bind(gl); let kept;
+      gl[name] = value => { if (value !== kept) { kept = value; set(value); } };
+    };
+    for (const n of ["cullFace", "frontFace", "depthMask", "depthFunc", "activeTexture"]) once1(n);
+    const bindVertexArray = gl.bindVertexArray.bind(gl); let vaoKept;
+    gl.bindVertexArray = vao => { if (vao !== vaoKept || vao === null) { vaoKept = vao; bindVertexArray(vao); } };
+    // The texture per unit and target (activeTexture above keeps which unit is current).
+    const bound = new Map(), bindTexture = gl.bindTexture.bind(gl), activeTexture = gl.activeTexture;
+    let unit = gl.TEXTURE0;
+    gl.activeTexture = u => { unit = u; activeTexture(u); };
+    gl.bindTexture = (target, texture) => {
+      const key = unit * 4 + (target === gl.TEXTURE_2D ? 0 : target === gl.TEXTURE_CUBE_MAP ? 1 : target === gl.TEXTURE_3D ? 2 : 3);
+      if (bound.get(key) === texture && texture !== null) return;
+      bound.set(key, texture);
+      bindTexture(target, texture);
+    };
+    // A texture deleted while bound leaves its units unbound in GL: forgotten here too.
+    const deleteTexture = gl.deleteTexture.bind(gl);
+    gl.deleteTexture = texture => { for (const [k, t] of bound) if (t === texture) bound.delete(k); deleteTexture(texture); };
+    const deleteVertexArray = gl.deleteVertexArray.bind(gl);
+    gl.deleteVertexArray = vao => { if (vao === vaoKept) vaoKept = undefined; deleteVertexArray(vao); };
+    // The blend factors as four (source and destination, colour and alpha).
+    const blendFunc = gl.blendFunc.bind(gl), blendFuncSeparate = gl.blendFuncSeparate.bind(gl);
+    let blend = [gl.ONE, gl.ZERO, gl.ONE, gl.ZERO];
+    gl.blendFunc = (s, d) => { if (blend[0] !== s || blend[1] !== d || blend[2] !== s || blend[3] !== d) { blend = [s, d, s, d]; blendFunc(s, d); } };
+    gl.blendFuncSeparate = (a, b, c, d) => { if (blend[0] !== a || blend[1] !== b || blend[2] !== c || blend[3] !== d) { blend = [a, b, c, d]; blendFuncSeparate(a, b, c, d); } };
+    // Framebuffers and the viewport, kept to answer for them below.
+    const bindFramebuffer = gl.bindFramebuffer.bind(gl); let drawFrame = null, readFrame = null;
+    gl.bindFramebuffer = (target, frame) => {
+      if (target !== gl.READ_FRAMEBUFFER) drawFrame = frame;
+      if (target !== gl.DRAW_FRAMEBUFFER) readFrame = frame;
+      bindFramebuffer(target, frame);
+    };
+    const deleteFramebuffer = gl.deleteFramebuffer.bind(gl);
+    gl.deleteFramebuffer = frame => { if (drawFrame === frame) drawFrame = null; if (readFrame === frame) readFrame = null; deleteFramebuffer(frame); };
+    const viewport = gl.viewport.bind(gl); let view = null;
+    gl.viewport = (x, y, w, h) => { view = [x, y, w, h]; viewport(x, y, w, h); };
+    // Asking GL for its state waits for the GPU (getParameter was a quarter of a frame at the harbour, from the
+    // glow draws saving and restoring theirs): what is kept here is answered from here.
+    const getParameter = gl.getParameter.bind(gl), isEnabled = gl.isEnabled.bind(gl);
+    let depthWrite = true, depthTest = gl.LESS;
+    const depthMask = gl.depthMask, depthFunc = gl.depthFunc;
+    gl.depthMask = on => { depthWrite = on; depthMask(on); };
+    gl.depthFunc = f => { depthTest = f; depthFunc(f); };
+    gl.isEnabled = cap => switches.has(cap) ? switches.get(cap) : isEnabled(cap);
+    gl.getParameter = p => {
+      switch (p) {
+        case gl.BLEND_SRC_RGB: return blend[0];
+        case gl.BLEND_DST_RGB: return blend[1];
+        case gl.BLEND_SRC_ALPHA: return blend[2];
+        case gl.BLEND_DST_ALPHA: return blend[3];
+        case gl.DEPTH_WRITEMASK: return depthWrite;
+        case gl.DEPTH_FUNC: return depthTest;
+        case gl.DRAW_FRAMEBUFFER_BINDING: return drawFrame;
+        case gl.READ_FRAMEBUFFER_BINDING: return readFrame;
+        case gl.VIEWPORT: if (view) return Int32Array.from(view); break;
+        case gl.TEXTURE_BINDING_2D: { const t = bound.get(unit * 4); if (t !== undefined) return t; break; }
+      }
+      return getParameter(p);
+    };
+  }
 
   const meshes = new Map();      // id → { vao, count, lines, lineCount, material, min, max }
   const materials = new Map();   // id → { texture, glass, color }
@@ -2927,7 +3034,13 @@
           const m = meshes.get(id), mat = m && materials.get(m.material);
           return m && mat && mat.emissive && mat.blend && (m.room >= 0 ? mat.emissiveMultiplier > 0 : outside && mat.emissiveNight) ? 1 : 0;
         };
-        const order = glassPass ? [...visible].sort((a, b) => glowFirst(b) - glowFirst(a)) : visible;
+        // (Those first, the rest after, each in its order: what a stable sort by glowFirst gives, in one pass.)
+        let order = visible;
+        if (glassPass) {
+          const first = [], rest = [];
+          for (const id of visible) (glowFirst(id) ? first : rest).push(id);
+          order = first.concat(rest);
+        }
         for (const id of order) {
           const m = meshes.get(id);
           if (!m) continue;
