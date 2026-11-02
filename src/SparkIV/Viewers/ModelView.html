@@ -47,6 +47,32 @@
   const meshes = new Map();      // id → { vao, count, lines, lineCount, material, min, max }
   const materials = new Map();   // id → { texture, glass, color }
   let visible = new Set();
+  const preparedSections = new Map();   // section → its messages, sent ahead (see "prepare")
+
+  // A prepared section's data (its clips, camera: base64 text) decoded into bytes while the section before plays, a few
+  // MB at a time between frames: at the change all of it at once (the intro's 20 to 39 MB) held the picture up.
+  function predecode(messages) {
+    const todo = [];
+    const walk = o => {
+      if (!o || typeof o !== "object") return;
+      for (const k of Object.keys(o)) {
+        const v = o[k];
+        if (typeof v === "string" && v.length > 256 && /^[A-Za-z0-9+/]+=*$/.test(v.slice(0, 64)) && /^[A-Za-z0-9+/=]*$/.test(v.slice(-8))) todo.push([o, k]);
+        else if (typeof v === "object") walk(v);
+      }
+    };
+    walk(messages);
+    let at = 0;
+    const step = () => {
+      let done = 0;
+      while (at < todo.length && done < (2 << 20)) {
+        const [o, k] = todo[at++];
+        if (typeof o[k] === "string") { done += o[k].length; o[k] = bytes(o[k]); }
+      }
+      if (at < todo.length) setTimeout(step, 0);
+    };
+    setTimeout(step, 0);
+  }
   let showTextures = true;
   let wireframe = false;
   // The model's lights as markers: [{ vao, count, color, meshes }].
@@ -763,13 +789,15 @@
   // --- Scene from SparkIV ---
 
   function bytes(base64) {
+    // Decoded ahead already (a prepared section's, see predecode).
+    if (typeof base64 !== "string") return base64;
     const raw = atob(base64);
     const out = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
     return out;
   }
 
-  function buffer(target, data) {
+  function glBuffer(target, data) {
     const b = gl.createBuffer();
     gl.bindBuffer(target, b);
     gl.bufferData(target, data, gl.STATIC_DRAW);
@@ -792,6 +820,8 @@
   }
 
   function addMesh(m) {
+    // Its buffers, to be deleted with it (drop).
+    const owned = [], buffer = (target, data) => { const b = glBuffer(target, data); owned.push(b); return b; };
     const positions = new Float32Array(bytes(m.positions).buffer);
     const indices = new Uint16Array(bytes(m.indices).buffer);
     const skin = m.skinBones && m.skinWeights
@@ -847,23 +877,6 @@
     buffer(gl.ELEMENT_ARRAY_BUFFER, indices);
     gl.bindVertexArray(null);
 
-    // The edges for the wire frame, each once.
-    const seen = new Set(), edges = [];
-    for (let i = 0; i + 2 < indices.length; i += 3) {
-      for (const [a, b] of [[indices[i], indices[i + 1]], [indices[i + 1], indices[i + 2]], [indices[i + 2], indices[i]]]) {
-        const key = a < b ? a * 65536 + b : b * 65536 + a;
-        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
-      }
-    }
-    const lines = gl.createVertexArray();
-    gl.bindVertexArray(lines);
-    bindSkin(skin);
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, positions));
-    gl.enableVertexAttribArray(loc.position);
-    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
-    buffer(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(edges));
-    gl.bindVertexArray(null);
-
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
     for (let i = 0; i < positions.length; i += 3) {
       for (let k = 0; k < 3; k++) {
@@ -877,8 +890,53 @@
     // background: around a cutscene (its location), not looked at when fitting. A cutscene's props (a door)
     // are lit as its location is (baked: no light of the camera, a middling light round about where they have
     // none of their own).
-    meshes.set(m.id, { vao, count: indices.length, lines, lineCount: edges.length, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions, indices, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null, far: m.far === true, mirrorOnly: m.mirrorOnly === true, pedBumps: !!m.tangents,
+    // A location's meshes (background, not its water) keep no copy of their points here: the intro's harbour has 16,000
+    // (they are for finding spots in a model and for the water's height; the wire frame is made from them when it is shown).
+    const keep = !m.background || (materials.get(m.material) && materials.get(m.material).water);
+    meshes.set(m.id, { vao, count: indices.length, lines: null, lineCount: 0, owned, skin, positionBuffer, material: m.material, hasNormal: !!m.normals, skinned: !!skin, layered: !!layerData, hasAlpha: !!m.alphas, min, max, positions: keep ? positions : null, indices: keep ? indices : null, actor: m.actor || 0, background: m.background === true, baked: m.background === true || (!!m.actor && m.ped === false), hasColors: !!m.colors, room: typeof m.room === "number" ? m.room : -1, floatAt: m.floatAt || null, far: m.far === true, mirrorOnly: m.mirrorOnly === true, pedBumps: !!m.tangents,
                        face: m.face ? makeFace(m.face, positions, normals, tangents, positionBuffer, normalBuffer, tangentBuffer) : null });
+  }
+
+  // The wire frame of a mesh, made when it is first shown (each edge once, on the mesh's own point buffer); none for a
+  // location's mesh, which keeps no copy of its points.
+  function wireOf(m) {
+    if (!m.positions || !m.indices) return false;
+    const indices = m.indices, seen = new Set(), edges = [];
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      for (const [a, b] of [[indices[i], indices[i + 1]], [indices[i + 1], indices[i + 2]], [indices[i + 2], indices[i]]]) {
+        const key = a < b ? a * 65536 + b : b * 65536 + a;
+        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
+      }
+    }
+    m.lines = gl.createVertexArray();
+    gl.bindVertexArray(m.lines);
+    bindSkin(m.skin);
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.positionBuffer);
+    gl.enableVertexAttribArray(loc.position);
+    gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
+    m.owned.push(glBuffer(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(edges)));
+    gl.bindVertexArray(null);
+    m.lineCount = edges.length;
+    return true;
+  }
+
+  // A location no longer wanted (CutsceneView's DropLocation): its meshes (their buffers) and materials (their textures)
+  // with ids from..to deleted.
+  function dropRange(from, to) {
+    for (const [id, m] of meshes) {
+      if (id < from || id >= to) continue;
+      for (const b of m.owned || []) gl.deleteBuffer(b);
+      if (m.vao) gl.deleteVertexArray(m.vao);
+      if (m.lines) gl.deleteVertexArray(m.lines);
+      meshes.delete(id);
+      visible.delete(id);
+    }
+    for (const [id, mat] of materials) {
+      if (id < from || id >= to) continue;
+      for (const t of [mat.texture, mat.normal, mat.specular, mat.environment, mat.dirt, mat.paint2Tex, ...mat.layers]) if (t) gl.deleteTexture(t);
+      materials.delete(id);
+    }
+    draw();
   }
 
   // A cutscene ped's face shapes on its head mesh (GTA IV (PC): its .wbs, docs/GtaIV/Pc/formats/wbs.md): the mesh's
@@ -1126,7 +1184,7 @@
       const vao = gl.createVertexArray();
       gl.bindVertexArray(vao);
       bindSkin(null);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+      gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
       gl.enableVertexAttribArray(loc.position);
       gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
       gl.bindVertexArray(null);
@@ -1158,7 +1216,7 @@
     for (const id of visible) {
       const m = meshes.get(id);
       if (!m) continue;
-      vertices += m.positions.length / 3;
+      if (!m.positions) continue;
       for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], m.min[k]); max[k] = Math.max(max[k], m.max[k]); }
     }
     for (const l of shownLights) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], l.position[k]); max[k] = Math.max(max[k], l.position[k]); }
@@ -1170,11 +1228,11 @@
     const cells = new Map();
     const index = c => Math.min(39, Math.max(0, Math.floor(c)));
     let triangles = 0;
-    for (const id of visible) { const m = meshes.get(id); if (m) triangles += m.indices.length / 3; }
+    for (const id of visible) { const m = meshes.get(id); if (m && m.indices) triangles += m.indices.length / 3; }
     const stride = Math.max(1, Math.floor(triangles / 200000)) * 3;
     for (const id of visible) {
       const m = meshes.get(id);
-      if (!m) continue;
+      if (!m || !m.positions) continue;
       const p = m.positions, t = m.indices;
       for (let i = 0; i + 2 < t.length; i += stride) {
         const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -2654,7 +2712,7 @@
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
     bindSkin(null);
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
+    gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer(gl.ARRAY_BUFFER, new Float32Array(lines)));
     gl.enableVertexAttribArray(loc.position);
     gl.vertexAttribPointer(loc.position, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
@@ -3437,6 +3495,7 @@
         for (const id of visible) {
           const m = meshes.get(id);
           if (!m || m.mirrorOnly || (m.actor && cast.size && !cast.has(m.actor))) continue;
+          if (!m.lines && !wireOf(m)) continue;
           useSkin(m);
           gl.bindVertexArray(m.lines);
           gl.drawElements(gl.LINES, m.lineCount, gl.UNSIGNED_SHORT, 0);
@@ -3616,9 +3675,13 @@
   }
 
   function handle(m) {
+      // A section's messages sent ahead (CutsceneView: the next section's, parsed here while the one before plays), then
+      // taken by the batch that changes to it.
+      if (m.type === "prepare") { preparedSections.set(m.section, m.messages); predecode(m.messages); return; }
+      if (m.type === "unprepare") { for (const k of [...preparedSections.keys()]) if (!m.keep.includes(k)) preparedSections.delete(k); return; }
       // Several at once (a cutscene's next section: its clip, cast, camera, frame), all before the next
       // picture: one by one, a picture came between them (the new clip with the old cast and camera).
-      if (m.type === "batch") { for (const one of m.messages) handle(one); }
+      if (m.type === "batch") { if (m.prepared !== undefined && preparedSections.has(m.prepared)) for (const one of preparedSections.get(m.prepared)) handle(one); for (const one of m.messages) handle(one); }
       else if (m.type === "scene") { setScene(m); }
       else if (m.type === "materials") { setMaterials(m.materials); }
       else if (m.type === "drawDistance") { drawSteps = m.steps || []; draw(); }

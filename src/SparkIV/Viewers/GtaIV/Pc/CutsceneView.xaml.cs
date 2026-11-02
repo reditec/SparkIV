@@ -394,11 +394,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       ShowSection(Math.Max(0, _section), _frame, play: false);
     }
 
-    private void Post(object message)
+    private void Post(object message) => PostJson(JsonSerializer.Serialize(message));
+
+    // While a section is being changed to: the messages gathered into its one batch (the page draws no picture between
+    // them, else one came with the new location and the old camera, or without any location).
+    private List<string>? _bundle;
+
+    private void PostJson(string json)
     {
-      if (_pageReady && !_disposed)
+      if (_bundle != null)
       {
-        Web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        _bundle.Add(json);
+      }
+      else if (_pageReady && !_disposed)
+      {
+        Web.CoreWebView2?.PostWebMessageAsJson(json);
       }
     }
 
@@ -425,6 +435,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Post(new { type = "loop", on = false });
       // The location: sent again to a page started anew, else loaded now when it is to be shown.
       _locationsSent.Clear();
+      _sectionsPrepared.Clear();
       if (_document.Location != null)
       {
         SendLocation();
@@ -438,8 +449,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // Each section is placed at its own origin, its [OFFSET] (its actors' and camera's places are relative to it): the
     // intro's sections 2 and 3 lie some 4 m from the first's, 4 to 6 (Roman's cab at the harbour) 1.7 km away; the
     // game's camera in the trace (GTAIV.3, gViewInverse) is on each section's track only so (#83). So a location per
-    // origin, each loaded once when a section there is shown, with its own band of mesh and material ids and its own
-    // texture urls (loc<band>/<key>), all kept on the page; changing sections shows the one of the section's origin.
+    // origin, with its own band of mesh and material ids and its own texture urls (loc<band>/<key>); changing sections
+    // shows the one of the section's origin. Only the shown section's and the next one's are kept (here and on the
+    // page): the intro's harbour alone is 16,000 meshes, every location at once took several GB.
     private readonly Dictionary<string, CutsceneLocation> _locations = new Dictionary<string, CutsceneLocation>();
     private readonly List<string> _locationKeys = new List<string>();
     private readonly Dictionary<string, List<int>> _locationVisibleOf = new Dictionary<string, List<int>>();
@@ -494,7 +506,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       LoadLocation();
     }
 
-    /// <summary>The other sections' locations, one after the other in the background, sent to the page unseen.</summary>
+    /// <summary>The origins wanted now: the shown section's and the next one's (the one playing goes on to).</summary>
+    private List<float[]> WantedOrigins()
+    {
+      int at = Math.Max(0, _section);
+      return new[] { at, at + 1 }.Where(i => i < _document.Cut.Sections.Count).Select(OriginOf).OfType<float[]>().ToList();
+    }
+
+    /// <summary>
+    /// The next section's location loaded in the background and sent to the page unseen (paced, so that the playing
+    /// scene goes on); the locations no longer wanted dropped here and on the page.
+    /// </summary>
     private async void PreloadLocations()
     {
       string? folder = _document.GameFolder;
@@ -502,8 +524,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      var missing = Enumerable.Range(0, _document.Cut.Sections.Count).Select(OriginOf).OfType<float[]>()
-                              .FirstOrDefault(o => !_locations.ContainsKey(KeyOf(o)) && !_locationsFailed.Contains(KeyOf(o)));
+      var wanted = WantedOrigins();
+      var wantedKeys = wanted.Select(KeyOf).ToHashSet();
+      foreach (string old in _locations.Keys.Where(k => !wantedKeys.Contains(k) && k != _locationKey).ToList())
+      {
+        DropLocation(old);
+      }
+      var missing = wanted.FirstOrDefault(o => !_locations.ContainsKey(KeyOf(o)) && !_locationsFailed.Contains(KeyOf(o)));
       if (missing == null)
       {
         return;
@@ -513,9 +540,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      SendLocationScene(key);
+      await SendLocationScene(key, paced: true);
       // A section there chosen meanwhile: shown now; else on to the next one.
       LoadLocation();
+    }
+
+    /// <summary>A location no longer wanted: its meshes, materials and textures dropped on the page, its data here.</summary>
+    private void DropLocation(string key)
+    {
+      if (_locationsSent.Remove(key))
+      {
+        int first = 100000 + _locationKeys.IndexOf(key) * LocationIdBand;
+        Post(new { type = "drop", from = first, to = first + LocationIdBand });
+      }
+      _locations.Remove(key);
+      _locationVisibleOf.Remove(key);
     }
 
     /// <summary>One location loaded (some seconds, in the background) and kept; false when it couldn't be.</summary>
@@ -609,24 +648,41 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// page adds them): one message is one string in the page, at most ~536 million characters (V8), and the intro's
     /// harbour comes to about that as one.
     /// </summary>
-    private void SendLocationScene(string key)
+    private async System.Threading.Tasks.Task SendLocationScene(string key, bool paced = false)
     {
       if (!_locations.TryGetValue(key, out var location) || !_locationsSent.Add(key))
       {
         return;
       }
       int first = 100000 + _locationKeys.IndexOf(key) * LocationIdBand;
-      var (scene, visible) = location.Message(k => LocationUrlOf(key, k), first, first);
-      _locationVisibleOf[key] = visible;
+      // (Filled on the other thread while the parts are made: kept here only once they all are.)
+      var visible = new List<int>();
       if (_document.Log != null)
       {
         _document.Log.Step("location: made into the page's scene");
         _pageWait = System.Diagnostics.Stopwatch.StartNew();
         _pageWaitFor = "page: the location's textures uploaded";
       }
-      foreach (var part in CutsceneMessages.SplitScene(scene, 1000))
+      // Each part made (on another thread) and posted in turn; in the background with pauses between them, so the
+      // page draws on while it takes them in.
+      using var parts = location.MessageParts(k => LocationUrlOf(key, k), first, first, visible).GetEnumerator();
+      while (await System.Threading.Tasks.Task.Run(parts.MoveNext))
       {
-        Post(part);
+        if (_disposed || !_locationsSent.Contains(key))
+        {
+          return;
+        }
+        PostJson(parts.Current);
+        if (paced)
+        {
+          await System.Threading.Tasks.Task.Delay(40);
+        }
+      }
+      _locationVisibleOf[key] = visible;
+      if (key == _locationKey)
+      {
+        _locationVisible = visible;
+        PostVisible();
       }
     }
 
@@ -636,7 +692,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      SendLocationScene(_locationKey);
+      _ = SendLocationScene(_locationKey);
       Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? LocationUrl(CutsceneLocation.LightVolumeKey) : null,
                                             _document.Location.Corona != null ? LocationUrl(CutsceneLocation.CoronaKey) : null));
       _lit = PostSky();
@@ -650,7 +706,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         wind = script?.Wind,
         swellAt = script?.Marker is float[] marker && origin != null ? new[] { marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2] } : null,
       });
-      _locationVisible = _locationVisibleOf[_locationKey];
+      _locationVisible = _locationVisibleOf.TryGetValue(_locationKey, out var shown) ? shown : new List<int>();
       PostVisible();
       PostBackground();
     }
@@ -694,6 +750,69 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void PostVisible() =>
       Post(new { type = "visible", ids = s_location ? _castVisible.Concat(_locationVisible).ToList() : _castVisible, fit = false });
 
+    // A section's messages (timeline, the cast with every actor's clip, camera, draw distance, fades) as JSON, made once on
+    // another thread: the intro's are 20 to 39 MB each and took 140 to 190 ms to make here, the page about as long to
+    // take in. The next section's are sent ahead ("prepare"), so changing to it takes only a short message. Only the
+    // shown section's and the next one's are kept, here and on the page.
+    private sealed record SectionData(string Json, bool HasCamera, List<string> Notes);
+    private readonly Dictionary<int, System.Threading.Tasks.Task<SectionData>> _sectionData = new Dictionary<int, System.Threading.Tasks.Task<SectionData>>();
+    private readonly HashSet<int> _sectionsPrepared = new HashSet<int>();
+
+    private System.Threading.Tasks.Task<SectionData> SectionDataOf(int index)
+    {
+      if (!_sectionData.TryGetValue(index, out var task))
+      {
+        var cut = _document.Cut;
+        var section = cut.Sections[index];
+        var wad = _document.Sections[index];
+        var actors = _document.Actors;
+        float fps = FpsOf(index);
+        var clip = wad?.Animations.FirstOrDefault();
+        int frames = clip != null ? Math.Max(1, clip.FrameCount) : Math.Max(1, (int)(section.Duration * fps) + 1);
+        task = System.Threading.Tasks.Task.Run(() =>
+        {
+          var (timeline, cast, camera, notes) = CutsceneMessages.Section(section, actors, wad, cut.Sections.Take(index));
+          var messages = new object[]
+          {
+            timeline,
+            cast,
+            camera ?? new { type = "camera", camera = (object?)null },
+            // How far the game draws, shot by shot (the map beyond isn't drawn).
+            new { type = "drawDistance", steps = cut.DrawDistanceSteps(index, fps) },
+            // The fade in at the start of the first section, out at the end of the last (in the section's frames).
+            CutsceneMessages.Fade(cut, index, frames, fps),
+          };
+          return new SectionData(JsonSerializer.Serialize(messages), camera != null, notes);
+        });
+        _sectionData[index] = task;
+      }
+      return task;
+    }
+
+    /// <summary>The next section's messages made and sent to the page ahead; the others no longer kept.</summary>
+    private async void PrepareNextSection()
+    {
+      int next = _section + 1;
+      foreach (int old in _sectionData.Keys.Where(k => k != _section && k != next).ToList())
+      {
+        _sectionData.Remove(old);
+      }
+      if (_sectionsPrepared.RemoveWhere(k => k != _section && k != next) > 0)
+      {
+        Post(new { type = "unprepare", keep = new[] { _section, next } });
+      }
+      if (next >= _document.Cut.Sections.Count || _sectionsPrepared.Contains(next) || _castLoading)
+      {
+        return;
+      }
+      var data = await SectionDataOf(next);
+      if (_disposed || _section + 1 != next || !_pageReady || !_sectionsPrepared.Add(next))
+      {
+        return;
+      }
+      PostJson("{\"type\":\"prepare\",\"section\":" + next + ",\"messages\":" + data.Json + "}");
+    }
+
     /// <summary>A section in the page: its timeline, every actor's clip, the camera; at a frame, playing or not.</summary>
     private void ShowSection(int index, int frame, bool play)
     {
@@ -704,15 +823,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       var section = cut.Sections[index];
       var wad = _document.Sections[index];
-      var (timeline, cast, camera, notes) = CutsceneMessages.Section(section, _document.Actors, wad, cut.Sections.Take(index));
+      // (Made ahead on another thread as a rule; else now.)
+      var data = SectionDataOf(index).GetAwaiter().GetResult();
       _section = index;
-      // A section at another origin (#83): the location there (the one shown so far left out until it is there).
-      if (s_location && _locationKey != null && OriginOf(index) is float[] here && KeyOf(here) != _locationKey)
-      {
-        _locationVisible = new List<int>();
-        PostVisible();
-        LoadLocation();
-      }
       _fps = FpsOf(index);
       var clip = wad?.Animations.FirstOrDefault();
       _frames = clip != null ? Math.Max(1, clip.FrameCount) : Math.Max(1, (int)(section.Duration * _fps) + 1);
@@ -724,19 +837,41 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _settingSection = false;
       }
 
+      // A section at another origin (#83): the location there, at once when it is on the page already (loaded ahead);
+      // else the one shown so far left out until it is there. Its messages go into the section's batch (sent apart, the
+      // page drew a picture between them: the sky without the map - a bright flash after the dark ship - or the new
+      // map through the old camera).
+      _bundle = new List<string>();
+      try
+      {
+        if (s_location && _locationKey != null && OriginOf(index) is float[] here && KeyOf(here) is string hereKey && hereKey != _locationKey)
+        {
+          if (_locations.TryGetValue(hereKey, out var ready) && _locationVisibleOf.ContainsKey(hereKey))
+          {
+            ShowLocation(hereKey, ready);
+            PreloadLocations();
+          }
+          else
+          {
+            _locationVisible = new List<int>();
+            PostVisible();
+            LoadLocation();
+          }
+        }
+      }
+      catch
+      {
+        _bundle = null;
+        throw;
+      }
+
       // All in one message: the page draws once, the section complete (one by one, a picture came between
-      // them: the new clip with the old cast and camera, a frame that tore the cutscene).
+      // them: the new clip with the old cast and camera, a frame that tore the cutscene). The section's own messages
+      // the page has from "prepare" already, else in this one.
       var messages = new List<object>
       {
-        timeline,
-        cast,
-        camera ?? new { type = "camera", camera = (object?)null },
-        new { type = "useCamera", on = s_camera && camera != null },
+        new { type = "useCamera", on = s_camera && data.HasCamera },
         new { type = "showCamera", on = s_showCamera },
-        // How far the game draws, shot by shot (the map beyond isn't drawn).
-        new { type = "drawDistance", steps = cut.DrawDistanceSteps(index, _fps) },
-        // The fade in at the start of the first section, out at the end of the last (in the section's frames).
-        CutsceneMessages.Fade(cut, index, _frames, _fps),
       };
       if (_frame > 0)
       {
@@ -746,8 +881,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         messages.Add(new { type = "play", on = true });
       }
-      Post(new { type = "batch", messages });
+      string rest = JsonSerializer.Serialize(messages);
+      // The location's messages of the change (if any) after the section's own, before the camera is used and played.
+      string bundled = string.Concat(_bundle.Select(b => b + ","));
+      _bundle = null;
+      PostJson(_sectionsPrepared.Contains(index)
+        ? "{\"type\":\"batch\",\"prepared\":" + index + ",\"messages\":[" + bundled + rest.Substring(1) + "}"
+        : "{\"type\":\"batch\",\"messages\":" + data.Json.Substring(0, data.Json.Length - 1) + "," + bundled + rest.Substring(1) + "}");
       ShowFrame();
+      PrepareNextSection();
 
       var parts = new List<string>
       {
@@ -766,11 +908,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         parts.Add(_document.AudioNote);
       }
-      if (camera == null)
+      if (!data.HasCamera)
       {
         parts.Add("no camera clip");
       }
-      parts.AddRange(notes);
+      parts.AddRange(data.Notes);
       _sectionStatus = string.Join("   ·   ", parts);
       ShowStatus();
     }

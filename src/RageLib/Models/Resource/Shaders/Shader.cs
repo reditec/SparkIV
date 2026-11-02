@@ -123,7 +123,7 @@ namespace RageLib.Models.Resource.Shaders
             br.BaseStream.Seek(ShaderParamOffsets[i], SeekOrigin.Begin);
             obj.Read(br);
 
-            ShaderParams.Add((ParamNameHash)ShaderParamNames[i], obj);
+            ShaderParams.Add((ParamNameHash)ShaderParamNames[i], obj is ShaderParamTexture { Invalid: true } ? null : obj);
           }
           catch
           {

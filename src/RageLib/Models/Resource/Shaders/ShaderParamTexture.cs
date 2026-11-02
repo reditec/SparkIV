@@ -36,6 +36,13 @@ namespace RageLib.Models.Resource.Shaders
 
     public string TextureName { get; private set; }
 
+    /// <summary>
+    /// Its name's place isn't a pointer into the resource (Shader.Read then keeps the parameter as none). Told apart
+    /// here rather than by ReadOffset's exception: the intro's cast threw 479 of them, which under a debugger took
+    /// many seconds.
+    /// </summary>
+    internal bool Invalid { get; private set; }
+
     #region Implementation of IFileAccess
 
     public new void Read(BinaryReader br)
@@ -47,7 +54,13 @@ namespace RageLib.Models.Resource.Shaders
       Unknown3 = br.ReadUInt16();
       Unknown4 = br.ReadUInt32();
       Unknown5 = br.ReadUInt32();
-      TextureNameOffset = ResourceUtil.ReadOffset(br);
+      uint pointer = br.ReadUInt32();
+      if (pointer != 0 && pointer >> 28 != 5)
+      {
+        Invalid = true;
+        return;
+      }
+      TextureNameOffset = pointer & 0x0fffffff;
       Unknown7 = br.ReadUInt32();
 
       br.BaseStream.Seek(TextureNameOffset, SeekOrigin.Begin);

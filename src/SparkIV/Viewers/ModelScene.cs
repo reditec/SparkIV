@@ -143,7 +143,7 @@ namespace SparkIV.WinUI.Viewers
     /// and the shared ones, one named like the texture (peds: feet_diff_000_a_uni.wtd holds
     /// feet_diff_000_a_uni), and finally any other dictionary in the folder.
     /// </summary>
-    private Texture? FindTexture(string name, TextureFile? embedded, out string source)
+    private Texture? FindTexture(string name, TextureFile? embedded, out string source, bool searchFolder = true)
     {
       source = EmbeddedSource;
       var texture = embedded?.FindTextureByName(name);
@@ -168,7 +168,7 @@ namespace SparkIV.WinUI.Viewers
         }
       }
 
-      if (!_folderSearched)
+      if (searchFolder && !_folderSearched)
       {
         _folderSearched = true;
         foreach (var file in _folder.OfType<File>().Where(f => f.Name.EndsWith(".wtd", StringComparison.OrdinalIgnoreCase)).Take(MaxDictionariesSearched))
@@ -1127,9 +1127,11 @@ namespace SparkIV.WinUI.Viewers
       string? key = null;
       if (!string.IsNullOrEmpty(textureName))
       {
-        // Another texture in its place where the caller wants one and it is there (see Load).
+        // Another texture in its place where the caller wants one and it is there (see Load). Not looked for in the
+        // folder's other dictionaries: a ped's texture variations are in its own (the intro's M_M_GRu2_Hi_01 asks for
+        // lowr_diff_000_c_uni, which it hasn't: opening 300 other peds' dictionaries for it took 5 s).
         if (_preferTexture?.Invoke(textureName) is string other && !other.Equals(textureName, StringComparison.OrdinalIgnoreCase) &&
-            FindTexture(other, embedded, out _) != null)
+            FindTexture(other, embedded, out _, searchFolder: false) != null)
         {
           textureName = other;
         }
@@ -1266,9 +1268,9 @@ namespace SparkIV.WinUI.Viewers
     private string? AddTexture(string name, TextureFile? embedded, string key)
     {
       // Another texture in its place where the caller wants one and it is there (a ped's texture
-      // variation: uppr_diff_000_b_uni for uppr_diff_000_a_uni).
+      // variation: uppr_diff_000_b_uni for uppr_diff_000_a_uni); only in its own dictionaries (see above).
       if (_preferTexture?.Invoke(name) is string other && !other.Equals(name, StringComparison.OrdinalIgnoreCase) &&
-          FindTexture(other, embedded, out _) != null)
+          FindTexture(other, embedded, out _, searchFolder: false) != null)
       {
         name = other;
       }
