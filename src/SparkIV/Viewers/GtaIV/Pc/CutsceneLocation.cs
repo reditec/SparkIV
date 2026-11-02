@@ -266,9 +266,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// distance) and as far as each is drawn (its .ide distance): low models with small textures, quick to
     /// load, as the game shows the city in the distance (bc_3: the bridge over the pier). Timed objects only
     /// at their hours: at <paramref name="hour"/> (the scene's time isn't in the .cut; noon for now).
+    /// <paramref name="cameras"/>: where the scene's cameras are (relative to the origin); one outside every room makes
+    /// the scene one outside too, wherever its origin is.
     /// </summary>
     public static CutsceneLocation Load(string folder, float[] offset, IReadOnlyList<CutRemoval> removals, float radius, float farRadius = 0,
-                                        int hour = 12, SparkIV.WinUI.Services.LoadLog? log = null)
+                                        int hour = 12, SparkIV.WinUI.Services.LoadLog? log = null, IReadOnlyList<Vector3>? cameras = null)
     {
       log?.Restart();
       var index = IndexOf(folder);
@@ -361,11 +363,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
       // Inside: the origin across the ground in a room, up to 5 m below or above it (a scene's origin isn't
       // where it plays: bc_1's is 3.4 m under the floor of Bernie's living room).
-      location.Outdoors = !location.Rooms.Any(r =>
+      bool InRoom(Vector3 at, float below) => location.Rooms.Any(r =>
       {
-        var local = Vector3.Transform(-r.At, r.Turn);
-        return local.X >= r.Min.X && local.X <= r.Max.X && local.Y >= r.Min.Y && local.Y <= r.Max.Y && local.Z >= r.Min.Z - 5 && local.Z <= r.Max.Z + 5;
+        var local = Vector3.Transform(at - r.At, r.Turn);
+        return local.X >= r.Min.X && local.X <= r.Max.X && local.Y >= r.Min.Y && local.Y <= r.Max.Y && local.Z >= r.Min.Z - below && local.Z <= r.Max.Z + below;
       });
+      // Or a camera of the scene outside every room (exactly): the intro's second section plays on the ship's deck,
+      // its origin in the ship's hold; taken for a scene inside, it had no far versions, no skyline (#87).
+      location.Outdoors = !InRoom(Vector3.Zero, 5) || (cameras ?? Array.Empty<Vector3>()).Any(c => !InRoom(c, 0));
       if (!location.Outdoors || farRadius <= radius)
       {
         foreach (int i in world)

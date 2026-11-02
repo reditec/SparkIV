@@ -579,7 +579,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _drawDistance = drawDistance;
         var log = _document.Log;
         int hour = (int)OutsideHour;
-        var loaded = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, hour, log));
+        // Where the cameras of the sections at this origin are: one outside makes the location one outside.
+        var cut = _document.Cut;
+        var sectionsHere = Enumerable.Range(0, cut.Sections.Count).Where(i => OriginOf(i) is float[] o && KeyOf(o) == key).ToList();
+        var loaded = await System.Threading.Tasks.Task.Run(() =>
+        {
+          var cameras = sectionsHere.SelectMany(i => CutsceneMessages.CameraPlaces(cut.Sections[i], _document.Sections[i])).ToList();
+          return CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, hour, log, cameras);
+        });
         _locations[key] = loaded;
         if (!_locationKeys.Contains(key))
         {
