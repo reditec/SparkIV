@@ -69,7 +69,10 @@
                     <Flyout Opening="StartFlyout_Opening">
                         <StackPanel Spacing="8">
                             <TimePicker x:Name="StartPicker" ClockIdentifier="24HourClock" Header="Start time" SelectedTimeChanged="StartPicker_SelectedTimeChanged" />
-                            <Button Content="Reset" Click="StartReset_Click" ToolTipService.ToolTip="Back to the time the mission script sets, else 12:00" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="Reset" Click="StartReset_Click" ToolTipService.ToolTip="Back to the time the mission script sets, else 12:00" />
+                                <ToggleButton x:Name="LockTimeToggle" Content="Lock time" Click="LockTime_Click" ToolTipService.ToolTip="Keep the clock (and the clouds) at the start time instead of letting it run on with the cutscene, as the game does in the intro" />
+                            </StackPanel>
                         </StackPanel>
                     </Flyout>
                 </AppBarButton.Flyout>
