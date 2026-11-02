@@ -53,7 +53,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 | `[LIGHTS]` | used | Light clips of the section. |
 | `[MISSION_TEXT_NAME]`, `[TEXT]` | used | Subtitles: table, start time, duration, key. A `.cut` of several scenes one after the other (each from its `[CUTSCENE_HEADER]`) has a `[TEXT]` per part, its times counting from that part's first section: intro.cut's four parts (sections 1, 2, 3, 4–6) each start near 0 again. Checked against four subtitles in the intro's trace frames (e.g. section 5 f782: R1_CUT1_13 at 94.3 s of part 4). |
 | `[MODELS]` | used (partly) | Number, model, clip, face clip. A **fifth field** (`0`, only in rows with a face clip) is **unclear**. |
-| `[OFFSET]`, `[ORIENT]` | used | Position and rotation of the scene in the world. |
+| `[OFFSET]`, `[ORIENT]` | used | Position and rotation of the scene in the world, **per section**: each section's actors and camera are relative to its own `[OFFSET]`, unturned (`[ORIENT]` isn't applied to them). intro.cut: section 1 at (−342.2, −1500.2, 14.1), 2 and 3 some 4 m from it, 4–6 at the harbour (752.3, −212.8, 4.8). Checked against the game's camera (`gViewInverse`) of 23 trace frames (`GTAIV.3.trace`): each on its section's track to 0.00–0.03 m with the section's offset, with the first section's only section 1 fits. SparkIV loads a location per origin (the others in the background after the first) and shows the one of the section played. |
 | `[PROPS]`, `[VARIATION]` | used | Props and clothing variations. |
 | `[REMOVE]` | used | World objects hidden during the scene. |
 | `[VEHICLE_DETAILS]`, `[VEHICLE_REMOVAL]` | used | Vehicle colours and dirt; removed vehicle parts. |

@@ -267,9 +267,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         body = ModelViewPage.Bytes();
         type = "text/html; charset=utf-8";
       }
+      else if (name.StartsWith("loc", StringComparison.Ordinal) && name.IndexOf('/') is int slash and > 3 &&
+               int.TryParse(name.AsSpan(3, slash - 3), out int band) && band < _locationKeys.Count &&
+               _locations.TryGetValue(_locationKeys[band], out var location))
+      {
+        body = location.Texture(name.Substring(slash + 1));
+      }
       else
       {
-        body = name.StartsWith("m", StringComparison.Ordinal) ? _document.Location?.Texture(name) : CutsceneMessages.Texture(_document.Actors, name);
+        body = CutsceneMessages.Texture(_document.Actors, name);
       }
       args.Response = sender.Environment.CreateWebResourceResponse(new MemoryStream(body ?? Array.Empty<byte>()).AsRandomAccessStream(),
                                                                    body != null ? 200 : 404, body != null ? "OK" : "Not Found",
@@ -418,6 +424,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The sections play one after the other (here), not each over again.
       Post(new { type = "loop", on = false });
       // The location: sent again to a page started anew, else loaded now when it is to be shown.
+      _locationsSent.Clear();
       if (_document.Location != null)
       {
         SendLocation();
@@ -428,20 +435,99 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
     }
 
-    /// <summary>The map around the scene, loaded in the background (some seconds), then shown.</summary>
+    // Each section is placed at its own origin, its [OFFSET] (its actors' and camera's places are relative to it): the
+    // intro's sections 2 and 3 lie some 4 m from the first's, 4 to 6 (Roman's cab at the harbour) 1.7 km away; the
+    // game's camera in the trace (GTAIV.3, gViewInverse) is on each section's track only so (#83). So a location per
+    // origin, each loaded once when a section there is shown, with its own band of mesh and material ids and its own
+    // texture urls (loc<band>/<key>), all kept on the page; changing sections shows the one of the section's origin.
+    private readonly Dictionary<string, CutsceneLocation> _locations = new Dictionary<string, CutsceneLocation>();
+    private readonly List<string> _locationKeys = new List<string>();
+    private readonly Dictionary<string, List<int>> _locationVisibleOf = new Dictionary<string, List<int>>();
+    private readonly HashSet<string> _locationsSent = new HashSet<string>();
+    // Origins whose location couldn't be loaded (not tried again).
+    private readonly HashSet<string> _locationsFailed = new HashSet<string>();
+    private string? _locationKey;
+    private const int LocationIdBand = 500000;
+
+    private float[]? OriginOf(int section) =>
+      section >= 0 && section < _document.Cut.Sections.Count ? _document.Cut.Sections[section].Offset ?? _document.Cut.Offset : _document.Cut.Offset;
+
+    private static string KeyOf(float[] origin) => string.Join(",", origin.Select(v => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
+
+    private string LocationUrl(string key) => LocationUrlOf(_locationKey!, key);
+
+    private string LocationUrlOf(string location, string key) => Host + "loc" + _locationKeys.IndexOf(location) + "/" + key;
+
+    /// <summary>
+    /// The location of the shown section's origin: shown at once when it was loaded before, else loaded first; then
+    /// the other sections' locations loaded in the background (PreloadLocations), so that changing to a section at
+    /// another origin (the intro's harbour) shows its map at once instead of loading it then.
+    /// </summary>
     private async void LoadLocation()
     {
       string? folder = _document.GameFolder;
-      float[]? offset = _document.Cut.Offset;
+      float[]? offset = OriginOf(Math.Max(0, _section));
       // (While the cast loads: after it, with the scene - SendScene - as before.)
-      if (_locationLoading || _castLoading || _document.Location != null || folder == null || offset == null)
+      if (_locationLoading || _castLoading || folder == null || offset == null)
       {
         return;
       }
+      string key = KeyOf(offset);
+      if (_locationsFailed.Contains(key))
+      {
+        return;
+      }
+      if (_locations.TryGetValue(key, out var known))
+      {
+        if (key != _locationKey || _document.Location != known)
+        {
+          ShowLocation(key, known);
+        }
+        PreloadLocations();
+        return;
+      }
+      if (!await LoadLocationAt(folder, key, offset, quiet: false) || _disposed)
+      {
+        return;
+      }
+      // Shown now (or the one of a section chosen meanwhile), then the others.
+      LoadLocation();
+    }
+
+    /// <summary>The other sections' locations, one after the other in the background, sent to the page unseen.</summary>
+    private async void PreloadLocations()
+    {
+      string? folder = _document.GameFolder;
+      if (_locationLoading || _castLoading || folder == null || !s_location)
+      {
+        return;
+      }
+      var missing = Enumerable.Range(0, _document.Cut.Sections.Count).Select(OriginOf).OfType<float[]>()
+                              .FirstOrDefault(o => !_locations.ContainsKey(KeyOf(o)) && !_locationsFailed.Contains(KeyOf(o)));
+      if (missing == null)
+      {
+        return;
+      }
+      string key = KeyOf(missing);
+      if (!await LoadLocationAt(folder, key, missing, quiet: true) || _disposed)
+      {
+        return;
+      }
+      SendLocationScene(key);
+      // A section there chosen meanwhile: shown now; else on to the next one.
+      LoadLocation();
+    }
+
+    /// <summary>One location loaded (some seconds, in the background) and kept; false when it couldn't be.</summary>
+    private async System.Threading.Tasks.Task<bool> LoadLocationAt(string folder, string key, float[] offset, bool quiet)
+    {
       _locationLoading = true;
-      Working.IsActive = true;
-      _locationNote = "loading the location …";
-      ShowStatus();
+      if (!quiet)
+      {
+        Working.IsActive = true;
+        _locationNote = "loading the location …";
+        ShowStatus();
+      }
       try
       {
         var removals = _document.Cut.Removals;
@@ -454,25 +540,35 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _drawDistance = drawDistance;
         var log = _document.Log;
         int hour = (int)OutsideHour;
-        _document.Location = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, hour, log));
+        var loaded = await System.Threading.Tasks.Task.Run(() => CutsceneLocation.Load(folder, offset, removals, LocationRadius, drawDistance, hour, log));
+        _locations[key] = loaded;
+        if (!_locationKeys.Contains(key))
+        {
+          _locationKeys.Add(key);
+        }
+        return true;
       }
       catch (Exception ex)
       {
-        _locationNote = "no location: " + ex.Message;
-        ShowStatus();
-        _locationLoading = false;
-        Working.IsActive = false;
-        return;
+        _locationsFailed.Add(key);
+        if (!quiet)
+        {
+          _locationNote = "no location: " + ex.Message;
+          ShowStatus();
+          Working.IsActive = false;
+        }
+        return false;
       }
       finally
       {
         _locationLoading = false;
       }
-      if (_disposed)
-      {
-        return;
-      }
-      var location = _document.Location;
+    }
+    /// <summary>A loaded location made the shown one: its note, then sent (its scene once) and shown.</summary>
+    private void ShowLocation(string key, CutsceneLocation location)
+    {
+      _document.Location = location;
+      _locationKey = key;
       _locationNote = "location: " + location.Objects.Count + " objects within " + LocationRadius + " m"
                       + (location.Far > 0 ? ", " + location.Far + " far ones up to " + _drawDistance.ToString("0") + " m" : "")
                       + (location.Outdoors ? "" : ", inside")
@@ -507,35 +603,54 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // How far the location's far models were loaded (the [DRAW_DISTANCE] as the game limits it by the time cycle).
     private float _drawDistance;
 
-    private void SendLocation()
+    /// <summary>
+    /// A location's scene, once per page (not shown by this: the visible list says what is): after the cast's ids
+    /// (meshes and materials), well clear of them, each location in its own band. Its meshes in messages of 1000 (the
+    /// page adds them): one message is one string in the page, at most ~536 million characters (V8), and the intro's
+    /// harbour comes to about that as one.
+    /// </summary>
+    private void SendLocationScene(string key)
     {
-      if (_document.Location == null)
+      if (!_locations.TryGetValue(key, out var location) || !_locationsSent.Add(key))
       {
         return;
       }
-      // After the cast's ids (meshes and materials), well clear of them.
-      var (scene, visible) = _document.Location.Message(key => Host + key, 100000, 100000);
+      int first = 100000 + _locationKeys.IndexOf(key) * LocationIdBand;
+      var (scene, visible) = location.Message(k => LocationUrlOf(key, k), first, first);
+      _locationVisibleOf[key] = visible;
       if (_document.Log != null)
       {
         _document.Log.Step("location: made into the page's scene");
         _pageWait = System.Diagnostics.Stopwatch.StartNew();
         _pageWaitFor = "page: the location's textures uploaded";
       }
-      Post(scene);
-      Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? Host + CutsceneLocation.LightVolumeKey : null,
-                                            _document.Location.Corona != null ? Host + CutsceneLocation.CoronaKey : null));
+      foreach (var part in CutsceneMessages.SplitScene(scene, 1000))
+      {
+        Post(part);
+      }
+    }
+
+    private void SendLocation()
+    {
+      if (_document.Location == null || _locationKey == null)
+      {
+        return;
+      }
+      SendLocationScene(_locationKey);
+      Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? LocationUrl(CutsceneLocation.LightVolumeKey) : null,
+                                            _document.Location.Corona != null ? LocationUrl(CutsceneLocation.CoronaKey) : null));
       _lit = PostSky();
       // The water as the mission script leaves it: the wind it forces, and the sea's swell kept round where the
       // player stands, the mission's marker (CutsceneScriptIndex.Entry), in the page's metres (less the origin).
       var script = _document.Script;
-      float[]? origin = _document.Cut.Offset;
+      float[]? origin = OriginOf(Math.Max(0, _section));
       Post(new
       {
         type = "water",
         wind = script?.Wind,
         swellAt = script?.Marker is float[] marker && origin != null ? new[] { marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2] } : null,
       });
-      _locationVisible = visible;
+      _locationVisible = _locationVisibleOf[_locationKey];
       PostVisible();
       PostBackground();
     }
@@ -556,8 +671,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _skyModifiers ??= location.Rooms.Any(r => r.Modifier != 0) ? TimeCycle.LoadModifiers(folder) : null;
       var rooms = location.Rooms.Select(r =>
         _skyModifiers != null && _skyModifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(hour) : null).ToArray();
-      Post(cycle.Message(hour, location.Clouds != null ? Host + CutsceneLocation.CloudKey : null,
-                         location.CloudDetail != null ? Host + CutsceneLocation.CloudDetailKey : null, rooms));
+      Post(cycle.Message(hour, location.Clouds != null ? LocationUrl(CutsceneLocation.CloudKey) : null,
+                         location.CloudDetail != null ? LocationUrl(CutsceneLocation.CloudDetailKey) : null, rooms));
       _clockMinute = (int)(hour * 60);
       return true;
     }
@@ -591,6 +706,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var wad = _document.Sections[index];
       var (timeline, cast, camera, notes) = CutsceneMessages.Section(section, _document.Actors, wad, cut.Sections.Take(index));
       _section = index;
+      // A section at another origin (#83): the location there (the one shown so far left out until it is there).
+      if (s_location && _locationKey != null && OriginOf(index) is float[] here && KeyOf(here) != _locationKey)
+      {
+        _locationVisible = new List<int>();
+        PostVisible();
+        LoadLocation();
+      }
       _fps = FpsOf(index);
       var clip = wad?.Animations.FirstOrDefault();
       _frames = clip != null ? Math.Max(1, clip.FrameCount) : Math.Max(1, (int)(section.Duration * _fps) + 1);
@@ -660,7 +782,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void Location_Click(object sender, RoutedEventArgs e)
     {
       s_location = LocationButton.IsChecked == true;
-      if (s_location && _document.Location == null)
+      if (s_location)
       {
         LoadLocation();
       }

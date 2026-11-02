@@ -714,6 +714,33 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>
+    /// A scene message in parts of at most <paramref name="meshes"/> meshes each, the first with its materials and
+    /// texture packs, the others with their meshes only (the page adds every scene message to what it has): one
+    /// message is one string on the page, and V8 holds at most ~536 million characters in one.
+    /// </summary>
+    public static IEnumerable<JsonObject> SplitScene(JsonObject scene, int meshes)
+    {
+      if (scene["meshes"] is not JsonArray all || all.Count <= meshes)
+      {
+        yield return scene;
+        yield break;
+      }
+      var list = all.ToList();
+      all.Clear();
+      for (int at = 0; at < list.Count; at += meshes)
+      {
+        var part = at == 0 ? scene : new JsonObject { ["type"] = scene["type"]?.DeepClone(), ["materials"] = new JsonArray() };
+        var some = new JsonArray();
+        foreach (var mesh in list.Skip(at).Take(meshes))
+        {
+          some.Add(mesh);
+        }
+        part["meshes"] = some;
+        yield return part;
+      }
+    }
+
+    /// <summary>
     /// A section's messages: the timeline (a clip without tracks, as long as the section), the cast with
     /// each actor's skeleton and clip, the camera. Notes say what was missing.
     /// </summary>
