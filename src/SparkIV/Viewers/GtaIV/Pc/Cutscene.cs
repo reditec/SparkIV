@@ -575,6 +575,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
 
     /// <summary>A track's values at every frame (3 or 4 a frame).</summary>
+    /// <summary>
+    /// Where a section's camera is (relative to its origin), every tenth frame: whether the scene is seen from outside
+    /// (see CutsceneLocation.Load). None without its camera's clip.
+    /// </summary>
+    public static List<System.Numerics.Vector3> CameraPlaces(CutSection section, AnimationFile? wad)
+    {
+      var places = new List<System.Numerics.Vector3>();
+      if (section.Camera == null || wad == null || wad.Animations.FirstOrDefault(a => string.Equals(a.ShortName, section.Camera, StringComparison.OrdinalIgnoreCase)) is not Animation clip ||
+          clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraPosition && t.IsDecoded) is not AnimationTrack track)
+      {
+        return places;
+      }
+      var values = SampledValues(clip, track, 3);
+      for (int i = 0; i + 2 < values.Length; i += 30)
+      {
+        places.Add(new System.Numerics.Vector3(values[i], values[i + 1], values[i + 2]));
+      }
+      return places;
+    }
+
     private static float[] SampledValues(Animation clip, AnimationTrack track, int components)
     {
       int frames = Math.Max(1, clip.FrameCount);
