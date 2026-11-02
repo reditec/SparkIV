@@ -173,7 +173,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             cut.MissionText = line;
             break;
           case "TEXT" when parts.Length >= 3:
-            cut.Subtitles.Add(new CutSubtitle(int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture), parts[2]));
+            cut.Subtitles.Add(new CutSubtitle(int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture), parts[2], Math.Max(0, part)));
             break;
           case "FLAGS":
             cut.Flags.Add(line);
@@ -298,8 +298,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// <summary>A map object hidden during the scene: where it is in the world (to a tenth of a metre), its model.</summary>
   public sealed record CutRemoval(float X, float Y, float Z, string Model);
 
-  /// <summary>A subtitle: from when, for how long (milliseconds over the whole scene), its key in the text table.</summary>
-  public sealed record CutSubtitle(int Start, int Length, string Key);
+  /// <summary>
+  /// A subtitle: from when, for how long (milliseconds from the start of its part of the file: each part's [TEXT]
+  /// counts from that part's first section, intro.cut's four parts from 0 again), its key in the text table, its part.
+  /// </summary>
+  public sealed record CutSubtitle(int Start, int Length, string Key, int Part = 0);
 
   /// <summary>One of the cast: the model it is, loaded (or why not), with its number in the .cut.</summary>
   public sealed class CutActor

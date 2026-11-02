@@ -62,17 +62,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// <summary>A subtitle in the list: when it is said (in the whole scene), its text.</summary>
   public sealed class CutSubtitleRow
   {
-    internal CutSubtitleRow(CutSubtitle subtitle, string text, int section)
+    internal CutSubtitleRow(CutSubtitle subtitle, string text, double seconds, int section)
     {
       Subtitle = subtitle;
       Text = text;
-      Seconds = subtitle.Start / 1000.0;
+      Seconds = seconds;
       Time = TimeSpan.FromSeconds(Seconds).ToString(@"m\:ss\.f") + "  ·  section " + (section + 1);
     }
 
     public CutSubtitle Subtitle { get; }
     public string Text { get; }
+    /// <summary>When it is said in the whole scene (its part's start plus its own time).</summary>
     public double Seconds { get; }
+    public double End => Seconds + Subtitle.Length / 1000.0;
     public string Time { get; }
   }
 
@@ -136,9 +138,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         _sectionStart[i + 1] = _sectionStart[i] + cut.Sections[i].Duration;
       }
+      // Each part's subtitles from the start of that part's first section (a .cut of several scenes one after the other
+      // times each part's [TEXT] from its own start).
       foreach (var subtitle in cut.Subtitles)
       {
-        _subtitles.Add(new CutSubtitleRow(subtitle, document.Texts.TryGetValue(subtitle.Key, out var text) ? text : subtitle.Key, Locate(subtitle.Start / 1000.0).Section));
+        int first = cut.Sections.FindIndex(s => s.Part == subtitle.Part);
+        double seconds = (first >= 0 ? _sectionStart[first] : 0) + subtitle.Start / 1000.0;
+        _subtitles.Add(new CutSubtitleRow(subtitle, document.Texts.TryGetValue(subtitle.Key, out var text) ? text : subtitle.Key, seconds, Locate(seconds).Section));
       }
       SubtitleList.ItemsSource = _subtitles;
       TimeSlider.Maximum = Math.Max(1, Math.Round(Length * 1000));
@@ -870,8 +876,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       ShowClock();
 
       // The subtitle said now, over the view and selected in the list (none between them).
-      int ms = (int)Math.Round(now * 1000);
-      var current = _subtitles.LastOrDefault(s => s.Subtitle.Start <= ms && ms < s.Subtitle.Start + s.Subtitle.Length);
+      var current = _subtitles.LastOrDefault(s => s.Seconds <= now && now < s.End);
       SubtitleText.Text = current?.Text ?? "";
       SubtitleBox.Visibility = s_subtitles && current != null ? Visibility.Visible : Visibility.Collapsed;
       if (!ReferenceEquals(SubtitleList.SelectedItem, current))
