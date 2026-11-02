@@ -1980,6 +1980,8 @@
       outColor = vec4(clamp(v.xy, 0.0, 1.0), clamp(ClumpBump * (v.z - 1.0) + 1.0, 0.0, 1.0), 1.0);
     }`;
   const PhaseStart = 593.2532, SecondsPerGameHour = 120;
+  // The clock held by the viewer ("lockTime"): the clouds then stand still too, as the game's in the intro (#93).
+  let clockLocked = false;
   let perlinPass = null;
   function perlinNoise(speed) {
     if (!cloudTex) return null;
@@ -2012,7 +2014,7 @@
     // Made anew only when its Phase moved (with the cutscene's time).
     // (From the cutscene's start Phase where it is known: sky.cloudPhase, from a trace; its rate checked there -
     // et01_ba f1292.25 to f1394.75, GTAIV.2.trace: +0.0485, as computed.)
-    const phase = (sky.cloudPhase ?? PhaseStart) + (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour;
+    const phase = (sky.cloudPhase ?? PhaseStart) + (clockLocked ? 0 : (speed || 0) * (clip ? currentFrame() / clip.fps : 0) / SecondsPerGameHour);
     if (phase === perlinPass.phase) return perlinPass.texture;
     perlinPass.phase = phase;
     const viewport = gl.getParameter(gl.VIEWPORT), blend = gl.isEnabled(gl.BLEND);
@@ -3816,6 +3818,7 @@
       else if (m.type === "play") { play(m.on); }
       else if (m.type === "seek") { play(false); seek(m.frame); }
       // To a frame without stopping: a cutscene follows its sound, which keeps the time.
+      else if (m.type === "lockTime") { clockLocked = !!m.on; draw(); }
       else if (m.type === "time") { if (clip) { playback.time = Math.max(0, Math.min(m.frame, clip.frames - 1)) / clip.fps; if (!playback.playing) showFrame(); } }
       // The sound's time (a frame, with its fraction) while playing: followed gently, a few hundredths of
       // a second at a time (a jump only when far off), so the picture doesn't stutter.

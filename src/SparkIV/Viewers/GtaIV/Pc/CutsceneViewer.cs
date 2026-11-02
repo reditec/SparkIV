@@ -71,6 +71,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>The hour the viewer's user set for the cutscene's start, or null for the script's (else noon).</summary>
     public float? StartHour { get; set; }
 
+    /// <summary>
+    /// Whether the clock stands still at the start hour instead of running on with the cutscene's time (and the clouds
+    /// with it): the game stops it for the intro (#93), set by the viewer's user for now.
+    /// </summary>
+    public bool LockTime { get; set; }
+
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
 
