@@ -1268,15 +1268,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>
-    /// The "scene" message adding the location to the page's (after the cast's ids): every object's meshes
-    /// moved into the scene, in the background (not fitted to), its models' materials once; the water a
-    /// see-through blue. Returns the meshes shown.
+    /// The "scene" messages adding the location to the page's (after the cast's ids), as JSON text, at most
+    /// <paramref name="meshesPerPart"/> meshes each (the page adds every scene message to what it has): every object's
+    /// meshes moved into the scene, in the background (not fitted to); the first with its models' materials, the
+    /// water's and the texture packs. Made one by one while they are taken (not the whole location at once: the
+    /// intro's harbour as one tree and one text took some 5 GB, and one message is one string on the page, at most
+    /// ~536 million characters in V8). The meshes shown are added to <paramref name="visible"/>.
     /// </summary>
-    public (JsonObject Scene, List<int> Visible) Message(Func<string, string> url, int firstMesh, int firstMaterial)
+    public IEnumerable<string> MessageParts(Func<string, string> url, int firstMesh, int firstMaterial, List<int> visible, int meshesPerPart = 1000)
     {
       var materials = new JsonArray();
-      var meshes = new JsonArray();
-      var visible = new List<int>();
       var materialStart = new int[Models.Count];
       int nextMaterial = firstMaterial;
       // The textures the materials name, each once, for the packs.
@@ -1302,6 +1303,42 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           nextMaterial = Math.Max(nextMaterial, materialStart[m] + material.Id + 1);
         }
       }
+      int water = nextMaterial;
+      if (Water.Count >= 4)
+      {
+        materials.Add(new JsonObject
+        {
+          ["id"] = water, ["glass"] = true, ["water"] = true, ["cutout"] = false, ["blend"] = false, ["decal"] = false, ["hidden"] = false,
+          ["texture"] = null, ["color"] = new JsonArray(0.18f, 0.38f, 0.42f),
+          ["normal"] = WaterSurface != null ? url(WaterKey) : null,
+          // (Its points' world height less theirs: water.fxc fades the mirror by the world z.)
+          ["worldZ"] = WaterOriginZ,
+        });
+      }
+      _packs.Clear();
+      long filled = 0;
+      foreach (string key in named)
+      {
+        if (Texture(key) is not byte[] texture)
+        {
+          continue;
+        }
+        if (_packs.Count == 0 || (filled > 0 && filled + texture.Length > PackBytes))
+        {
+          _packs.Add(new List<string>());
+          filled = 0;
+        }
+        _packs[^1].Add(key);
+        filled += texture.Length;
+      }
+      var packs = new JsonArray();
+      for (int i = 0; i < _packs.Count; i++)
+      {
+        packs.Add(new JsonObject { ["url"] = url(PackKey + i), ["textures"] = new JsonArray(_packs[i].Select(k => (JsonNode)JsonValue.Create(url(k))!).ToArray()) });
+      }
+
+      var part = new JsonObject { ["type"] = "scene", ["packs"] = packs, ["materials"] = materials };
+      var meshes = new JsonArray();
       int nextMesh = firstMesh;
       foreach (var obj in Objects)
       {
@@ -1353,19 +1390,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           node.Remove("skinWeights");
           meshes.Add(node);
           visible.Add(id);
+          if (meshes.Count >= meshesPerPart)
+          {
+            part["meshes"] = meshes;
+            yield return part.ToJsonString();
+            part = new JsonObject { ["type"] = "scene", ["materials"] = new JsonArray() };
+            meshes = new JsonArray();
+          }
         }
       }
       if (Water.Count >= 4)
       {
-        int water = nextMaterial;
-        materials.Add(new JsonObject
-        {
-          ["id"] = water, ["glass"] = true, ["water"] = true, ["cutout"] = false, ["blend"] = false, ["decal"] = false, ["hidden"] = false,
-          ["texture"] = null, ["color"] = new JsonArray(0.18f, 0.38f, 0.42f),
-          ["normal"] = WaterSurface != null ? url(WaterKey) : null,
-          // (Its points' world height less theirs: water.fxc fades the mirror by the world z.)
-          ["worldZ"] = WaterOriginZ,
-        });
         var positions = Water.SelectMany(p => new[] { p.X, p.Y, p.Z }).ToArray();
         var indices = new List<ushort>();
         for (int q = 0; q + 3 < Water.Count && q + 3 < ushort.MaxValue; q += 4)
@@ -1384,30 +1419,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         });
         visible.Add(id);
       }
-      _packs.Clear();
-      long filled = 0;
-      foreach (string key in named)
+      if (meshes.Count > 0 || part.ContainsKey("packs"))
       {
-        if (Texture(key) is not byte[] texture)
-        {
-          continue;
-        }
-        if (_packs.Count == 0 || (filled > 0 && filled + texture.Length > PackBytes))
-        {
-          _packs.Add(new List<string>());
-          filled = 0;
-        }
-        _packs[^1].Add(key);
-        filled += texture.Length;
+        part["meshes"] = meshes;
+        yield return part.ToJsonString();
       }
-      var packs = new JsonArray();
-      for (int i = 0; i < _packs.Count; i++)
-      {
-        packs.Add(new JsonObject { ["url"] = url(PackKey + i), ["textures"] = new JsonArray(_packs[i].Select(k => (JsonNode)JsonValue.Create(url(k))!).ToArray()) });
-      }
-      return (new JsonObject { ["type"] = "scene", ["packs"] = packs, ["materials"] = materials, ["meshes"] = meshes }, visible);
     }
-
     /// <summary>
     /// The "mapLights" message: the lights of the objects' models (lamps, wall lights; the light the game
     /// puts there), moved into the scene: place, direction, colour, range, a spot's angle in degrees from its axis

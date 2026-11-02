@@ -26,6 +26,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The GC compacts sooner and gives memory back: a cutscene's location (the intro's harbour: 0.9 GB kept) peaked at
+         5.6 GB while loading without, 2.5 GB with (same time); 9 gained little more. -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Velopack" Version="1.2.161" />

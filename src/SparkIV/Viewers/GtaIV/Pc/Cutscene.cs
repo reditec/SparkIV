@@ -985,7 +985,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public static void LoadActors(IEnumerable<CutActor> actors, IReadOnlyList<string> archives, string? playerPed, string playerName)
     {
-      var open = new List<RageLib.FileSystem.IMGFileSystem?>();
+      // On several threads, each with the archives opened for itself (an archive's reader isn't shared): the intro's
+      // 67 models took 17 s one after the other.
+      System.Threading.Tasks.Parallel.ForEach(actors.ToList(), new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, 8) },
+        () => new List<RageLib.FileSystem.IMGFileSystem?>(),
+        (actor, _, open) =>
+        {
+          LoadActor(actor, archives, open, playerPed, playerName);
+          return open;
+        },
+        open =>
+        {
+          foreach (var img in open)
+          {
+            img?.Close();
+          }
+        });
+    }
+
+    private static void LoadActor(CutActor actor, IReadOnlyList<string> archives, List<RageLib.FileSystem.IMGFileSystem?> open, string? playerPed, string playerName)
+    {
       RageLib.FileSystem.IMGFileSystem? Open(int i)
       {
         while (open.Count <= i)
@@ -1005,72 +1024,58 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       try
       {
-        foreach (var actor in actors)
+        if (actor.Model.Equals("player", StringComparison.OrdinalIgnoreCase))
         {
-          try
+          LoadPlayer(actor, playerPed, playerName);
+          return;
+        }
+        RageLib.FileSystem.Common.File? file = null;
+        string? from = null;
+        for (int i = 0; i < archives.Count && file == null; i++)
+        {
+          var img = Open(i);
+          file = img == null ? null
+            : new[] { ".wdd", ".wdr", ".wft" }.Select(e => img.RootDirectory.FindByName(actor.Model + e) as RageLib.FileSystem.Common.File).FirstOrDefault(f => f != null);
+          from = archives[i];
+        }
+        if (file == null || from == null)
+        {
+          actor.Error = actor.Model + (archives.Count == 0 ? " can't be looked for (no game folder known)" : " isn't in the game's cutsprops, peds or vehicles");
+          return;
+        }
+        // Loaded while the archive is open: the textures are looked for beside the model, the shared ones
+        // (vehshare) in the other archives too.
+        byte[]? Elsewhere(string name)
+        {
+          for (int i = 0; i < archives.Count; i++)
           {
-            if (actor.Model.Equals("player", StringComparison.OrdinalIgnoreCase))
+            if (Open(i)?.RootDirectory.FindByName(name + ".wtd") is RageLib.FileSystem.Common.File wtd)
             {
-              LoadPlayer(actor, playerPed, playerName);
-              continue;
-            }
-            RageLib.FileSystem.Common.File? file = null;
-            string? from = null;
-            for (int i = 0; i < archives.Count && file == null; i++)
-            {
-              var img = Open(i);
-              file = img == null ? null
-                : new[] { ".wdd", ".wdr", ".wft" }.Select(e => img.RootDirectory.FindByName(actor.Model + e) as RageLib.FileSystem.Common.File).FirstOrDefault(f => f != null);
-              from = archives[i];
-            }
-            if (file == null || from == null)
-            {
-              actor.Error = actor.Model + (archives.Count == 0 ? " can't be looked for (no game folder known)" : " isn't in the game's cutsprops, peds or vehicles");
-              continue;
-            }
-            // Loaded while the archive is open: the textures are looked for beside the model, the shared ones
-            // (vehshare) in the other archives too.
-            byte[]? Elsewhere(string name)
-            {
-              for (int i = 0; i < archives.Count; i++)
-              {
-                if (Open(i)?.RootDirectory.FindByName(name + ".wtd") is RageLib.FileSystem.Common.File wtd)
-                {
-                  return wtd.GetData();
-                }
-              }
-              return null;
-            }
-            // A prop (.wdr) with its vertex colours: its map shaders write their red as the AO the light from
-            // around is multiplied by (gta_normal_spec's G-buffer program: GB2.z = colour.r; the TLAD trace
-            // GTAIV.3, et01_aa's earrings csElizEarRing at 102287127). Without, the page's middling 0.45 lit
-            // Elizabeta's earrings bright gold where the game shows them dark.
-            bool prop = file.Name.EndsWith(".wdr", StringComparison.OrdinalIgnoreCase);
-            actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null, vertexColors: prop);
-            actor.Source = file.Name + " · " + RelativeArchive(from);
-            for (int i = 0; i < archives.Count && actor.IsPed && actor.Faces.Count == 0; i++)
-            {
-              if (Open(i)?.RootDirectory.FindByName(actor.Model + ".wbs") is RageLib.FileSystem.Common.File wbs)
-              {
-                LoadFaces(actor, wbs.GetData());
-              }
+              return wtd.GetData();
             }
           }
-          catch (Exception ex)
+          return null;
+        }
+        // A prop (.wdr) with its vertex colours: its map shaders write their red as the AO the light from
+        // around is multiplied by (gta_normal_spec's G-buffer program: GB2.z = colour.r; the TLAD trace
+        // GTAIV.3, et01_aa's earrings csElizEarRing at 102287127). Without, the page's middling 0.45 lit
+        // Elizabeta's earrings bright gold where the game shows them dark.
+        bool prop = file.Name.EndsWith(".wdr", StringComparison.OrdinalIgnoreCase);
+        actor.Scene = ModelScene.Load(file, file.GetData(), Elsewhere, actor.TextureVariations.Count > 0 ? actor.VariationOf : null, vertexColors: prop);
+        actor.Source = file.Name + " · " + RelativeArchive(from);
+        for (int i = 0; i < archives.Count && actor.IsPed && actor.Faces.Count == 0; i++)
+        {
+          if (Open(i)?.RootDirectory.FindByName(actor.Model + ".wbs") is RageLib.FileSystem.Common.File wbs)
           {
-            actor.Error = "Could not load " + actor.Model + ": " + ex.Message;
+            LoadFaces(actor, wbs.GetData());
           }
         }
       }
-      finally
+      catch (Exception ex)
       {
-        foreach (var img in open)
-        {
-          img?.Close();
-        }
+        actor.Error = "Could not load " + actor.Model + ": " + ex.Message;
       }
     }
-
     /// <summary>
     /// A cutscene ped's face shapes (its .wbs) on its scene's meshes: each of the file's meshes (head_000_R.mesh)
     /// on the mesh of the part of that name that has as many vertices (the high level of detail). A file that

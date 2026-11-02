@@ -1781,26 +1781,64 @@ function gameCoronas(post, w, h, coronas) {
 }
 
 // The eye's adaptation from the quarter copy (before the blur): its mean luminance, moved towards as adaptTone
-// says; at most five times a second while playing.
-let gamePostPixels = null;
+// says. Still (paused, a seek): measured at once and taken as it is. Playing: measured at most five times a second
+// without stopping the card (into a buffer, fetched once the card is done with it, some frames later; reading it at
+// once held every fifth of a second up), and moved towards frame by frame (in steps of a fifth of a second the
+// picture's brightness jumped, most after a section's change).
+let gamePostPixels = null, toneTarget = null, toneFrameAt = 0;
+const toneRead = { buffer: null, sync: null, size: 0 };
+function gamePostMean(n) {
+  let sum = 0;
+  for (let i = 0; i < n; i += 4) sum += gamePostPixels[i] * 0.2125 + gamePostPixels[i + 1] * 0.7154 + gamePostPixels[i + 2] * 0.0721;
+  return sum / (n / 4);
+}
 function gamePostAdapt(post, playing) {
   const t = (sky && sky.tone) || {};
   const now = performance.now();
-  if (playing && toneAdapted !== null && now - toneMeasuredAt < 200) return false;
   const n = post.qw * post.qh * 4;
   if (!gamePostPixels || gamePostPixels.length !== n) gamePostPixels = new Float32Array(n);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, post.quarterFrame);
-  gl.readPixels(0, 0, post.qw, post.qh, gl.RGBA, gl.FLOAT, gamePostPixels);
-  let sum = 0;
-  for (let i = 0; i < n; i += 4) sum += gamePostPixels[i] * 0.2125 + gamePostPixels[i + 1] * 0.7154 + gamePostPixels[i + 2] * 0.0721;
-  const current = sum / (n / 4);
-  let adapted = current;
+  if (!playing || toneAdapted === null) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, post.quarterFrame);
+    gl.readPixels(0, 0, post.qw, post.qh, gl.RGBA, gl.FLOAT, gamePostPixels);
+    toneTarget = gamePostMean(n);
+    toneMeasuredAt = now;
+    if (toneRead.sync) { gl.deleteSync(toneRead.sync); toneRead.sync = null; }
+  } else {
+    if (toneRead.sync) {
+      const state = gl.clientWaitSync(toneRead.sync, 0, 0);
+      if (state === gl.ALREADY_SIGNALED || state === gl.CONDITION_SATISFIED) {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, toneRead.buffer);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, gamePostPixels);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        gl.deleteSync(toneRead.sync);
+        toneRead.sync = null;
+        toneTarget = gamePostMean(n);
+      }
+    }
+    if (!toneRead.sync && now - toneMeasuredAt >= 200) {
+      if (!toneRead.buffer || toneRead.size !== n * 4) {
+        if (toneRead.buffer) gl.deleteBuffer(toneRead.buffer);
+        toneRead.buffer = gl.createBuffer();
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, toneRead.buffer);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, n * 4, gl.STREAM_READ);
+        toneRead.size = n * 4;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, post.quarterFrame);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, toneRead.buffer);
+      gl.readPixels(0, 0, post.qw, post.qh, gl.RGBA, gl.FLOAT, 0);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      toneRead.sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      toneMeasuredAt = now;
+    }
+  }
+  if (toneTarget === null) toneTarget = toneAdapted ?? 1;
+  let adapted = toneTarget;
   if (playing && toneAdapted !== null && (t.adaptTime ?? 0) >= 1) {
-    adapted = toneAdapted + (current - toneAdapted) * Math.min((now - toneMeasuredAt) / 1000 / Math.sqrt(2 * t.adaptTime), 1);
+    adapted = toneAdapted + (toneTarget - toneAdapted) * Math.min((now - toneFrameAt) / 1000 / Math.sqrt(2 * t.adaptTime), 1);
   }
   adapted = Math.min(Math.max(adapted, t.adaptedLumMin ?? 0), t.adaptedLumMax ?? Infinity);
   const changed = toneAdapted === null || Math.abs(adapted - toneAdapted) > toneAdapted * 0.01;
   toneAdapted = adapted;
-  toneMeasuredAt = now;
+  toneFrameAt = now;
   return changed && !playing;
 }
