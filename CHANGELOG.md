@@ -2,6 +2,30 @@
 
 Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC). SparkIV shows this file in Settings → About, and after an update the part of the new version.
 
+## v0.9.0-alpha.4 – 2026-11-02
+
+- Cutscenes (highly experimental): the viewer shows a running time of day that follows playback, also when rewinding. The start time can be set from the top bar, and "Lock time" keeps the clock and the clouds at it. So far cutscenes were tested mainly at noon, so other times of day can look noticeably wrong and will take a lot more work.
+- Cutscenes: switching between sections and seeking no longer stutter or flash, loading is much faster and uses far less memory.
+- Cutscenes: busy scenes (the intro's harbour) play much more smoothly.
+- Cutscenes: scenes whose sections play in different places (the intro: the ship, then the harbour) show each section in its own place.
+- Cutscenes: scenes that start inside but are filmed outside (the intro on the ship's deck) show the city's skyline.
+- Cutscenes: subtitles of cutscenes made of several parts (the intro) appear at the right moment.
+- Cutscenes: faces move like in the game (expressions, smiles, lip shapes).
+- Cutscenes: shoulders, forearms and necks twist as in the game.
+- Cutscenes: the sky and the sea are as bright as in the game after noon; water, sky and sun shadows are closer to the game.
+- Cutscenes: clouds in The Lost and Damned's cutscenes, and the haze's colour as in the game.
+- Cutscenes: lamps have their soft glow (coronas), lamp glass glows as in the game, and windows mirror their surroundings.
+- Cutscenes: the pier lamp globes no longer show as dark balls against the sky, and the glow of a lamp right next to the camera shows.
+- Cutscenes: more surfaces shine in the sun as in the game, and walls and floors show their bumps.
+- Cutscenes: surfaces facing away from the camera are lit as in the game.
+- Cutscenes: buildings and props are drawn as far as in the game at the highest view distance, and more of the distant city shows in the background.
+- Cutscenes: one-sided map surfaces (plant leaves) are no longer drawn from behind; lattice railings stay solid from afar.
+- Cutscenes: car and boat interiors no longer show a grey shine on their seats.
+- Cutscenes fade in and out as long as in the game.
+- Models: vertex colours no longer have red and blue swapped (shading of buildings, vehicles and characters).
+- Textures: decoded at their full brightness (they were up to 3 % too dark).
+- The changelog shows each version's release date.
+
 ## v0.9.0-alpha.3 – 2026-10-28
 
 - Cutscenes: the water mirrors as in the game – far buildings only, no ground, broken up by its waves.
