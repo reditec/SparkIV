@@ -185,6 +185,12 @@ x² − y²|), normal × z + tangent × k.x + binormal × k.y with the binormal 
 `gta_normal_spec`). Since 2026-11-01 SparkIV does this for the map and props too, along the vertex tangents (before,
 their bumps were off).
 
+**No program turns the normal by the face:** none of the `.fxc` programs declares `vFace`; the interpolated vertex
+normal is written as it is, also where it points away from the camera (back faces are culled, CULLMODE CW). SparkIV
+turned such normals to the camera in a scene's objects, and so lit et01_ba's concrete barrier (`bxw_wardbrgroad05`
+material 0, normals between up and away from the camera, towards the sun) dark where the game lights it; since
+2026-11-02 only its plain model view (no scene) does that.
+
 **How the engine draws them** (`GTAIV.trace`, bc_1 frame 940, every draw's shader mapped to its `.fxc` program by
 its disassembly): bucket 0 and 3 by `deferred_draw` into the G-buffer, opaque (the trees both faces); decals blended
 into it; see-through (bucket 1) by `draw` forward, SRCALPHA / INVSRCALPHA, after the light passes (`gta_spec_reflect`,

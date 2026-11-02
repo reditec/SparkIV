@@ -51,7 +51,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 | `[DURATION]` | used | Length of the section (ms). |
 | `[FLAGS]` | used (partly) | Of these, only fade-in and fade-out (`LONG_FADE_OUT` etc.); the fade lengths are assumed. The remaining flags have not been checked individually. |
 | `[LIGHTS]` | used | Light clips of the section. |
-| `[MISSION_TEXT_NAME]`, `[TEXT]` | used | Subtitles: table, start time, duration, key. |
+| `[MISSION_TEXT_NAME]`, `[TEXT]` | used | Subtitles: table, start time, duration, key. A `.cut` of several scenes one after the other (each from its `[CUTSCENE_HEADER]`) has a `[TEXT]` per part, its times counting from that part's first section: intro.cut's four parts (sections 1, 2, 3, 4–6) each start near 0 again. Checked against four subtitles in the intro's trace frames (e.g. section 5 f782: R1_CUT1_13 at 94.3 s of part 4). |
 | `[MODELS]` | used (partly) | Number, model, clip, face clip. A **fifth field** (`0`, only in rows with a face clip) is **unclear**. |
 | `[OFFSET]`, `[ORIENT]` | used | Position and rotation of the scene in the world. |
 | `[PROPS]`, `[VARIATION]` | used | Props and clothing variations. |
