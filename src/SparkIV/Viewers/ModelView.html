@@ -363,9 +363,13 @@
       if (shadowPass) { ${GameGlsl.shadowFragment} }
       // Drawn into a lamp's shadow map (the game's file: lampShadowFragment).
       if (lampShadowPass) { ${GameGlsl.lampShadowFragment} }
-      // Both sides lit: the normal turned to the camera, then bent by the normal map.
-      // (Not a tree's: gta_trees' G-buffer pass writes its vertex normal as it is on both sides.)
-      if (!tree && dot(n, eyeAt - vPosition) < 0.0) n = -n;
+      // Both sides lit: the normal turned to the camera, then bent by the normal map. Not in a scene of the game's
+      // (baked: the map, vehicles, props): none of its programs turns the normal by the face (no vFace in any .fxc
+      // program); they write the interpolated vertex normal as it is, also where it points away from the camera
+      // (et01_ba's concrete barrier, bxw_wardbrgroad05 material 0: normals between up and away from the camera,
+      // towards the sun - lit in the game, turned and dark here). Nor a tree's (gta_trees writes its vertex normal
+      // as it is on both sides).
+      if (!tree && !baked && dot(n, eyeAt - vPosition) < 0.0) n = -n;
       // A map *_reflect shader's mirrored surroundings, added to its albedo before it is lit (GTA IV (PC):
       // gta_spec_reflect's G-buffer pass, the TLAD trace GTAIV.4's pixel shader 0x22F3F120): its environment
       // texture at -0.5 (R.xz / |R| + 1), R the view mirrored by the normal - the bent one, before the G-buffer's
