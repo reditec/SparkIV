@@ -73,9 +73,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>
     /// Whether the clock stands still at the start hour instead of running on with the cutscene's time (and the clouds
-    /// with it): the game stops it for the intro (#93), set by the viewer's user for now.
+    /// with it): set by the viewer's user, else as the mission script holds it (the intro).
     /// </summary>
-    public bool LockTime { get; set; }
+    public bool? LockTime { get; set; }
+
+    /// <summary>The clock as it runs: see <see cref="LockTime"/>.</summary>
+    public bool ClockLocked => LockTime ?? Script?.ClockHeld ?? false;
 
     /// <summary>Why the cast couldn't be loaded (no game folder known), or null.</summary>
     public string? Error { get; init; }
