@@ -45,22 +45,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   public sealed class CutsceneScriptIndex
   {
     // Raised when what is read from the scripts changes, so older indexes are built again.
-    private const int Format = 2;
+    private const int Format = 3;
 
     /// <summary>A vehicle a script makes: its model's hash and the four colours it gives it (-1: not set).</summary>
     public sealed record ScriptVehicle(uint Model, int[] Colours);
 
     /// <summary>
     /// Per cutscene (upper case): the script that starts it and the vehicles that script makes; what it sets
-    /// right before (in the same function, before START_CUTSCENE_NOW): the weather (FORCE_WEATHER_NOW: the
-    /// number of its block in timecyc.dat, -1 none), the wind (FORCE_WIND, null none) and the hour
-    /// (SET_TIME_OF_DAY / FORCE_TIME_OF_DAY, hours and minutes as hours; null none); and where the mission's marker
+    /// right before (in the same function or the one calling it, before START_CUTSCENE_NOW): the weather
+    /// (FORCE_WEATHER_NOW: the number of its block in timecyc.dat, -1 none), the wind (FORCE_WIND, null none) and the
+    /// hour (SET_TIME_OF_DAY / FORCE_TIME_OF_DAY, hours and minutes as hours; null none); whether it holds the clock
+    /// there while the cutscene plays (<paramref name="ClockHeld"/>); and where the mission's marker
     /// stands (null none), where the player is when the mission and its first cutscene start (main.sco: the
     /// mission's registration names its marker, another call places that marker - Bernie3's
     /// sub_879a(18, 2, 0, 32, "M_78", ..., "Bernie3", ...) and sub_5d16(32, 487.5043, -499.1311, 3.6922, ...)).
     /// GTAIV.exe keeps the sea's swell round the player (see the page's dynamicWaterStep).
     /// </summary>
-    public sealed record Entry(string Script, List<ScriptVehicle> Vehicles, int Weather = -1, float? Wind = null, float? Hour = null, float[]? Marker = null);
+    public sealed record Entry(string Script, List<ScriptVehicle> Vehicles, int Weather = -1, float? Wind = null, float? Hour = null, float[]? Marker = null, bool ClockHeld = false);
 
     public string Fingerprint { get; init; } = "";
     public Dictionary<string, Entry> Cutscenes { get; init; } = new(StringComparer.OrdinalIgnoreCase);
@@ -210,8 +211,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var vehicles = Vehicles(code);
           foreach (Match start in starts)
           {
-            var (weather, wind, hour) = SetBefore(code, start.Index);
-            index.Cutscenes.TryAdd(start.Groups[1].Value, new Entry(name, vehicles, weather, wind, hour));
+            var (weather, wind, hour, clockHeld) = SetBefore(code, start.Index);
+            index.Cutscenes.TryAdd(start.Groups[1].Value, new Entry(name, vehicles, weather, wind, hour, ClockHeld: clockHeld));
           }
         }
         progress?.Invoke(scripts.Count, scripts.Count);
@@ -253,18 +254,41 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return float.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : null;
     }
 
-    // What the script sets in the function of a START_CUTSCENE_NOW before it: the last FORCE_WEATHER_NOW(1),
-    // FORCE_WIND(0.0f) and SET_TIME_OF_DAY(5, 0) / FORCE_TIME_OF_DAY, with numbers written out.
-    private static (int Weather, float? Wind, float? Hour) SetBefore(string code, int at)
+    private static int FunctionStart(string code, int at) =>
+      Math.Max(0, Math.Max(code.LastIndexOf("\nvoid ", at, StringComparison.Ordinal), code.LastIndexOf("\nfunction ", at, StringComparison.Ordinal)));
+
+    private static float? HourIn(Match? time) =>
+      time != null ? int.Parse(time.Groups[1].Value, CultureInfo.InvariantCulture) + int.Parse(time.Groups[2].Value, CultureInfo.InvariantCulture) / 60f : null;
+
+    private const string TimeOfDay = @"(?:SET|FORCE)_TIME_OF_DAY\((\d+),\s*(\d+)\)";
+
+    // What the script sets before a START_CUTSCENE_NOW: the last FORCE_WEATHER_NOW(1), FORCE_WIND(0.0f) and
+    // SET_TIME_OF_DAY(5, 0) / FORCE_TIME_OF_DAY, with numbers written out, in its function and, before that, in
+    // the function calling it (roman1: the intro is started by sub_118b, whose caller sets 5:15 and weather 0). And
+    // whether its wait for the cutscene's end sets the time again, each frame (roman1 again, 5:15: the game's clock
+    // stands still through the intro, GTAIV.3.trace; other cutscenes' runs on).
+    private static (int Weather, float? Wind, float? Hour, bool ClockHeld) SetBefore(string code, int at)
     {
-      int from = Math.Max(code.LastIndexOf("\nvoid ", at, StringComparison.Ordinal), code.LastIndexOf("\nfunction ", at, StringComparison.Ordinal));
-      string before = code.Substring(Math.Max(0, from), at - Math.Max(0, from));
+      int from = FunctionStart(code, at);
+      string before = code.Substring(from, at - from);
+      var head = Regex.Match(before, @"^\s*(?:void|function)\s+(\w+)\(");
+      if (head.Success)
+      {
+        var call = Regex.Matches(code, @"(?<![\w ])\s*" + head.Groups[1].Value + @"\(\);").FirstOrDefault();
+        if (call != null)
+        {
+          int caller = FunctionStart(code, call.Index);
+          before = code.Substring(caller, call.Index - caller) + before;
+        }
+      }
       var weather = Regex.Matches(before, @"FORCE_WEATHER_NOW\((\d+)\)").LastOrDefault();
       var wind = Regex.Matches(before, @"FORCE_WIND\((" + Number + @")\)").LastOrDefault();
-      var time = Regex.Matches(before, @"(?:SET|FORCE)_TIME_OF_DAY\((\d+),\s*(\d+)\)").LastOrDefault();
+      var time = Regex.Matches(before, TimeOfDay).LastOrDefault();
+      int next = code.IndexOf("\nvoid ", at, StringComparison.Ordinal);
+      var held = Regex.Match(code.Substring(at, (next < 0 ? code.Length : next) - at), @"while \(!HAS_CUTSCENE_FINISHED\(\)\)\s*\{(?:(?!\n\s*\}\s*\n)[\s\S])*?" + TimeOfDay);
       return (weather != null ? int.Parse(weather.Groups[1].Value, CultureInfo.InvariantCulture) : -1,
               wind != null ? ParseNumber(wind.Groups[1].Value) : null,
-              time != null ? int.Parse(time.Groups[1].Value, CultureInfo.InvariantCulture) + int.Parse(time.Groups[2].Value, CultureInfo.InvariantCulture) / 60f : null);
+              HourIn(held.Success ? held : time), held.Success);
     }
 
     // main.sco's missions: each registration (strand, step, trigger type, contact point, its text, three

@@ -640,7 +640,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // The game's clock runs on through a cutscene: a game hour took 123.4 s of the cutscene's time in the traces
     // (gDayNightEffects and the sun's direction per frame: GTAIV.1.trace, bc_3 s1; GTAIV.2.trace, et01_ba).
     private const double SecondsPerGameHour = 123.4;
-    private float HourNow => (float)((OutsideHour + (_document.LockTime ? 0 : Now / SecondsPerGameHour)) % 24);
+    private float HourNow => (float)((OutsideHour + (_document.ClockLocked ? 0 : Now / SecondsPerGameHour)) % 24);
     // The game minute whose sky the page has (it follows the clock, by the minute).
     private int _clockMinute = -1;
     private Dictionary<uint, float[]>? _skyModifiers;
@@ -736,7 +736,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _skyModifiers != null && _skyModifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(hour) : null).ToArray();
       Post(cycle.Message(hour, location.Clouds != null ? LocationUrl(CutsceneLocation.CloudKey) : null,
                          location.CloudDetail != null ? LocationUrl(CutsceneLocation.CloudDetailKey) : null, rooms));
-      Post(new { type = "lockTime", on = _document.LockTime });
+      Post(new { type = "lockTime", on = _document.ClockLocked });
       _clockMinute = (int)(hour * 60);
       return true;
     }
@@ -1114,7 +1114,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       _settingStart = true;
       StartPicker.SelectedTime = TimeSpan.FromHours(OutsideHour);
-      LockTimeToggle.IsChecked = _document.LockTime;
+      LockTimeToggle.IsChecked = _document.ClockLocked;
       _settingStart = false;
     }
 
@@ -1126,7 +1126,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       _document.LockTime = LockTimeToggle.IsChecked == true;
-      Post(new { type = "lockTime", on = _document.LockTime });
+      Post(new { type = "lockTime", on = _document.ClockLocked });
       ShowClock();
     }
 
