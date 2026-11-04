@@ -291,8 +291,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           FpsMeasured = OnFps,
           FpsBelow = OnFpsBelow,
           Loaded = () => Working.IsActive = _locationLoading || _castLoading,
+          // The view was turned or walked: the cutscene's camera is left (as the page's "filmCamera" message).
+          CameraLeft = () =>
+          {
+            s_camera = false;
+            CameraButton.IsChecked = false;
+          },
         };
         _player.ShowLights(s_lights);
+        HookFreeView();
         _native = new D3D12View(Native, _player, text =>
         {
           Message.Text = text;
@@ -321,6 +328,159 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // As when the page is ready: the scene (the location loads), then the section.
       ShowSceneWhenCastLoaded();
     }
+
+    // The native view's mouse and keys (the page's, ModelView.html "Mouse" and "Keys"): the drag going on (its pointer,
+    // where it was, its button: 0 left, 1 middle, 2 right), the walking keys held and Shift.
+    private uint? _dragPointer;
+    private Windows.Foundation.Point _dragAt;
+    private int _dragButton;
+    private readonly HashSet<Windows.System.VirtualKey> _held = new HashSet<Windows.System.VirtualKey>();
+    private bool _shiftDown;
+
+    /// <summary>
+    /// The free view's controls on the native view, as the page's: left drag turns, middle or right drag (or Shift + left)
+    /// moves, the wheel zooms, a double-click fits; W/S/A/D/Q/E walk while the view has the focus (a press in it gives it),
+    /// Shift faster. A press or a walking key leaves the cutscene's camera.
+    /// </summary>
+    private void HookFreeView()
+    {
+      // The panel can't take the focus; the view itself does (its keys only while it has it, as the page's while focused).
+      IsTabStop = true;
+      Native.PointerPressed += Native_PointerPressed;
+      Native.PointerMoved += Native_PointerMoved;
+      Native.PointerReleased += Native_PointerEnded;
+      Native.PointerCanceled += Native_PointerEnded;
+      Native.PointerCaptureLost += Native_PointerEnded;
+      Native.PointerWheelChanged += Native_PointerWheelChanged;
+      Native.DoubleTapped += Native_DoubleTapped;
+      KeyDown += View_KeyDown;
+      KeyUp += View_KeyUp;
+      LostFocus += View_LostFocus;
+      _context.Window.Activated += Window_Activated;
+    }
+
+    private void Native_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+      if (_player == null)
+      {
+        return;
+      }
+      var point = e.GetCurrentPoint(Native);
+      var kind = point.Properties.PointerUpdateKind;
+      _dragButton = kind == Microsoft.UI.Input.PointerUpdateKind.MiddleButtonPressed ? 1 : kind == Microsoft.UI.Input.PointerUpdateKind.RightButtonPressed ? 2 : 0;
+      _dragAt = point.Position;
+      _dragPointer = e.Pointer.PointerId;
+      // Looking round by hand leaves the cutscene's camera.
+      _player.LeaveCamera();
+      Native.CapturePointer(e.Pointer);
+      Focus(FocusState.Pointer);
+      e.Handled = true;
+    }
+
+    private void Native_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+      if (_player == null || _dragPointer != e.Pointer.PointerId)
+      {
+        return;
+      }
+      var at = e.GetCurrentPoint(Native).Position;
+      float dx = (float)(at.X - _dragAt.X), dy = (float)(at.Y - _dragAt.Y);
+      _dragAt = at;
+      if (_dragButton == 0 && (e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0)
+      {
+        _player.Turn(dx, dy);
+      }
+      else
+      {
+        _player.Pan(dx, dy, (float)Native.ActualHeight);
+      }
+      e.Handled = true;
+    }
+
+    private void Native_PointerEnded(object sender, PointerRoutedEventArgs e)
+    {
+      if (_dragPointer == e.Pointer.PointerId)
+      {
+        _dragPointer = null;
+        Native.ReleasePointerCapture(e.Pointer);
+      }
+    }
+
+    private void Native_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+      var properties = e.GetCurrentPoint(Native).Properties;
+      if (_player == null || properties.IsHorizontalMouseWheel || properties.MouseWheelDelta == 0)
+      {
+        return;
+      }
+      // (The page's deltaY is positive turning the wheel towards oneself, WinUI's delta then negative.)
+      _player.Zoom(-Math.Sign(properties.MouseWheelDelta));
+      e.Handled = true;
+    }
+
+    private void Native_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+      _player?.Fit();
+      e.Handled = true;
+    }
+
+    private static bool KeyIsDown(Windows.System.VirtualKey key) =>
+      (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+
+    private void View_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+      if (_player == null || !ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), this))
+      {
+        return;
+      }
+      _shiftDown = KeyIsDown(Windows.System.VirtualKey.Shift);
+      bool combined = KeyIsDown(Windows.System.VirtualKey.Control) || KeyIsDown(Windows.System.VirtualKey.Menu) ||
+                      KeyIsDown(Windows.System.VirtualKey.LeftWindows) || KeyIsDown(Windows.System.VirtualKey.RightWindows);
+      if (combined || OrbitCamera.WalkKey(e.Key) == null)
+      {
+        SendWalk();
+        return;
+      }
+      e.Handled = true;
+      if (_held.Add(e.Key))
+      {
+        // Walking is the free view's: the cutscene's camera is left.
+        _player.LeaveCamera();
+      }
+      SendWalk();
+    }
+
+    private void View_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+      _shiftDown = KeyIsDown(Windows.System.VirtualKey.Shift);
+      _held.Remove(e.Key);
+      SendWalk();
+    }
+
+    private void View_LostFocus(object sender, RoutedEventArgs e)
+    {
+      if (ReferenceEquals(e.OriginalSource, this))
+      {
+        ClearWalk();
+      }
+    }
+
+    private void Window_Activated(object sender, WindowActivatedEventArgs args)
+    {
+      if (args.WindowActivationState == WindowActivationState.Deactivated)
+      {
+        ClearWalk();
+      }
+    }
+
+    private void ClearWalk()
+    {
+      _held.Clear();
+      _shiftDown = false;
+      SendWalk();
+    }
+
+    private void SendWalk() => _player?.Walk(_held.Select(k => OrbitCamera.WalkKey(k)!.Value), _shiftDown);
 
     /// <summary>The motions and camera of a section for the player, made once on another thread (as SectionDataOf).</summary>
     private readonly Dictionary<int, System.Threading.Tasks.Task<(List<CutsceneMessages.CastMotion> Motions, CutsceneCamera? Camera)>> _nativeSections =
@@ -1528,8 +1688,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         s_camera = false;
         CameraButton.IsChecked = false;
         Post(new { type = "useCamera", on = false });
+        _player?.UseCamera(false);
       }
       Post(new { type = "fit" });
+      _player?.Fit();
     }
 
     private async void ExportOriginal_Click(object sender, RoutedEventArgs e)
@@ -1559,6 +1721,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         // The device is gone already.
       }
+      _context.Window.Activated -= Window_Activated;
       _native?.Dispose();
       _native = null;
       if (Web.CoreWebView2 != null)

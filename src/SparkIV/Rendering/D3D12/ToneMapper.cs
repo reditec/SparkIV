@@ -246,6 +246,9 @@ float4 PSComposite(VsOut i) : SV_Target
 
     /// <summary>The light target's view (draw the scene into it, between <see cref="BeginLight"/> and <see cref="EndLight"/>).</summary>
     public CpuDescriptorHandle LightView => _rtvHeap.GetCPUDescriptorHandleForHeapStart();
+
+    /// <summary>The light target itself (RENDER_TARGET while drawing; MeshRenderer copies it for the fog's depth effect).</summary>
+    public ID3D12Resource? LightTexture => _light;
     private CpuDescriptorHandle QuarterView => _rtvHeap.GetCPUDescriptorHandleForHeapStart() + (int)_rtvSize;
     private CpuDescriptorHandle BlurredView => _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
 

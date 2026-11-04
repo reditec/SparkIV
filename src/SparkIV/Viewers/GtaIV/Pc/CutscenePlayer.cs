@@ -212,8 +212,110 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private bool _playing;
     private double _last;
     private int _reportedFrame = -1;
-    private Vector3 _center;
-    private float _radius = 2;
+
+    // The free view (without the cutscene's camera, or after leaving it): the page's own camera (ModelView.html's camera,
+    // its mouse and keys), fitted to the cast at the first section (as the page at its first cast), the walking keys held.
+    private readonly OrbitCamera _free = new OrbitCamera();
+    private bool _fitWanted;
+    private bool _fittedOnce;
+    private List<(int Axis, int Sign)> _walking = new List<(int, int)>();
+    private bool _walkFast;
+    private double _walkLast = -1;
+
+    /// <summary>
+    /// The cutscene's camera was left by the mouse or a walking key (the page's "filmCamera" message, off), on the UI
+    /// thread: the view's camera toggle goes off.
+    /// </summary>
+    public Action? CameraLeft { get; set; }
+
+    /// <summary>
+    /// A press in the view or a walking key (the page's pointerdown, keydown): through the cutscene's camera, the free
+    /// view takes over from where it is (<see cref="CameraLeft"/> says so); else nothing.
+    /// </summary>
+    public void LeaveCamera() => Order(() =>
+    {
+      if (_useCamera && _camera != null)
+      {
+        LeaveFilmCamera();
+        _useCamera = false;
+        Tell(() => CameraLeft?.Invoke());
+      }
+    });
+
+    /// <summary>Left drag by (dx, dy) view pixels: with a cutscene camera looking round from the eye, else round the target.</summary>
+    public void Turn(float dx, float dy) => Order(() => _free.Turn(dx, dy, _camera != null));
+
+    /// <summary>Middle or right drag (Shift + left) by (dx, dy) pixels of a view <paramref name="viewHeight"/> pixels high.</summary>
+    public void Pan(float dx, float dy, float viewHeight) => Order(() => _free.Pan(dx, dy, viewHeight));
+
+    /// <summary>The wheel: the sign of the page's deltaY (positive farther).</summary>
+    public void Zoom(int deltaSign) => Order(() => _free.Zoom(deltaSign));
+
+    /// <summary>The free view looks at the cast where it is now (the page's fit: double-click, the Fit button).</summary>
+    public void Fit() => Order(() => _fitWanted = true);
+
+    /// <summary>The walking keys held (<see cref="OrbitCamera.WalkKey"/>) and Shift.</summary>
+    public void Walk(IEnumerable<(int Axis, int Sign)> held, bool fast)
+    {
+      var keys = held.ToList();
+      Order(() =>
+      {
+        _walking = keys;
+        _walkFast = fast;
+      });
+    }
+
+    // Leaving the cutscene's camera (the page's leaveFilmCamera): the free view goes on from its eye, looking the same
+    // way, turning about a point ahead of it as far as the nearest actor before it (else 3 m, at most 15).
+    private void LeaveFilmCamera()
+    {
+      if (_camera == null)
+      {
+        return;
+      }
+      double frame = Math.Min(_time * _fps, _frames - 1);
+      var (eye, forward, _, fov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
+      float distance = float.PositiveInfinity;
+      foreach (var pose in _poses.Values)
+      {
+        if (pose.LastWorld is not { Length: > 0 } world)
+        {
+          continue;
+        }
+        float along = Vector3.Dot(world[0].Translation - eye, forward);
+        if (along > 0.5f)
+        {
+          distance = Math.Min(distance, along);
+        }
+      }
+      _free.LookFrom(eye, forward, fov, Math.Min(float.IsPositiveInfinity(distance) ? 3 : distance, 15));
+    }
+
+    // The page's fit for a cutscene: the actors where they are now (their bones, and 0.3 m round them for the body);
+    // false while none is posed yet (the cast still loading: the fit waits).
+    private bool FitToCast(float aspect)
+    {
+      var min = new Vector3(float.PositiveInfinity);
+      var max = new Vector3(float.NegativeInfinity);
+      foreach (var pose in _poses.Values)
+      {
+        if (pose.LastWorld is not { } world)
+        {
+          continue;
+        }
+        foreach (var w in world)
+        {
+          min = Vector3.Min(min, w.Translation - new Vector3(0.3f));
+          max = Vector3.Max(max, w.Translation + new Vector3(0.3f));
+        }
+      }
+      if (min.X > max.X)
+      {
+        return false;
+      }
+      _free.Fit(min, max, aspect);
+      return true;
+    }
 
     public CutscenePlayer(DispatcherQueue dispatcher)
     {
@@ -237,8 +339,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           renderer.RemoveGroup(CastGroup);
           _castInstances.Clear();
           var numbers = renderer.Register(prepared, CastGroup);
-          var min = new Vector3(float.MaxValue);
-          var max = new Vector3(float.MinValue);
           int at = 0;
           for (int a = 0; a < list.Count; a++)
           {
@@ -247,19 +347,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             // The cast (peds, vehicles, props) casts into the lamps' shadow maps, the location does not (as the page's;
             // the game's atlas held only peds in the traced frame).
             _castInstances[list[a]] = mine.Select(n => renderer.AddInstance(n, Matrix4x4.Identity, castsShadow: true)).ToArray();
-            foreach (int n in mine)
-            {
-              if (renderer.Bounds(n) is var (lo, hi))
-              {
-                min = Vector3.Min(min, lo);
-                max = Vector3.Max(max, hi);
-              }
-            }
-          }
-          if (min.X <= max.X)
-          {
-            _center = (min + max) * 0.5f;
-            _radius = Math.Max(0.5f, (max - min).Length() * 0.5f);
           }
           ShowActors();
           LogScene(renderer, "cast: " + list.Count + " actors");
@@ -335,7 +422,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0, castsSunShadow: o.FloatAt == null,
                                                                      mirrored: o.Far, mainView: !o.MirrorOnly)).ToArray();
           group.Lights = lamps;
-          group.Reach = CutsceneSunShadow.LocationReach(location, m => renderer.Bounds(numbers[m]));
+          // The coronas' sprite (coronas.wtd's, the same for every location): once.
+          if (!_coronaSpriteSet && location.Corona != null)
+          {
+            renderer.SetCoronaSprite(location.Corona);
+            _coronaSpriteSet = true;
+          }
+          // The light volumes' lookup texture (lights_occluders.wtd's, the same for every location): once.
+          if (!_volumeLookupSet && location.LightVolume != null)
+          {
+            renderer.SetVolumeLookup(location.LightVolume);
+            _volumeLookupSet = true;
+          }
+          group.Reach =CutsceneSunShadow.LocationReach(location, m => renderer.Bounds(numbers[m]));
           group.Registered = true;
           ShowLocations();
           LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
@@ -387,6 +486,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     private int _pendingLoads;
+    private bool _coronaSpriteSet, _volumeLookupSet;
 
     private void ShowLocations()
     {
@@ -434,6 +534,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Order(() =>
       {
         _poses = poses;
+        // The free view fitted to the first section's cast (the page: "if (list.length && first) fit()").
+        if (!_fittedOnce && poses.Count > 0)
+        {
+          _fittedOnce = true;
+          _fitWanted = true;
+        }
         _drawSteps = drawSteps;
         _cutLights = lights ?? new List<CutsceneLights.CutLight>();
         _camera = camera;
@@ -468,8 +574,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _time += Math.Abs(d) > 0.4 ? d : d * 0.2;
     });
 
-    /// <summary>Through the section's camera or around the cast.</summary>
-    public void UseCamera(bool on) => Order(() => _useCamera = on);
+    /// <summary>Through the section's camera or the free view (off: it goes on from where the camera is, as the page's useCamera).</summary>
+    public void UseCamera(bool on) => Order(() =>
+    {
+      if (!on && _useCamera)
+      {
+        LeaveFilmCamera();
+      }
+      _useCamera = on;
+    });
 
     /// <summary>The light of the time cycle at the clock (null: a plain light, as without a location).</summary>
     public void SetLighting(CutsceneLighting? lighting) => Order(() => _lighting = lighting);
@@ -559,6 +672,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
 
       float aspect = width / (float)Math.Max(1, height);
+      // The free view: fitted once the actors are posed (their bones' places now), walking by the keys held (the page's
+      // walk: by the time passed, at most 0.1 s a step).
+      if (_fitWanted && FitToCast(aspect))
+      {
+        _fitWanted = false;
+      }
+      if (_walking.Count > 0)
+      {
+        _free.Walk(_walking, _walkLast < 0 ? 0 : now - _walkLast, _walkFast);
+        _walkLast = now;
+      }
+      else
+      {
+        _walkLast = -1;
+      }
       Matrix4x4 viewProjection;
       Vector3 eyeAt, toLight;
       // The camera's axes and opening (for the sun's shadow cascades).
@@ -587,13 +715,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       else
       {
-        // Without the cutscene's camera: slowly round the cast (the free view comes with the model view's move, #112 6).
-        float angle = (float)(now * 0.3);
-        float distance = _radius * 2.6f;
-        eyeAt = _center + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, _radius * 0.6f);
-        viewProjection = Matrix4x4.CreateLookAt(eyeAt, _center, Vector3.UnitZ) * Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, aspect, 0.05f, _far);
-        toLight = new Vector3(0.4f, -0.5f, 0.8f);
-        (viewForward, viewUp, viewFov) = (Vector3.Normalize(_center - eyeAt), Vector3.UnitZ, MathF.PI / 4);
+        // Without the cutscene's camera: the free view (the page's own camera; no depth of field, no fades). Its far plane
+        // the location's as through the camera (and beyond the scene), its near one as the page's free view.
+        float far = Math.Max(_far, _free.Distance + _free.SceneRadius * 4);
+        eyeAt = _free.Eye;
+        viewProjection = _free.ViewProjection(aspect, _free.NearClip(far, _visibleLocation != null), far);
+        toLight = _free.HeadLight();
+        (viewForward, viewUp, viewFov) = (_free.Forward, _free.Axes().Up, _free.Fov);
       }
       var (light, tone) = _lighting?.At(eyeAt, viewProjection) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
       // Through the cutscene's camera nothing beyond the shot's draw distance (the page's drawReach, ModelView.html:
@@ -613,14 +741,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
       List<DeferredLight>? lights = null;
+      List<Corona>? coronas = null;
+      List<LightVolume>? volumes = null;
       if (_showLights && _lighting != null)
       {
         var lamps = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var shown) ? shown.Lights : null;
         lamps ??= _noLamps;
         lamps.SetSection(_cutLights);
         lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values);
+        // The lamps' coronas (the page's coronasNow), x the time cycle's SprBght outside a room.
+        coronas = lamps.CoronasNow(eyeAt, viewProjection, _lighting.Hour, _lighting.CycleAt(eyeAt, viewProjection).SpriteBrightness);
+        volumes = lamps.VolumesNow(eyeAt, viewProjection, _lighting.Hour, _volumeLookupSet);
       }
-      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Post = post };
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Coronas = coronas, Volumes = volumes, Post = post };
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).

@@ -69,6 +69,12 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>The lights added over the solid scene (lamps, a cutscene's own; see <see cref="DeferredLight"/>), or null.</summary>
     public System.Collections.Generic.IReadOnlyList<DeferredLight>? Lights { get; init; }
 
+    /// <summary>The lamps' coronas added after the scene (see <see cref="Corona"/>), or null.</summary>
+    public System.Collections.Generic.IReadOnlyList<Corona>? Coronas { get; init; }
+
+    /// <summary>The lamps' visible light volumes added after the scene (see <see cref="LightVolume"/>), or null.</summary>
+    public System.Collections.Generic.IReadOnlyList<LightVolume>? Volumes { get; init; }
+
     /// <summary>The frame's depth of field and fade (#112 step 4h); none by default.</summary>
     public PostParams Post { get; init; }
   }
@@ -190,7 +196,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
                          l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view, _swapChain.DepthBuffer),
-                         view.Lights);
+                         view.Lights, _toneMapper.LightTexture, view.Coronas, _swapChain.DepthBuffer, view.Volumes);
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
           bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);

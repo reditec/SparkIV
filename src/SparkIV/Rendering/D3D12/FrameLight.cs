@@ -58,6 +58,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public float FogEnd;
     public float FogNearAmount;
 
+    /// <summary>
+    /// The fog pass's depth effect before the fog (GTA IV's gDepthFxParams, the page's depthFx in gameFog): x
+    /// DesaturationFar, y GammaFar, z where it starts, w where it is whole (none unless w &gt; z). From z to w the light
+    /// desaturated towards x and multiplied by (luma / exposure)^(ramp x (y - 1)).
+    /// </summary>
+    public Vector4 DepthFx;
+
     /// <summary>The sun's shadow (cascaded maps; see the class SunShadow); null: none (the sun everywhere).</summary>
     public SunShadow? SunShadow;
 
@@ -131,6 +138,36 @@ namespace SparkIV.WinUI.Rendering.D3D12
     NotBaked = 1,
     /// <summary>Only the location and the cast's props (a cutscene's env*/shd* light).</summary>
     BakedOnly = 2,
+  }
+
+  /// <summary>
+  /// A lamp's corona (#112): a sprite facing the camera, half a side <see cref="Size"/> metres, at <see cref="At"/> (already
+  /// moved towards the camera), added to the light after the scene; <see cref="Color"/> its colour x strength (the
+  /// renderer multiplies by the exposure). A game's module makes the list (GTA IV (PC): CutsceneLights.CoronasNow).
+  /// </summary>
+  public struct Corona
+  {
+    public Vector3 At;
+    public Vector3 Color;
+    public float Size;
+  }
+
+  /// <summary>
+  /// A lamp's visible light volume (#112): its light in the air, added after the scene (the page's gameLightVolumes). At
+  /// the lamp, along <see cref="Direction"/> (a spot's axis; <see cref="Across"/> its second axis), reaching
+  /// <see cref="Radius"/>; <see cref="Cone"/> a spot's outer angle in radians (0: a point lamp, all round);
+  /// <see cref="Color"/> its colour x strength x 0.25 (the renderer multiplies by the exposure); <see cref="Lookup"/>:
+  /// by the lookup texture (lamps without the filler flag) instead of the sphere's chord.
+  /// </summary>
+  public struct LightVolume
+  {
+    public Vector3 At;
+    public Vector3 Direction;
+    public Vector3 Across;
+    public Vector3 Color;
+    public float Radius;
+    public float Cone;
+    public bool Lookup;
   }
 
   /// <summary>

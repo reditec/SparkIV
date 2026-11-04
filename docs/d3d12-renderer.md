@@ -99,9 +99,23 @@ the page: the location shown (`SetLocation`, also with the Location button), the
 camera (`SetSection`, made ahead on another thread like the page's section data), `Seek`, `Play`, `Sync` (the sound's
 time, followed gently as the page does) and the camera button. The render thread takes those orders at the start of a
 frame, keeps the clock as the page's `tick` does, poses the section's actors (the others hidden) and looks through the
-section's camera (else it goes round the cast). It reports the frame it shows, its frames per second while playing and
+section's camera (else the free view, below). It reports the frame it shows, its frames per second while playing and
 when the rate falls below 30 or is back, as the page's `frame`, `fps` and `fpsBelow`, so the status bar and
 `SparkIV-fps.log` work as before.
+
+**The free view** (2026-11-04): without the cutscene's camera the player looks through `OrbitCamera`
+(`Rendering/D3D12`, generic, for the model view later), the page's own camera ported (ModelView.html `camera` ~190,
+`fit`/`fitDistance`/`eye` ~3019-3085, the mouse ~4062-4110, the keys ~4112-4146): left drag turns (a cutscene: looking
+round from the eye), middle or right drag (Shift + left) moves the target in the screen's plane, the wheel zooms (x
+1.15 a notch), a double-click or the Fit button fits the cast (its bones where they are now, 0.3 m round them; also once
+at the first section), W/S/A/D/Q/E walk (3 m/s or the scene's radius if smaller, Shift x 4, steps of at most 0.1 s).
+`CutsceneView` takes the panel's pointer events (captured) and its own keys (the view takes the focus on a press in the
+panel; keys cleared when it loses the focus or the window is left; Ctrl/Alt/Win combinations ignored) and orders them to
+the player (`Turn`, `Pan`, `Zoom`, `Fit`, `Walk`). A press or a walking key through the cutscene's camera leaves it from
+its eye and direction (the page's `leaveFilmCamera`, also when the camera button goes off) and the button goes off
+(`CameraLeft`, the page's "filmCamera" message). Near clip as the page's free view (a 1000th of the distance, with a
+location at least far / 2000 up to 10 cm), far plane the location's; no depth of field, fades or draw distance; the
+sun's shadow, the lamps and coronas from the free eye.
 
 Models go onto the GPU on a loading thread, one load at a time, while the frames go on (`MeshRenderer.Prepare`, any
 thread, its copies in its own command list on the same queue; `Register`, the render thread, at the start of a frame):
@@ -133,8 +147,9 @@ picture from it:
 - **Fog** (`FrameLight.Fog`, the page's `gameFog`, rage_postfx program 21): after the lamps a triangle over the screen
   blends the fog's colour over the solid scene by its amount at the G-buffer's place (not the sky); the see-through
   materials take it each in their pixel shader, the water its own. In a room with a near fog this is most of the look:
-  em_4 in Elizabeta's flat (et01_aa) fogs 78 % towards a warm grey from 3 m on. Not yet: the same pass's depth effect
-  (gDepthFxParams).
+  em_4 in Elizabeta's flat (et01_aa) fogs 78 % towards a warm grey from 3 m on. The same pass's depth effect
+  (gDepthFxParams) before it since 2026-11-04 (below, "Glows, coronas, light volumes, forward lamps and the depth
+  effect").
 - **The picture** (`ToneMapper`): a quarter-size copy of the light (each texel the mean of its 4 x 4 block) is read
   back for the mean luminance; the eye adapts to it (kept within AdaptedLumMin and AdaptedLumMax, eased over
   AdaptTime while playing, at once when stopped; in the app measured every 200 ms); the composite scales the light by
@@ -356,7 +371,7 @@ left out of the models) casts nothing. cutgen: `D3D12NOSUNSHADOW=1` turns it off
 The solid pass and the decals also write a G-buffer (albedo, normal + AO, place + whether baked; a decal blends only
 the albedo, as the game's decals write GB0's colour only); the lights are then added over it, one light volume each
 (a box round its sphere, its faces turned away from the camera only, depth test "greater or equal", one instanced
-draw), before the water and the see-through materials, which stay forward without lamp light for now. No cap: the
+draw), before the water and the see-through materials, which are drawn forward (the map's ones with the lamps, below). No cap: the
 page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `CutsceneLights` (GTA IV PC) picks them
 per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; env*/shd* only on baked
 surfaces, the others only on peds and vehicles), the tail lamps of vehicles whose lamps the script turns on, the
@@ -366,7 +381,8 @@ page's: the 4 shadow lamps nearest to the camera (distance less radius; `Cutscen
 an R32F atlas (2048 x 4096: a row of two 1024² halves per lamp), drawn each frame before the G-buffer from the cast's
 solid parts (instances added with `castsShadow`; the location casts none), sampled in the light pass with the page's
 four rotated taps (its GL rows and pixel y turned over, so the reads are the page's). Other shadow lamps stay fully
-lit. Not yet: the lamps' shine, light volumes' visible cones and coronas.
+lit. Since 2026-11-04 also the map's see-through materials lit forward by the lamps, the lamps' coronas and visible
+light volumes (below). Not yet: the lamps' shine on the G-buffer.
 
 ### Materials (step 4d)
 
@@ -384,8 +400,9 @@ see-through parts (gta_ped, bucket 1) blended by the stipple's share of their al
 and the map's glass with vertex alpha by their texture's alpha, culled, writing depth; other glass at 0.45) and the
 map's other see-through materials (culled, writing depth, forward shine); the location's decals lit by the surface
 below (its normal and AO copied after the solid pass), normal decals taking its AO.
-Not yet: the mirrored surroundings in the shine (the parabolic map and its sky fallback), the lamps' shine, glowing
-glass (gta_glass_emissive), lamps on the forward-drawn materials, animated textures.
+Not yet: the mirrored surroundings in the shine (the parabolic map and its sky fallback), the lamps' shine on the
+G-buffer, animated textures. (Glowing see-through parts and glass, and the lamps on the forward-drawn map materials:
+below.)
 
 ### Post effects (step 4h)
 
@@ -396,7 +413,84 @@ the bright pass (`ToneParams.Bloom` = IntensityBloom x 0.5, `BrightPass`); the d
 (`CutsceneCamera.DofAt`, near and far per frame), the four rotated reads in Direct3D's texture space; TLAD's film grain
 (`ToneParams.Grain` = column 10 / 64 x Exposure) from a 1024 x 1024 texture of random bytes (fixed seed); the fade to
 black (`CutsceneMessages.SectionFade`, only through the cutscene's camera) last. The frame's DOF and fade come in
-`PostParams` (`SceneView.Post` in the app). Not yet: the lamps' coronas and visible light volumes.
+`PostParams` (`SceneView.Post` in the app). The lamps' coronas and visible light volumes are added to the light before
+it (below).
+
+### Glows, coronas, light volumes, forward lamps and the depth effect (2026-11-04)
+
+Five pieces of the page that native lacked, each ported as the page does it (all in `MeshRenderer`, the lists from
+`CutsceneLights`, GTA IV PC):
+
+- **See-through glows drawn apart** (ModelView.html ~3622-3646, ~3700-3734; the shader ~264-266, ~700-719, ~734). A
+  see-through or glass part of draw bucket 4 or 5 (the page's `mat.emissive`), textured (`Part.GlowApart`): its glow =
+  emissiveMultiplier x exposure (a gta_emissivenight's outside a room x (1 - day/night)); drawn apart (`glowApart`) when
+  the glow is over 0 or it is a see-through gta_emissivenight, and blended or a glowing glass (`glowGlass`: not night,
+  glass or a see-through gta_emissivestrong). Its lit draw is left out in a room, for `nightGlass` and `glowGlass`;
+  where it is drawn, a gta_emissive's lit colour goes x (1 - its alpha) (the page's mix with glow 0; kind bit
+  `GlowLit`). The glow draw (`VSGlow`/`PSGlow`, `_glowPipelines`): texture x tint x vertex colour x glow x (1 - the
+  fog's amount), premultiplied by the part's alpha, the zShift (+0.0004 strong, -0.0004 the others; GL's 2 x zShift on
+  -w..w is this on 0..w), back faces culled, writing depth, LESSEQUAL, ONE / INVSRCALPHA for gta_emissive (glowOver),
+  ONE / ONE for the others. gta_glass_emissive is no longer left out of the models (the page draws it). cutgen:
+  `D3D12NOGLOW=1`. This drew the intro's 3D credits (csTitles*, gta_emissive bucket 5), bc_3's pier wall lamps and
+  bc_1's globe lamps.
+- **The see-through pass's order** (ModelView.html ~3352-3380): in the decal pass first the dirt decals and the decals
+  of a location model with dirt decals (`Part.DirtFirst`, the page's `dirtFirst` / `dirtModel`), in the see-through
+  pass first the glowing see-through parts (the page's `glowFirst`: in a room multiplier over 0, outside
+  gta_emissivenight), each group in instance order (`DrawPass`'s two sweeps). Native drew the intro bunk room's wall
+  dirt after the posters (ruskgallposts): the posters were black.
+- **The fog's depth effect** (gtaiv-pc.js ~304-314, ~994; `FrameLight.DepthFx` = TimeCycle columns 48, 50, 51, 52): from
+  DepthFx.z to .w the light desaturated towards DesaturationFar and x (luma / exposure)^(ramp x (GammaFar - 1)), before
+  the fog. The solid scene's: the light target is copied (`_lightCopy`, t9 in the lamps' table; `Draw`'s
+  `lightTexture`, `ToneMapper.LightTexture`) and `PSFog` writes the result whole; the see-through materials in
+  `PSBlend`. cutgen: `D3D12NODEPTHFX=1`.
+- **The lamps' coronas** (the page's `coronasNow`, ModelView.html ~2599-2620, and `gameCoronas`, gtaiv-pc.js
+  ~1721-1825): `CutsceneLights.CoronasNow` - every 2dfx light with CoronaSize and Intensity over 0 (also those that
+  light nothing), on at the hour, not of another interior nor an unseen room; in a room moved 1 m towards the camera,
+  else its size, x SprBght outside; half a side CoronaSize x 2.5. `VSCorona`/`PSCorona`: a quad facing the camera
+  (right, up, forward from the view-projection's columns), no depth test; nearer than its size x saturate(0.5 (f / size
+  + 1)), else 12 Poisson points against the solid scene's depth (copied before the water and glass, `KeepSolidDepth`),
+  collapsed at 0.01 or less; the sprite (coronas.wtd "corona", `SetCoronaSprite`) x colour x strength x exposure, ONE /
+  ONE. The bindless texture table is now visible to all stages (the vertex program reads the depth). cutgen:
+  `D3D12NOCORONAS=1`. In the intro's ship the cabin lamps' coronas lie over much of the picture: this was the warm
+  light the native picture lacked (s1 f399.5, s3 f1236.5, s3 f49.5).
+- **The lamps' visible light volumes** (the page's `lightVolumesNow`, ModelView.html ~2576-2597, and
+  `gameLightVolumes` / `gameLightVolumeMesh`, gtaiv-pc.js ~1539-1710): `CutsceneLights.VolumesNow` (flag 0x80000,
+  strength VolumeIntensity x Range, reach radius x VolumeSize, within reach + 35 m; without the filler flag by the
+  lookup texture lights_occluders.wtd "volume", `SetVolumeLookup`); `LightVolumeMesh` the game's unit meshes (spot n 5
+  with its fan, point n 4), `VSVolume`/`PSVolume` against the whole depth (copied after the see-through pass), the far
+  faces adding, the near ones taking off (FrontCounterClockwise as the page's GL CCW), x colour x 0.25 x exposure. The
+  scene's depth along the view from Direct3D's depth through the view-projection's z and w columns (w = b / (depth - k)).
+  cutgen: `D3D12NOVOLUMES=1`. Only et01_aa s1 f463.25 has one in view among the references (3.29 -> 3.20).
+- **Lamps on the map's see-through materials drawn forward** (the page's `forwardLit`, ModelView.html ~558-660,
+  ~3497-3508): the parts the page draws forward (`PartFlags.ForwardLit`: blended map materials, not glass, decals,
+  vehicles or emissives) read the frame's lights (root SRV t3, the count in `FogParams.w` once `DrawLights` wrote them):
+  the location's lamps reaching more than 4 m (not the cutscene's own), colour x (a⁴ - 0.1) / 0.9 x spot x max(n.l, 0)
+  onto the light, x saturate(n.l) x |l.R|^(power / 4) onto the shine. Bernie's glass table top (bc_1) is lit so.
+  cutgen: `D3D12NOFORWARDLAMPS=1`.
+
+Unlike the page: no cap of 80 lights for the forward lamps either.
+
+Measured (mean difference to the game's picture, /255; cutgen one frame at a time, which equals the run's values; page
+= run 2026-11-04_10-54, before = run 2026-11-04_20-14):
+
+| Reference | page | before | glows + order | + depth effect, coronas | + volumes, forward lamps |
+|---|---|---|---|---|---|
+| intro s1 f399.5 | 1.19 | 9.95 | 7.87 | 1.21 | 1.21 |
+| intro s3 f1236.5 | 3.55 | 10.85 | 9.63 | 3.76 | 3.76 |
+| intro s3 f49.5 | 3.02 | 6.23 | 6.23 | 3.06 | 3.06 |
+| intro s2 f352.75 | 4.52 | 7.25 | 4.16 | 4.09 | 4.09 |
+| bc_1 s2 f1174 | 1.80 | 5.51 | 5.03 | 4.78 | 1.84 |
+| bc_1 s2 f84.5 | 1.41 | 3.34 | 3.25 | 2.72 | 1.45 |
+| bc_3 s1 f292.5 | 5.15 | 9.37 | 9.08 | 7.09 | 7.10 |
+| et01_aa s4 f112.25 | 2.13 | 3.76 | 3.52 | 3.52 | 2.16 |
+| guard et01_aa s3 f49.75 | 2.52 | 2.66 | 2.55 | 2.55 | 2.55 |
+| guard intro s4 f420.5 | 2.97 | 3.83 | 3.12 | 2.97 | 2.97 |
+| guard bc_1 s1 f144 | 0.97 | 0.99 | 0.99 | 0.99 | 0.99 |
+| guard bc_3 s3 f357.25 | 6.69 | 7.42 | 7.42 | 6.49 | 6.49 |
+
+All 72: sum -61.6 against 2026-11-04_20-14. Worse by more than 0.05 only bc_3 s3 f506.5 (+0.13, a pier lamp's corona
+at the picture's right edge, near the camera: drawn by the page's rules, kept) ; intro s3 f569.75 +0.04 (the depth
+effect), et01_ba f402 +0.02.
 
 ## Next steps (#112)
 

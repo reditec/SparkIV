@@ -35,8 +35,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// the mission's script turns on (vehicleLightsNow), and the location's lamps (its objects' 2dfx lights) that are on at
   /// the hour (gtaiv-pc.js lampOn / outdoorLamp), seen (the camera's interior and the rooms seen through its portals on
   /// screen: seenRooms), whose sphere reaches into the view, faded by their FadeDistance; the shadow lamps nearest to
-  /// the camera get a shadow map (LampShadowSlots, the page's choice; drawn from the cast). Not yet: light volumes and
-  /// coronas, the !outside fallback of the page (MapLightScale: irrelevant with a time cycle).
+  /// the camera get a shadow map (LampShadowSlots, the page's choice; drawn from the cast). The lamps' coronas
+  /// (<see cref="CoronasNow"/>) and visible light volumes (<see cref="VolumesNow"/>) as the page's coronasNow and
+  /// lightVolumesNow. Not: the !outside fallback of the page (MapLightScale: irrelevant with a time cycle).
   /// </summary>
   public sealed class CutsceneLights
   {
@@ -52,14 +53,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     private sealed class Lamp
     {
-      public Vector3 At, Dir, Rgb;
-      public float Radius, Strength, CosOuter, ConeScale, Fade;
+      public Vector3 At, Dir, Rgb, Across;
+      public float Radius, Strength, CosOuter, ConeScale, Fade, ConeDegrees;
+      // Its light volume (2dfx flag 0x80000): strength (its own x Range) and size (x the radius); 0 without.
+      public float VolumeStrength, VolumeSize;
       public uint Flags;
       public bool Shadows, Filler;
       public int Room;
     }
 
     private readonly List<Lamp> _lamps = new List<Lamp>();
+    // The lamps' coronas (place, colour, half a side, intensity, 2dfx flags, room).
+    private readonly List<(Vector3 At, Vector3 Rgb, float Size, float Intensity, uint Flags, int Room)> _coronas = new();
     private readonly IReadOnlyList<LocationRoom> _rooms;
     private List<CutLight> _cut = new List<CutLight>();
 
@@ -76,6 +81,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         foreach (var light in location.Models[obj.Model].Lights)
         {
+          // Its corona (the page's setMapLights: mapCoronas, ModelView.html ~2462-2463), also of a light that lights
+          // nothing: CoronaSize > 0 and Intensity > 0, half a side CoronaSize x 2.5.
+          if (light.CoronaSize > 0 && light.Intensity > 0)
+          {
+            var cAt = Vector3.Transform(light.Position, obj.Place);
+            _coronas.Add((cAt, new Vector3(light.Red, light.Green, light.Blue), light.CoronaSize * 2.5f, light.Intensity, light.Flags,
+                           CutsceneLighting.RoomOf(_rooms, cAt)));
+          }
           float range = light.Distance > 0 ? light.Distance : light.Range;
           if (!(range > 0))
           {
@@ -107,6 +120,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             Filler = (light.Flags & 0x100000) != 0,
             Fade = light.FadeDistance,
             Room = CutsceneLighting.RoomOf(_rooms, at),
+            ConeDegrees = cone,
+            Across = Vector3.TransformNormal(light.Tangent, obj.Place),
+            // As CutsceneLocation.LightsMessage's volume (GTAIV.exe 0xAC2270): flag 0x80000, strength its own x Range.
+            VolumeStrength = (light.Flags & 0x80000) != 0 && light.VolumeIntensity != 0 && light.VolumeSize != 0 ? light.VolumeIntensity * light.Range : 0,
+            VolumeSize = (light.Flags & 0x80000) != 0 && light.VolumeIntensity != 0 && light.VolumeSize != 0 ? light.VolumeSize : 0,
           });
         }
       }
@@ -289,6 +307,87 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       near.Sort((a, b) => a.D.CompareTo(b.D));
       now.AddRange(near.Select(n => n.Light));
       return Capped(now, cap, eye);
+    }
+
+    /// <summary>
+    /// The lamps' coronas to draw now (the page's coronasNow, ModelView.html ~2599-2620; gtaiv-pc.js gameCoronas): those
+    /// on at the hour (LampOn) and not of another interior than the camera's nor of a room not seen from it; a lamp of an
+    /// interior moved 1 m towards the camera, as strong as its intensity, any other its size, x the time cycle's
+    /// SprBght (<paramref name="spriteBrightness"/>). Colours without the exposure.
+    /// </summary>
+    public List<Corona> CoronasNow(Vector3 eye, Matrix4x4 viewProjection, float hour, float spriteBrightness)
+    {
+      var list = new List<Corona>();
+      if (_coronas.Count == 0)
+      {
+        return list;
+      }
+      int camRoom = _rooms.Count > 0 ? CutsceneLighting.RoomOf(_rooms, eye) : -1;
+      Vector3? camAt = camRoom >= 0 ? _rooms[camRoom].At : null;
+      var seen = camRoom >= 0 ? SeenRooms(camRoom, viewProjection) : null;
+      float night = NightFactor(hour);
+      foreach (var m in _coronas)
+      {
+        float on = LampOn(m.Flags, night);
+        bool otherInterior = (camAt is Vector3 at0 && m.Room >= 0 && _rooms[m.Room].At != at0) || (seen != null && !seen.Contains(m.Room));
+        if (on <= 0 || otherInterior)
+        {
+          continue;
+        }
+        bool inside = m.Room >= 0;
+        var away = eye - m.At;
+        float d = away.Length();
+        if (d < 1e-3f)
+        {
+          continue;
+        }
+        float pull = (inside ? 1 : m.Size) / d;
+        list.Add(new Corona { At = m.At + away * pull, Color = m.Rgb * (on * m.Intensity * (inside ? 1 : spriteBrightness)), Size = m.Size });
+      }
+      return list;
+    }
+
+    /// <summary>
+    /// The lamps' visible light volumes to draw now (the page's lightVolumesNow, ModelView.html ~2576-2597): those with a
+    /// volume, not of another interior nor of a room not seen, on at the hour with a radius and strength (outdoorLamp),
+    /// within the volume's reach (radius x size) + 35 m (LampReach) of the camera. Without the filler flag 0x100000 by
+    /// the lookup texture (none drawn without it: <paramref name="hasLookup"/>). Colours x 0.25, without the exposure.
+    /// </summary>
+    public List<LightVolume> VolumesNow(Vector3 eye, Matrix4x4 viewProjection, float hour, bool hasLookup)
+    {
+      var list = new List<LightVolume>();
+      if (!_lamps.Any(l => l.VolumeStrength > 0))
+      {
+        return list;
+      }
+      int camRoom = _rooms.Count > 0 ? CutsceneLighting.RoomOf(_rooms, eye) : -1;
+      Vector3? camAt = camRoom >= 0 ? _rooms[camRoom].At : null;
+      var seen = camRoom >= 0 ? SeenRooms(camRoom, viewProjection) : null;
+      float night = NightFactor(hour);
+      foreach (var m in _lamps)
+      {
+        bool lookup = (m.Flags & 0x100000) == 0;
+        if (!(m.VolumeStrength > 0 && m.VolumeSize > 0) || (lookup && !hasLookup) || !(m.Radius > 0))
+        {
+          continue;
+        }
+        bool otherInterior = (camAt is Vector3 at0 && m.Room >= 0 && _rooms[m.Room].At != at0) || (seen != null && !seen.Contains(m.Room));
+        if (otherInterior || LampOn(m.Flags, night) <= 0 || !(m.Radius > 0.001f) || !(m.Strength >= 0.001f))
+        {
+          continue;
+        }
+        float reach = m.Radius * m.VolumeSize;
+        if (Vector3.Distance(m.At, eye) > reach + 35)
+        {
+          continue;
+        }
+        list.Add(new LightVolume
+        {
+          At = m.At, Direction = m.Dir, Across = m.Across, Color = m.Rgb * (m.VolumeStrength * 0.25f),
+          Radius = reach, Cone = m.ConeDegrees > 0 ? m.ConeDegrees * MathF.PI / 180 : 0, Lookup = lookup,
+        });
+      }
+      return list;
     }
 
     /// <summary>How many lamps' shadow maps a frame draws (the page's LampShadowSlots; the game's atlas holds 16 tiles).</summary>

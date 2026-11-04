@@ -132,6 +132,9 @@ struct Frame
   float4 SunForward;
   float4 SunSplits;
   float4 SunBox[4];
+  // The fog pass's depth effect (FrameLight.DepthFx: DesaturationFar, GammaFar, from, to; none unless to > from, nor
+  // without the light's copy).
+  float4 DepthFx;
 };
 ConstantBuffer<Frame> f : register(b1);
 
@@ -147,6 +150,20 @@ float FogAmount(float distance)
   float nearRamp = saturate(distance / max(start, 1e-4));
   float farRamp = saturate((distance - start) / max(f.FogFar.w - start, 1));
   return lerp(farRamp, nearRamp, f.FogParams.x) + (start > 0 ? 0 : f.FogParams.x);
+}
+
+// The fog pass's depth effect, before the fog (the page's gameFog, gtaiv-pc.js ~304-311; GTA IV's gDepthFxParams):
+// from DepthFx.z to .w the light desaturated towards DesaturationFar and x luma^(ramp (GammaFar - 1)), the luma in the
+// game's light (without the exposure). None unless DepthFx.w > DepthFx.z.
+float3 DepthEffect(float3 light, float distance)
+{
+  if (f.DepthFx.w <= f.DepthFx.z)
+  {
+    return light;
+  }
+  float ramp = saturate((distance - f.DepthFx.z) / (f.DepthFx.w - f.DepthFx.z));
+  float luma = dot(light, float3(0.2125, 0.7154, 0.0721));
+  return lerp(luma.xxx, light, lerp(1.0, f.DepthFx.x, ramp)) * pow(max(luma / f.Params.y, 0) + 1e-7, ramp * (f.DepthFx.y - 1));
 }
 
 float3 FogColour(float distance)
@@ -177,10 +194,10 @@ struct PartData
 };
 StructuredBuffer<PartData> Parts : register(t2);
 
-static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64;
+static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64, GlowLit = 128;
 static const uint FNormal = 1, FSpec = 2, FSpecFlat = 4, FEnv = 8, FEnvSpec = 16, FPaint2 = 32, FDirt = 64, FStipple = 128,
   FVehGlass = 256, FVehLights = 512, FDecalBelow = 1024, FDecalAoBelow = 2048, FForwardShine = 4096, FTextureAlpha = 8192,
-  FTextured = 16384, FFixedAlpha = 32768;
+  FTextured = 16384, FFixedAlpha = 32768, FForwardLit = 65536;
 
 // The stipple's share kept per level (stipple.wtd all_stips: of 64) and a vehicle lamp's dimmers (by its vertex alpha).
 static const float Kept[16] = { 0, 6, 8, 12, 11, 12, 16, 24, 32, 40, 48, 52, 52, 56, 58, 64 };
@@ -425,6 +442,11 @@ float3 LitBy(float3 n, float ao, float sunShadow)
   return around * ao + f.Sun.rgb * sunLit * sunShadow;
 }
 
+// The frame's lights (see DrawLights: place and range, axis and cos outer, colour and cone scale, model / in a room /
+// shadow / mask), read by the lamps' pass and by the map's see-through materials lit forward (Shade).
+struct Light { float4 At; float4 Dir; float4 Color; float4 Kind; };
+StructuredBuffer<Light> Lights : register(t3);
+
 // deferred: the solid pass and the decals (G-buffer); else the see-through pass (forward, blended).
 PsOut Shade(VsOut input, bool deferred)
 {
@@ -626,6 +648,48 @@ PsOut Shade(VsOut input, bool deferred)
       shine = 2 * (baked ? 0.5 : 0.25) * amount * f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale;
     }
   }
+  // A map's see-through material drawn forward (the page's forwardLit, ModelView.html ~558-660 and ~3497-3508): the
+  // location's lamps reaching more than 4 m, not a cutscene's own lights (GTAIV.exe 0xAC5670 / 0xABD8A0), each its
+  // colour x reach x spot x max(n.l, 0) onto the light, its shine x saturate(n.l) x |l.R|^(power / 4) x the shine's
+  // amount onto the shine. f.FogParams.w: the frame's lights (0 in the mirror).
+  if (!deferred && (bits & FForwardLit) != 0 && f.FogParams.w > 0.5)
+  {
+    float3 lampMirrored = reflect(view, n);
+    bool shiny = !vehicle && (specMap || (bits & FSpecFlat) != 0) && textured;
+    float lampPower = shiny ? (specMap ? spec.a : 1) * p.Spec.x * (baked ? 1 : 0.75) : 0;
+    float3 lampLit = 0, lampShine = 0;
+    uint count = (uint)(f.FogParams.w + 0.5);
+    for (uint li = 0; li < count; li++)
+    {
+      Light l = Lights[li];
+      float range = l.At.w;
+      if ((uint)(l.Kind.x + 0.5) == 2 || range <= 4)
+      {
+        continue;
+      }
+      float3 L = l.At.xyz - input.world;
+      float dl = length(L);
+      if (dl >= range || dl < 1e-4)
+      {
+        continue;
+      }
+      L /= dl;
+      float al = saturate(1 - dl * dl / (range * range));
+      float reach = max((al * al * al * al - 0.1) / 0.9, 0);
+      float spotL = l.Dir.w > -1 ? saturate((dot(-L, l.Dir.xyz) - l.Dir.w) * l.Color.w) : 1;
+      float3 lampLight = l.Color.rgb * reach * spotL;
+      lampLit += lampLight * max(dot(n, L), 0);
+      if (lampPower > 0)
+      {
+        lampShine += lampLight * saturate(dot(n, L)) * pow(abs(dot(L, lampMirrored)), lampPower * 0.25);
+      }
+    }
+    lit += lampLit;
+    if (shiny)
+    {
+      shine += (specMap ? dot(spec.rgb, p.SpecMask.rgb) : 1) * p.Spec.y * lampShine;
+    }
+  }
   // How much of it shows (the see-through pass and decals): the texture's alpha x the vertex's (a vehicle lamp's
   // vertex alpha is its lamp's number), a person's see-through part by its stipple's share; a fixed alpha (0.45) for
   // glass without its own.
@@ -678,6 +742,12 @@ PsOut Shade(VsOut input, bool deferred)
       rgb += lightOf;
     }
   }
+  // A see-through gta_emissive (its glow drawn apart, PSGlow): its lit draw takes the page's mix(lit, glow 0, alpha)
+  // (ModelView.html ~704 with emissiveGlow 0, ~3645), so the lit surface only by 1 - its alpha.
+  if ((kind & GlowLit) != 0)
+  {
+    rgb *= 1 - saturate(texel.a * input.alpha);
+  }
   // A vehicle's lamp glass (gta_vehicle_lightsemissive): texture x vertex colour x its lamp's dimmer x the glow
   // (lamps on: emissiveMultiplier) x the exposure.
   if ((bits & FVehLights) != 0)
@@ -706,8 +776,201 @@ float4 PSBlend(VsOut input) : SV_Target
   float4 light = Shade(input, false).light;
   // The fog on each (the page's gameFog per fragment; the solid scene's comes after the lamps, DrawFog).
   float distance = length(f.Eye.xyz - input.world);
+  light.rgb = DepthEffect(light.rgb, distance);
   light.rgb += FogAmount(distance) * (FogColour(distance) - light.rgb);
   return light;
+}
+
+// A see-through glowing part's glow, drawn apart after its lit draw (the page's glowOnly draw, ModelView.html ~264-266,
+// ~700, ~719, ~734, ~3709-3734): pushed in depth by the game's zShift (d.Part.y: +0.0004 gta_emissivestrong, -0.0004
+// the others; the page's 2 x zShift on GL's -w..w is this on Direct3D's 0..w); texture x tint x vertex colour x the
+// glow (d.Material.w: emissiveMultiplier x exposure, a night one's outside a room x (1 - day/night)), x (1 - the fog's
+// amount) (the game adds its glows before its fog pass), premultiplied by the part's alpha as its see-through draw has it.
+VsOut VSGlow(VsIn input)
+{
+  VsOut o = VSMain(input);
+  o.position.z += d.Part.y;
+  return o;
+}
+
+VsOut VSGlowSkinned(VsSkinIn input)
+{
+  VsOut o = VSSkinned(input);
+  o.position.z += d.Part.y;
+  return o;
+}
+
+// A lamp's corona (#112; the page's gameCoronas, gtaiv-pc.js ~1721-1825; the game's deferred_lighting technique corona,
+// the bc_1 trace GTAIV.trace draw 114115754): a quad facing the camera, half a side d.Tint.w round d.DirtMask.xyz (the
+// camera's right, up and forward in d.World's rows 0-2), no depth test. Nearer to the camera than its size: x
+// saturate(0.5 (f / size + 1)) for f, its depth along the view, below its size, and moved out to 0.1 m in front; else
+// 12 points of the Poisson disc 2 pixels round its middle against the solid scene's depth (texture d.Part.y), x their
+// share in front, collapsed to a point at 0.01 or less. The pixel: the sprite (texture d.Part.x) x colour (d.Tint.rgb:
+// colour x strength x exposure), added (ONE / ONE). The page's GL depth (z / w x 0.5 + 0.5) is Direct3D's z / w here.
+struct CoronaOut { float4 position : SV_Position; float2 uv : TEXCOORD0; float3 tint : COLOR; };
+static const float2 CoronaCorners[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(1, 1), float2(-1, 1), float2(-1, -1) };
+
+CoronaOut VSCorona(uint id : SV_VertexID)
+{
+  float2 corner = CoronaCorners[id];
+  float3 at = d.DirtMask.xyz;
+  float size = d.Tint.w;
+  float3 right = d.World[0].xyz, up = d.World[1].xyz, forward = d.World[2].xyz;
+  float3 place = at + (right * corner.x + up * corner.y) * size;
+  float seen = 1;
+  if (length(at - f.Eye.xyz) < size)
+  {
+    float fd = dot(forward, at - f.Eye.xyz);
+    if (fd < size)
+    {
+      seen = saturate(0.5 * (fd / size + 1));
+      if (fd < 0.1)
+      {
+        place += forward * (0.1 - fd);
+      }
+    }
+  }
+  else
+  {
+    float4 clip = mul(float4(at, 1), f.ViewProjection);
+    float3 ndc = clip.xyz / clip.w;
+    float2 pixel = 1 / f.Screen.xy;
+    uint depth = (uint)d.Part.y;
+    seen = 0;
+    [unroll] for (int i = 0; i < 12; i++)
+    {
+      float2 p = clamp(ndc.xy + pixel * SunTaps[i] * 2, -0.997, 0.997);
+      int2 px = int2((p.x * 0.5 + 0.5) * f.Screen.x, (0.5 - 0.5 * p.y) * f.Screen.y);
+      if (ndc.z < Tex[depth].Load(int3(px, 0)).r)
+      {
+        seen += 1.0 / 12;
+      }
+    }
+    if (clip.w <= 0 || seen <= 0.01)
+    {
+      seen = 0;
+      place = at;
+    }
+  }
+  CoronaOut o;
+  o.position = mul(float4(place, 1), f.ViewProjection);
+  o.position.z = 0;
+  o.tint = d.Tint.rgb * seen;
+  o.uv = corner * 0.5 + 0.5;
+  return o;
+}
+
+float4 PSCorona(CoronaOut input) : SV_Target
+{
+  return float4(Tex[(uint)d.Part.x].Sample(Linear, input.uv).rgb * input.tint, 0);
+}
+
+// A lamp's visible light volume (#112; the page's gameLightVolumes, gtaiv-pc.js ~1539-1710; GTA IV's deferred_lighting
+// lightShafts, vs07 with ps18-ps21): the game's unit mesh (MeshRenderer.LightVolumeMesh) mapped round the lamp (d.World
+// row 0: the lamp, w the outer angle in radians, 0 a point lamp; row 1: its axis, w the mesh's c213 scale; row 2: its
+// second axis, w the size: scale x radius x 0.662; row 3: the eye from the lamp, w the radius), per pixel along the ray
+// from the eye to the face, cut where the scene's depth (texture d.Part.x) is nearer: by the lookup texture (d.Part.y;
+// d.Tint.w 1) or the chord through a sphere of 0.66 x the radius; x colour (d.Tint.rgb), the far faces adding, the
+// near ones taking off (the faces' winding as the page's: GL's CCW front is FrontCounterClockwise here).
+struct VolumeOut { float4 position : SV_Position; float3 ray : RAY; float w : CLIPW; };
+
+VolumeOut VSVolume(float3 unit : POSITION)
+{
+  float3 lampAt = d.World[0].xyz, lampDir = d.World[1].xyz, across = d.World[2].xyz;
+  float cone = d.World[0].w, scale = d.World[1].w, size = d.World[2].w;
+  float3 dd;
+  if (cone <= 0)
+  {
+    dd = normalize(unit + 1e-5);
+  }
+  else
+  {
+    float xy = dot(unit.xy, unit.xy);
+    if (xy >= 1e-4)
+    {
+      float a = cone * (1 - saturate(-unit.z));
+      float c = cos(a);
+      float k = sqrt((1 - c * c) / (xy + 1e-4)) * scale;
+      dd = cross(across, lampDir) * (k * unit.y) + across * (k * unit.x) + lampDir * c;
+    }
+    else
+    {
+      dd = abs(unit.z) >= 1e-4 ? lampDir : 0;
+    }
+  }
+  float3 world = lampAt + dd * size;
+  VolumeOut o;
+  o.ray = world - f.Eye.xyz;
+  o.position = mul(float4(world, 1), f.ViewProjection);
+  o.w = o.position.w;
+  return o;
+}
+
+float4 PSVolume(VolumeOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+  // The scene's depth along the view (the page's from GL's depth and the near and far planes; here from the
+  // view-projection's z and w columns: z = k w + b, so w = b / (depth - k)).
+  float depth = Tex[(uint)d.Part.x].Load(int3(input.position.xy, 0)).r;
+  float3 cz = float3(f.ViewProjection[0][2], f.ViewProjection[1][2], f.ViewProjection[2][2]);
+  float3 cw = float3(f.ViewProjection[0][3], f.ViewProjection[1][3], f.ViewProjection[2][3]);
+  float k = dot(cz, cw) / dot(cw, cw);
+  float b = f.ViewProjection[3][2] - k * f.ViewProjection[3][3];
+  float sceneZ = b / (depth - k);
+  float t = saturate(sceneZ / input.w);
+  float len = length(input.ray);
+  float3 dir = input.ray / max(len, 1e-5);
+  float3 eyeFromLamp = d.World[3].xyz;
+  float radius = d.World[3].w;
+  float sEye = dot(dir, eyeFromLamp);
+  float h = length(eyeFromLamp - dir * sEye);
+  float fv;
+  if (d.Tint.w > 0.5)
+  {
+    // ps18 / ps19: the eye and the point seen from the lamp, scaled by sqrt(K / (1 + K h²)), K = min(16 / radius², 16);
+    // the angle between them looked up (u 0.125, v 0.5 + 0.5 cos), x π / (1.5 sqrt(1 + K h²)).
+    float kk = min(16 / (radius * radius), 16);
+    float s = sqrt(1 + kk * h * h);
+    float3 p = (eyeFromLamp + input.ray * t) * (sqrt(kk) / s), e = eyeFromLamp * (sqrt(kk) / s);
+    float c = dot(p, e) * rsqrt(dot(e, e) + 1e-5) * rsqrt(dot(p, p) + 1e-5);
+    fv = Tex[(uint)d.Part.y].Sample(Linear, float2(0.125, c * 0.5 + 0.5)).r * 3.14159274 / (1.5 * s);
+  }
+  else
+  {
+    // ps20 / ps21.
+    float sFace = len * t + sEye;
+    float r = 0.66 * radius;
+    float c = h < r ? sqrt(r * r - h * h) : 0;
+    float x = clamp(sFace, -c, c) - clamp(sEye, -c, c);
+    fv = x * x / (3 * r * r);
+  }
+  return float4(d.Tint.rgb * fv * (front ? -1 : 1), 0);
+}
+
+float4 PSGlow(VsOut input) : SV_Target
+{
+  if (f.FogParams.z > 0 && input.position.w > f.FogParams.z)
+  {
+    discard;
+  }
+  PartData p = Parts[(uint)d.Part.x];
+  uint bits = p.Bits.x;
+  float4 texel = Tex[p.Tex.x].Sample(Linear, input.uv);
+  float a = 1;
+  if ((bits & FFixedAlpha) != 0)
+  {
+    a = p.Misc.z;
+  }
+  else if ((bits & FTextureAlpha) != 0)
+  {
+    a = texel.a * input.alpha;
+    if (a < 0.01)
+    {
+      discard;
+    }
+  }
+  float3 rgb = texel.rgb * d.Tint.rgb * input.color * d.Material.w;
+  rgb *= 1 - FogAmount(length(f.Eye.xyz - input.world));
+  return float4(rgb * a, a);
 }
 
 // Into the water's mirror (DrawMirror; the page's reflection pass, ModelView.html ~423-505): the view mirrored in the
@@ -806,8 +1069,8 @@ float4 PSMirror(VsOut input) : SV_Target
 //  filler (ps10-ps12): 1.5 (a² - 1/3) x spot x saturate((n.l - 0.2) x 1.25), past a shadow (ps15) saturate(1.5 (n.l - 1/3)).
 // A shadowed light with a map in the atlas: x what of it gets past (LampShadow). Not yet: the lamps' shine (no
 // specular maps here yet).
-struct Light { float4 At; float4 Dir; float4 Color; float4 Kind; };
-StructuredBuffer<Light> Lights : register(t3);
+// (The lights, struct Light and Lights at t3, are declared before Shade, which lights the map's see-through materials
+// forward with them.)
 Texture2D<float4> GAlbedo : register(t4);
 Texture2D<float4> GNormal : register(t5);
 Texture2D<float4> GPlace : register(t6);
@@ -935,6 +1198,9 @@ float4 VSFog(uint id : SV_VertexID) : SV_Position
   return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 
+// The light as the lamps left it (copied before the fog), for the depth effect.
+Texture2D<float4> LightCopy : register(t9);
+
 float4 PSFog(float4 position : SV_Position) : SV_Target
 {
   float4 place = GPlace.Load(int3(position.xy, 0));
@@ -944,6 +1210,15 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
   }
   float distance = length(f.Eye.xyz - place.xyz);
   float amount = FogAmount(distance);
+  // Before the fog the same pass's depth effect (the page's gameFog, gtaiv-pc.js ~304-314; GTA IV's trace GTAIV.1):
+  // from DepthFx.z to .w the light desaturated towards DesaturationFar and x luma^(ramp (GammaFar - 1)), the luma in
+  // the game's light (without the exposure); then the fog over it. Written whole (alpha 1).
+  if (f.DepthFx.w > f.DepthFx.z && f.Screen.w > 0.5)
+  {
+    float3 light = DepthEffect(LightCopy.Load(int3(position.xy, 0)).rgb, distance);
+    light += amount * (FogColour(distance) - light);
+    return float4(light, 1);
+  }
   if (amount <= 0)
   {
     discard;
@@ -966,7 +1241,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
 ";
 
     private const int DrawConstants = 16 + 4 + 4 + 4 + 4 + 4;
-    private const int FrameFloats = 16 + 4 * 20;
+    private const int FrameFloats = 16 + 4 * 21;
     // A part's material for the shader (PartData: 11 x 4 numbers), and the per-vertex extras (tangent, layer texture
     // coordinates, layer weights: 14 floats) of models that have any.
     private const int PartWords = 44;
@@ -978,7 +1253,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     {
       NormalMap = 1, SpecularMap = 2, SpecularFlat = 4, Environment = 8, EnvironmentSpecular = 16, Paint2 = 32, Dirt = 64,
       Stipple = 128, VehicleGlass = 256, VehicleLights = 512, DecalBelow = 1024, DecalAoBelow = 2048, ForwardShine = 4096,
-      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768,
+      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768, ForwardLit = 65536,
     }
 
     /// <summary>
@@ -1057,6 +1332,24 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
 
       /// <summary>Layered terrain (its mesh has layer coordinates and its material more than one layer): not in the mirror.</summary>
       public bool Layered { get; init; }
+
+      /// <summary>
+      /// A decal drawn before the other decals (the page's dirtFirst, ModelView.html ~3363-3380): a dirt decal, or a decal
+      /// of a location model with dirt decals (the page's dirtModel, CutsceneLocation's message).
+      /// </summary>
+      public bool DirtFirst { get; init; }
+
+      /// <summary>
+      /// A glowing see-through part (the page's mat.emissive: draw bucket 4 or 5, textured, see-through or glass): its glow
+      /// drawn apart (DrawPass, the page's glowApart). Its emissiveMultiplier (0 without), whether gta_emissivenight,
+      /// gta_emissivestrong, glass, blended (the page's mat.blend: not glass).
+      /// </summary>
+      public bool GlowApart { get; init; }
+      public float GlowMultiplier { get; init; }
+      public bool GlowNight { get; init; }
+      public bool GlowStrong { get; init; }
+      public bool GlowGlass { get; init; }
+      public bool GlowBlend { get; init; }
 
       /// <summary>Its bounding sphere in the model's space (its mesh's box: the centre, half the diagonal).</summary>
       public Vector3 Center { get; init; }
@@ -1144,6 +1437,27 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[16];
     // The water's mirror: its solid parts, its see-through ones (see DrawMirror).
     private readonly ID3D12PipelineState[] _mirrorPipelines = new ID3D12PipelineState[2];
+    // The see-through glows drawn apart (DrawGlow): by skinned (2) and added (1) instead of laid over.
+    private readonly ID3D12PipelineState[] _glowPipelines = new ID3D12PipelineState[4];
+    // The frame's day/night factor and exposure (FrameLight), for the glows' strength per instance.
+    private float _dayNight, _exposure;
+    // The coronas: their pipeline, the sprite's texture number (0: none yet), the solid scene's depth (before the water
+    // and the see-through materials) and its texture number.
+    private readonly ID3D12PipelineState _coronaPipeline;
+    private int _coronaSlot;
+    private readonly int _solidDepthSlot;
+    private ID3D12Resource? _solidDepth;
+    private int _solidDepthWidth, _solidDepthHeight;
+    // The light volumes: their pipeline, the scene's whole depth (after the see-through materials) and its number, the
+    // lookup texture's number (0: none), the spot's and the point lamp's unit meshes (upload heap) and c213 scales.
+    private readonly ID3D12PipelineState _volumePipeline;
+    private readonly int _fullDepthSlot;
+    private ID3D12Resource? _fullDepth;
+    private int _fullDepthWidth, _fullDepthHeight;
+    private int _volumeLookupSlot;
+    private readonly ID3D12Resource _spotVolume, _pointVolume;
+    private readonly int _spotVolumeCount, _pointVolumeCount;
+    private readonly float _spotVolumeScale, _pointVolumeScale;
 
     /// <summary>The samples a pixel of the water's mirror (the page's reflectionTarget: 4); its target and depth must have as many.</summary>
     public const int MirrorSamples = 4;
@@ -1155,6 +1469,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     // The surface's normal and AO under the decals (a copy of the G-buffer's after the solid pass), its texture number.
     private ID3D12Resource? _below;
     private readonly int _belowSlot;
+    // The light target's copy before the fog (its depth effect reads it; t9 in the lamps' table) and its format.
+    private ID3D12Resource? _lightCopy;
+    private readonly Format _targetFormat;
     private readonly ID3D12Resource _frame;
     private readonly unsafe byte* _frameMapped;
     private readonly List<Model?> _models = new List<Model?>();
@@ -1208,6 +1525,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     public unsafe MeshRenderer(D3D12Device device, Format targetFormat)
     {
       _device = device;
+      _targetFormat = targetFormat;
       _textures = new TextureCache(device);
       var d3d = device.Device;
 
@@ -1216,11 +1534,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         new RootParameter1(new RootConstants(0, 0, DrawConstants), ShaderVisibility.All),
         // All the textures' views (t0 in space 1, unbounded; a part's numbers in its PartData). Volatile: the loading
         // thread adds views to other slots while frames are drawn.
-        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, uint.MaxValue, 0, 1, 0, DescriptorRangeFlags.DescriptorsVolatile)), ShaderVisibility.Pixel),
+        // (All stages: the coronas' vertex program reads the solid scene's depth.)
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, uint.MaxValue, 0, 1, 0, DescriptorRangeFlags.DescriptorsVolatile)), ShaderVisibility.All),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(1, 0), ShaderVisibility.Vertex),
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
         // The model's parts' materials (t2).
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(2, 0), ShaderVisibility.Pixel),
+        // The frame's lights (t3, as the lamps' pass reads them), for the map's see-through materials lit forward.
+        new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(3, 0), ShaderVisibility.Pixel),
       };
       var samplers = new[]
       {
@@ -1307,6 +1628,65 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
       }
 
+      // A see-through part's glow drawn apart (the page's glowOnly draw, ModelView.html ~3709-3734): back faces culled,
+      // writing depth, LESSEQUAL; ONE / INVSRCALPHA for gta_emissive (glowOver), ONE / ONE for the others.
+      var glowVertex = Compile(DxcShaderStage.Vertex, "VSGlow");
+      var glowSkinnedVertex = Compile(DxcShaderStage.Vertex, "VSGlowSkinned");
+      var glowPixel = Compile(DxcShaderStage.Pixel, "PSGlow");
+      var glowDepth = DepthStencilDescription.Default with { DepthFunc = ComparisonFunction.LessEqual };
+      for (int k = 0; k < 4; k++)
+      {
+        var blend = BlendDescription.Opaque;
+        blend.RenderTarget[0] = blend.RenderTarget[0] with
+        {
+          BlendEnable = true,
+          SourceBlend = Blend.One, DestinationBlend = (k & 1) != 0 ? Blend.One : Blend.InverseSourceAlpha, BlendOperation = BlendOperation.Add,
+          SourceBlendAlpha = Blend.One, DestinationBlendAlpha = (k & 1) != 0 ? Blend.One : Blend.InverseSourceAlpha, BlendOperationAlpha = BlendOperation.Add,
+        };
+        var glowState = Pipeline((k & 2) != 0, blend, glowDepth, front, false);
+        glowState.VertexShader = (k & 2) != 0 ? glowSkinnedVertex : glowVertex;
+        glowState.PixelShader = glowPixel;
+        _glowPipelines[k] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(glowState);
+      }
+
+      // The lamps' coronas (DrawCoronas): no vertices, no depth, added onto the light's colour.
+      _coronaPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _rootSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSCorona"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSCorona"),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        RasterizerState = RasterizerDescription.CullNone,
+        BlendState = AddedLight(),
+        DepthStencilState = DepthStencilDescription.None,
+        RenderTargetFormats = new[] { targetFormat },
+        DepthStencilFormat = PanelSwapChainFormats.Depth,
+        SampleDescription = new SampleDescription(1, 0),
+      });
+      _solidDepthSlot = _textures.Reserve();
+      _coronaSlot = 0;
+      // The lamps' light volumes (DrawVolumes): the unit meshes as strips, both faces (their winding adds or takes off),
+      // no depth test, added onto the light's colour.
+      _volumePipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _rootSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSVolume"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSVolume"),
+        InputLayout = new InputLayoutDescription(new[] { new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0) }),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        RasterizerState = new RasterizerDescription(CullMode.None, FillMode.Solid) { FrontCounterClockwise = true },
+        BlendState = AddedLight(),
+        DepthStencilState = DepthStencilDescription.None,
+        RenderTargetFormats = new[] { targetFormat },
+        DepthStencilFormat = PanelSwapChainFormats.Depth,
+        SampleDescription = new SampleDescription(1, 0),
+      });
+      _fullDepthSlot = _textures.Reserve();
+      (_spotVolume, _spotVolumeCount, _spotVolumeScale) = VolumeBuffer(d3d, LightVolumeMesh(5, 4, true));
+      (_pointVolume, _pointVolumeCount, _pointVolumeScale) = VolumeBuffer(d3d, LightVolumeMesh(4, 8, false));
+
       // The water's mirror (DrawMirror, the page's reflection pass): into the light's format only, MirrorSamples samples
       // a pixel (the page's reflectionTarget), every face culled but those facing the camera - mirrored, the winding
       // turns round (the page's frontFace(CW) with cullFace(BACK), ModelView.html ~3677-3689); the solid ones opaque
@@ -1338,7 +1718,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(3, 0), ShaderVisibility.All),
-        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 5, 4, 0, 0)), ShaderVisibility.Pixel),
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 6, 4, 0, 0)), ShaderVisibility.Pixel),
       }));
       _lightPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
       {
@@ -1379,7 +1759,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       _lightsMapped = (byte*)lightsMapped;
       _gBufferRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
       // (The G-buffer's three, the lamps' shadow atlas, the sun's cascade work target: t4 to t8.)
-      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 5, DescriptorHeapFlags.ShaderVisible));
+      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 6, DescriptorHeapFlags.ShaderVisible));
 
       // The shadow atlas (t7, after the G-buffer's three) and its depth; the pipelines drawing into it.
       _shadowAtlas = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
@@ -1571,6 +1951,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         d3d.CreateShaderResourceView(_below, null, _textures.CpuHandle(_belowSlot));
       }
+      // The light's copy for the fog's depth effect (t9).
+      _lightCopy?.Dispose();
+      _lightCopy = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(_targetFormat, (uint)Math.Max(1, width), (uint)Math.Max(1, height), 1, 1),
+        ResourceStates.PixelShaderResource);
+      d3d.CreateShaderResourceView(_lightCopy, null, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() + 5 * (int)srvSize);
       _gWidth = width;
       _gHeight = height;
     }
@@ -1662,6 +2048,39 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
       return new PreparedModels(models);
     }
+
+    /// <summary>
+    /// The coronas' sprite (a texture blob as the models' are; GTA IV: coronas.wtd's "corona"), onto the GPU now (waited
+    /// for); null: none, no coronas drawn.
+    /// </summary>
+    public void SetCoronaSprite(byte[]? raw)
+    {
+      if (_coronaSlot != 0)
+      {
+        _device.WaitIdle();
+        _textures.Release(_coronaSlot);
+        _coronaSlot = 0;
+      }
+      if (raw == null)
+      {
+        return;
+      }
+      var d3d = _device.Device;
+      using var allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
+      using var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
+      var uploads = new List<ID3D12Resource>();
+      _coronaSlot = _textures.Acquire(raw, list, uploads, out _);
+      list.Close();
+      _device.Queue.ExecuteCommandList(list);
+      _device.WaitIdle();
+      foreach (var upload in uploads)
+      {
+        upload.Dispose();
+      }
+    }
+
+    /// <summary>The coronas left out (for comparisons).</summary>
+    public bool NoCoronas { get; set; }
 
     /// <summary>Prepared models drawn from now on (the drawing thread), in a group (see <see cref="RemoveGroup"/>); their numbers.</summary>
     public int[] Register(PreparedModels prepared, int group = 0)
@@ -1756,11 +2175,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         textures.Add(number);
         return number;
       }
+      // A model with dirt decals: all its decals drawn first (the page's dirtModel, CutsceneLocation.cs ~1332-1337).
+      bool dirtModel = source.Materials.Any(x => x.Decal && x.DirtMask != null);
       foreach (var mesh in source.Meshes)
       {
         materials.TryGetValue(mesh.Material, out var material);
-        // (A see-through glowing glass, gta_glass_emissive: the game draws only its glow - not yet.)
-        if (mesh.Indices.Length == 0 || material == null || material.Hidden || (material.Glass && material.EmissiveMultiplier != null))
+        // (A see-through glowing glass, gta_glass_emissive, as the page's: draw bucket 4 or 5 its glow alone (GlowApart),
+        // else lit as glass.)
+        if (mesh.Indices.Length == 0 || material == null || material.Hidden)
         {
           continue;
         }
@@ -1862,7 +2284,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           // The map's other see-through materials (the page's forwardMap): forward shine, culled, writing depth.
           if (pass == Pass.Blend && source.Baked && !source.Actor && !material.Vehicle && !material.Emissive)
           {
-            flags |= PartFlags.ForwardShine;
+            // (With the lamps the game hands such a forward draw: the page's forwardLit, ModelView.html ~3497-3508.)
+            flags |= PartFlags.ForwardShine | PartFlags.ForwardLit;
             pass = Pass.Glass;
             culled = true;
           }
@@ -1940,8 +2363,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         // and only solid (the see-through ones glow apart: not yet).
         bool baked = source.Baked && !material.Vehicle;
         bool glowing = material.EmissiveMultiplier != null && textured && pass != Pass.Blend && pass != Pass.Glass;
+        // A see-through one of draw bucket 4 or 5 (the page's mat.emissive, textured): its glow drawn apart, its lit draw
+        // (when there is one) by 1 - its alpha if gta_emissive (the page's glowOver uniform: not strong, not night).
+        bool glowApart = material.Emissive && textured && pass is Pass.Blend or Pass.Glass;
+        bool glowLit = glowApart && !material.EmissiveStrong && !material.EmissiveAtNight;
         int kind = (baked ? 1 : 0) | (material.Ped ? 2 : 0) | (material.Vehicle ? 4 : 0) | (material.Tree ? 8 : 0) |
-                   (glowing ? 16 : 0) | (material.EmissiveAtNight ? 32 : 0) | (material.EmissiveStrong ? 64 : 0);
+                   (glowing ? 16 : 0) | (material.EmissiveAtNight ? 32 : 0) | (material.EmissiveStrong ? 64 : 0) | (glowLit ? 128 : 0);
         parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout, dirt, tint)
         {
           Kind = kind,
@@ -1953,6 +2380,13 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           SeeThrough = material.Glass || (material.Blend && textured),
           AlphaShadow = material.ShadowByAlpha,
           Layered = layerUvs && material.LayerCount > 1,
+          DirtFirst = pass == Pass.Decal && (material.DirtMask != null || (material.Decal && source.Baked && !source.Actor && dirtModel)),
+          GlowApart = glowApart,
+          GlowMultiplier = material.EmissiveMultiplier ?? 0,
+          GlowNight = material.EmissiveAtNight,
+          GlowStrong = material.EmissiveStrong,
+          GlowGlass = material.Glass,
+          GlowBlend = material.Blend,
           Center = count > 0 ? (meshMin + meshMax) * 0.5f : Vector3.Zero,
           Radius = count > 0 ? (meshMax - meshMin).Length() * 0.5f : float.PositiveInfinity,
         });
@@ -2081,7 +2515,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light,
-                            Action<ID3D12GraphicsCommandList>? afterSolid = null, IReadOnlyList<DeferredLight>? lights = null)
+                            Action<ID3D12GraphicsCommandList>? afterSolid = null, IReadOnlyList<DeferredLight>? lights = null,
+                            ID3D12Resource? lightTexture = null, IReadOnlyList<Corona>? coronas = null, ID3D12Resource? depthTexture = null,
+                            IReadOnlyList<LightVolume>? volumes = null)
     {
       list.OMSetRenderTargets(renderTarget, depth);
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
@@ -2139,6 +2575,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       Put(32, light.AmbientBelow);
       frame[36] = light.DayNight;
       frame[37] = light.Exposure;
+      _dayNight = light.DayNight;
+      _exposure = light.Exposure;
       frame[38] = light.PedAoScale;
       frame[39] = light.AoScale;
       frame[40] = width;
@@ -2173,6 +2611,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           *(Vector4*)(frame + 80 + k * 4) = sun.Boxes[k];
         }
       }
+      // The fog's depth effect (the solid scene's only with the light's copy: Screen.w).
+      bool depthFx = light.Fog && !NoFog && !NoDepthFx && light.DepthFx.W > light.DepthFx.Z;
+      *(Vector4*)(frame + 96) = depthFx ? light.DepthFx : Vector4.Zero;
+      frame[43] = depthFx && lightTexture != null && _lightCopy != null ? 1 : 0;
 
       ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
 
@@ -2204,6 +2646,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.SetDescriptorHeaps(_textures.Heap);
         list.SetGraphicsRootConstantBufferView(3, frameAddress);
         list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+        list.SetGraphicsRootShaderResourceView(5, _lights.GPUVirtualAddress + (ulong)((long)_paletteSlot * LightCapacity * LightBytes));
         list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
       Bind(true);
@@ -2224,15 +2667,253 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         DrawLights(list, renderTarget, depth, width, height, lights, frameAddress);
       }
+      // How many lights the map's see-through materials lit forward read (written before the list runs).
+      frame[59] = NoForwardLamps ? 0 : LightsDrawn;
       // The fog over all of it (the see-through materials and the water take theirs as they are drawn).
       if (light.Fog && !NoFog)
       {
+        // (The light as it is now, for the depth effect.)
+        if (frame[43] > 0.5f)
+        {
+          list.ResourceBarrierTransition(lightTexture!, ResourceStates.RenderTarget, ResourceStates.CopySource);
+          list.ResourceBarrierTransition(_lightCopy!, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
+          list.CopyResource(_lightCopy, lightTexture);
+          list.ResourceBarrierTransition(_lightCopy!, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+          list.ResourceBarrierTransition(lightTexture!, ResourceStates.CopySource, ResourceStates.RenderTarget);
+        }
         DrawFog(list, renderTarget, depth, width, height, frameAddress);
+      }
+      // The solid scene's depth for the coronas (the page's gameKeepSolidDepth, before the water and the glass).
+      bool coronasOn = coronas != null && coronas.Count > 0 && _coronaSlot != 0 && depthTexture != null && !NoCoronas;      if (coronasOn)
+      {
+        KeepSolidDepth(list, depthTexture!, width, height);
       }
       // What goes between the solid scene and the see-through materials (the water), with its own states.
       afterSolid?.Invoke(list);
       Bind(false);
       DrawPass(list, Pass.Blend);
+      // After the scene, as the page's gamePostEnd (gtaiv-pc.js ~1504-1507): the lamps' light volumes against the whole
+      // depth, then the coronas.
+      if (volumes != null && volumes.Count > 0 && depthTexture != null && !NoVolumes)
+      {
+        CopyDepth(list, depthTexture, width, height, ref _fullDepth, ref _fullDepthWidth, ref _fullDepthHeight, _fullDepthSlot);
+        DrawVolumes(list, volumes, eye);
+      }
+      if (coronasOn)
+      {
+        DrawCoronas(list, coronas!, viewProjection);
+      }
+    }
+
+    // The depth (D32, DEPTH_WRITE) copied into _solidDepth (read as R32F by its number in the texture heap).
+    private void KeepSolidDepth(ID3D12GraphicsCommandList list, ID3D12Resource depth, int width, int height) =>
+      CopyDepth(list, depth, width, height, ref _solidDepth, ref _solidDepthWidth, ref _solidDepthHeight, _solidDepthSlot);
+
+    // The depth (D32, DEPTH_WRITE) copied into a copy of its own (made at the size; read as R32F by slot).
+    private void CopyDepth(ID3D12GraphicsCommandList list, ID3D12Resource depth, int width, int height,
+                           ref ID3D12Resource? copy, ref int copyWidth, ref int copyHeight, int slot)
+    {
+      var d3d = _device.Device;
+      if (copy == null || copyWidth != width || copyHeight != height)
+      {
+        if (copy != null)
+        {
+          _device.WaitIdle();
+          copy.Dispose();
+        }
+        copy = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+          ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+          ResourceStates.CopyDest, new ClearValue(Format.D32_Float, 1.0f, 0));
+        copyWidth = width;
+        copyHeight = height;
+        d3d.CreateShaderResourceView(copy, new ShaderResourceViewDescription
+        {
+          Format = Format.R32_Float,
+          ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+          Shader4ComponentMapping = ShaderComponentMapping.Default,
+          Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+        }, _textures.CpuHandle(slot));
+      }
+      else
+      {
+        list.ResourceBarrierTransition(copy, ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource, ResourceStates.CopyDest);
+      }
+      list.ResourceBarrierTransition(depth, ResourceStates.DepthWrite, ResourceStates.CopySource);
+      list.CopyResource(copy, depth);
+      list.ResourceBarrierTransition(depth, ResourceStates.CopySource, ResourceStates.DepthWrite);
+      list.ResourceBarrierTransition(copy, ResourceStates.CopyDest, ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource);
+    }
+
+    // The light volumes' unit meshes as GTAIV.exe makes them at its start (the page's gameLightVolumeMesh, gtaiv-pc.js
+    // ~1563-1595; 0xABE3A0): a spot's (n 5, its lower four eighths, a fan at its rim), a point lamp's (n 4, all eight) as
+    // triangle strips; and c213 (gDeferredVolumeRadiusScale) from n.
+    private static (float[] Data, float Scale) LightVolumeMesh(int n, int eighths, bool fan)
+    {
+      var output = new List<float>();
+      void Push(Vector3 p)
+      {
+        output.Add(p.X);
+        output.Add(p.Y);
+        output.Add(p.Z);
+      }
+      for (int b = 0; b < eighths; b++)
+      {
+        int lx = (b & 1) != 0 ? 1 : -1, ly = (b & 2) != 0 ? 1 : -1, z = (b & 4) != 0 ? 1 : -1;
+        int u = lx == ly ? 1 : 0;
+        if (z < 0)
+        {
+          u = 1 - u;
+        }
+        var a = u == 1 ? new Vector3(lx, 0, 0) : new Vector3(0, ly, 0);
+        var bb = u == 1 ? new Vector3(0, ly, 0) : new Vector3(lx, 0, 0);
+        Vector3 Side(Vector3 p, float t) => new Vector3(p.X - p.X * t, p.Y - p.Y * t, p.Z + (z - p.Z) * t);
+        for (int k = 0; k < n; k++)
+        {
+          int m = n - k;
+          Vector3 p0 = Side(a, k / (float)n), q0 = Side(bb, k / (float)n), p1 = Side(a, (k + 1) / (float)n), q1 = Side(bb, (k + 1) / (float)n);
+          if (fan && k == 0)
+          {
+            for (int j = 0; j < m; j++)
+            {
+              if (j == 0)
+              {
+                Push(Vector3.Zero);
+              }
+              Push(Vector3.Zero);
+              Push(Vector3.Lerp(p0, q0, j / (float)m));
+              if (j == m - 1)
+              {
+                Push(q0);
+                Push(q0);
+                Push(q0);
+              }
+            }
+          }
+          for (int j = 0; j < m; j++)
+          {
+            var p = Vector3.Lerp(p0, q0, j / (float)m);
+            if (j == 0)
+            {
+              Push(p);
+            }
+            Push(p);
+            Push(Vector3.Lerp(p1, q1, m > 1 ? j / (float)(m - 1) : j / (float)m));
+            if (j == m - 1)
+            {
+              Push(q0);
+              Push(q0);
+              Push(q0);
+            }
+          }
+        }
+      }
+      double an = Math.PI / 2 / n, c = (2 * Math.Cos(an) + 1) / 3, s = Math.Sin(an) / 3;
+      return (output.ToArray(), (float)(1 / (c * c + 2 * s * s)));
+    }
+
+    // A unit mesh into an upload-heap vertex buffer (small, read in place): the buffer, its vertex count, its scale.
+    private static unsafe (ID3D12Resource, int, float) VolumeBuffer(ID3D12Device d3d, (float[] Data, float Scale) mesh)
+    {
+      var buffer = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
+                                               ResourceDescription.Buffer((ulong)mesh.Data.Length * 4), ResourceStates.GenericRead);
+      void* mapped;
+      buffer.Map(0, null, &mapped);
+      fixed (float* source = mesh.Data)
+      {
+        Buffer.MemoryCopy(source, mapped, mesh.Data.Length * 4L, mesh.Data.Length * 4L);
+      }
+      buffer.Unmap(0);
+      return (buffer, mesh.Data.Length / 3, mesh.Scale);
+    }
+
+    /// <summary>
+    /// The light volumes' lookup texture (a texture blob; GTA IV: lights_occluders.wtd's "volume"), onto the GPU now;
+    /// null: none (the volumes that need it aren't drawn: CutsceneLights.VolumesNow's hasLookup).
+    /// </summary>
+    public void SetVolumeLookup(byte[]? raw)
+    {
+      if (_volumeLookupSlot != 0)
+      {
+        _device.WaitIdle();
+        _textures.Release(_volumeLookupSlot);
+        _volumeLookupSlot = 0;
+      }
+      if (raw == null)
+      {
+        return;
+      }
+      var d3d = _device.Device;
+      using var allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
+      using var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
+      var uploads = new List<ID3D12Resource>();
+      _volumeLookupSlot = _textures.Acquire(raw, list, uploads, out _);
+      list.Close();
+      _device.Queue.ExecuteCommandList(list);
+      _device.WaitIdle();
+      foreach (var upload in uploads)
+      {
+        upload.Dispose();
+      }
+    }
+
+    /// <summary>The light volumes left out (for comparisons).</summary>
+    public bool NoVolumes { get; set; }
+
+    // The lamps' light volumes over the light (see VSVolume), the light target and the frame's constants bound.
+    private unsafe void DrawVolumes(ID3D12GraphicsCommandList list, IReadOnlyList<LightVolume> volumes, Vector3 eye)
+    {
+      list.SetPipelineState(_volumePipeline);
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+      var draw = stackalloc float[DrawConstants];
+      new Span<float>(draw, DrawConstants).Clear();
+      draw[32] = _fullDepthSlot;
+      draw[33] = _volumeLookupSlot;
+      foreach (var v in volumes)
+      {
+        bool spot = v.Cone > 0;
+        float scale = spot ? _spotVolumeScale : _pointVolumeScale;
+        var buffer = spot ? _spotVolume : _pointVolume;
+        int count = spot ? _spotVolumeCount : _pointVolumeCount;
+        draw[0] = v.At.X; draw[1] = v.At.Y; draw[2] = v.At.Z; draw[3] = v.Cone;
+        draw[4] = v.Direction.X; draw[5] = v.Direction.Y; draw[6] = v.Direction.Z; draw[7] = scale;
+        draw[8] = v.Across.X; draw[9] = v.Across.Y; draw[10] = v.Across.Z; draw[11] = scale * v.Radius * 0.662f;
+        var fromLamp = eye - v.At;
+        draw[12] = fromLamp.X; draw[13] = fromLamp.Y; draw[14] = fromLamp.Z; draw[15] = v.Radius;
+        draw[28] = v.Color.X * _exposure; draw[29] = v.Color.Y * _exposure; draw[30] = v.Color.Z * _exposure;
+        draw[31] = v.Lookup ? 1 : 0;
+        list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+        list.IASetVertexBuffers(0, new VertexBufferView(buffer.GPUVirtualAddress, (uint)count * 12, 12));
+        list.DrawInstanced((uint)count, 1, 0, 0);
+        DrawCalls++;
+      }
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+    }
+
+    // The coronas over the light (see VSCorona), the light target and the frame's constants bound (Bind).
+    private unsafe void DrawCoronas(ID3D12GraphicsCommandList list, IReadOnlyList<Corona> coronas, Matrix4x4 viewProjection)
+    {
+      // The camera's right, up and forward from the view-projection's columns (LookAt x perspective).
+      var right = Vector3.Normalize(new Vector3(viewProjection.M11, viewProjection.M21, viewProjection.M31));
+      var up = Vector3.Normalize(new Vector3(viewProjection.M12, viewProjection.M22, viewProjection.M32));
+      var forward = Vector3.Normalize(new Vector3(viewProjection.M14, viewProjection.M24, viewProjection.M34));
+      list.SetPipelineState(_coronaPipeline);
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      var draw = stackalloc float[DrawConstants];
+      new Span<float>(draw, DrawConstants).Clear();
+      draw[0] = right.X; draw[1] = right.Y; draw[2] = right.Z;
+      draw[4] = up.X; draw[5] = up.Y; draw[6] = up.Z;
+      draw[8] = forward.X; draw[9] = forward.Y; draw[10] = forward.Z;
+      draw[32] = _coronaSlot;
+      draw[33] = _solidDepthSlot;
+      foreach (var c in coronas)
+      {
+        draw[24] = c.At.X; draw[25] = c.At.Y; draw[26] = c.At.Z;
+        draw[28] = c.Color.X * _exposure; draw[29] = c.Color.Y * _exposure; draw[30] = c.Color.Z * _exposure;
+        draw[31] = c.Size;
+        list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+        list.DrawInstanced(6, 1, 0, 0);
+        DrawCalls++;
+      }
     }
 
     // The shadow maps of the lights that have a slot (each slot's first; see DeferredLight.ShadowSlot): the atlas cleared
@@ -2560,6 +3241,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     /// <summary>The fog left out (FrameLight.Fog ignored; for comparisons).</summary>
     public bool NoFog { get; set; }
 
+    /// <summary>The lamps on the map's see-through materials drawn forward left out (for comparisons).</summary>
+    public bool NoForwardLamps { get; set; }
+
+    /// <summary>The fog's depth effect left out (FrameLight.DepthFx ignored; for comparisons).</summary>
+    public bool NoDepthFx { get; set; }
+
     // The fog over the solid scene: a triangle over the screen reading the G-buffer's places (see PSFog).
     private void DrawFog(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
                          int width, int height, ulong frameAddress)
@@ -2590,9 +3277,18 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     {
       int lastPipeline = -1;
       var draw = stackalloc float[DrawConstants];
+      // The decals and the see-through parts in the page's order (ModelView.html ~3352-3380): first the dirt decals (and
+      // the decals of a location model with dirt, dirtFirst) or the glowing see-through parts (glowFirst: gta_emissive*
+      // of bucket 4/5, see-through, in a room with a multiplier over 0, outside gta_emissivenight), then the rest, each
+      // in instance order.
+      bool ordered = pass is Pass.Decal or Pass.Blend;
+      static bool First(Part p, Instance i, Pass pass) => pass == Pass.Decal ? p.DirtFirst
+        : p.GlowApart && p.GlowBlend && (i.InRoom ? p.GlowMultiplier > 0 : p.GlowNight);
+      for (int sweep = ordered ? 0 : 1; sweep < 2; sweep++)
       foreach (var instance in _instances)
       {
-        if (instance == null || !instance.Visible || !instance.MainView || _models[instance.Model] is not Model model || !model.Parts.Any(p => Drawn(p.Pass, pass)))
+        if (instance == null || !instance.Visible || !instance.MainView || _models[instance.Model] is not Model model ||
+            !model.Parts.Any(p => Drawn(p.Pass, pass) && (!ordered || First(p, instance, pass) == (sweep == 0))))
         {
           continue;
         }
@@ -2615,15 +3311,22 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.SetGraphicsRoot32BitConstants(0, 20, draw, 0);
         foreach (var part in model.Parts)
         {
-          if (!Drawn(part.Pass, pass))
+          if (!Drawn(part.Pass, pass) || (ordered && First(part, instance, pass) != (sweep == 0)))
           {
             continue;
           }
           int pipeline = Pipe(skinned, part.Pass, part.Culled);
-          if (pipeline != lastPipeline)
+          // A glowing see-through part (the page's ModelView.html ~3622-3646, ~3707-3734): its glow, whether drawn apart
+          // and whether its lit draw is left out (in a room, a see-through gta_emissivenight, a glowing glass).
+          float glow = 0;
+          bool apart = false, litDrawn = true;
+          if (part.GlowApart)
           {
-            list.SetPipelineState(_pipelines[pipeline]);
-            lastPipeline = pipeline;
+            glow = part.GlowMultiplier * _exposure * (part.GlowNight && !instance.InRoom ? 1 - _dayNight : 1);
+            bool nightGlass = part.GlowNight && part.GlowBlend;
+            bool glowGlass = !part.GlowNight && (part.GlowGlass || (part.GlowStrong && part.GlowBlend));
+            apart = (glow > 0 || nightGlass) && (part.GlowBlend || glowGlass);
+            litDrawn = !(apart && (instance.InRoom || nightGlass || glowGlass));
           }
           var mask = part.DirtMask ?? Vector3.Zero;
           draw[20] = part.Cutout ? 1 : 0;
@@ -2642,12 +3345,35 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           draw[33] = 0;
           draw[34] = 0;
           draw[35] = 0;
-          list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
-          list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-          DrawCalls++;
+          if (litDrawn)
+          {
+            if (pipeline != lastPipeline)
+            {
+              list.SetPipelineState(_pipelines[pipeline]);
+              lastPipeline = pipeline;
+            }
+            list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
+            list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+            DrawCalls++;
+          }
+          if (apart && !NoGlow)
+          {
+            // gta_emissive's glow laid over (ONE / INVSRCALPHA), the others' added (ONE / ONE).
+            bool over = !part.GlowStrong && !part.GlowNight && !part.GlowGlass;
+            list.SetPipelineState(_glowPipelines[(skinned ? 2 : 0) + (over ? 0 : 1)]);
+            lastPipeline = -1;
+            draw[23] = glow;
+            draw[33] = part.GlowStrong ? 0.0004f : -0.0004f;
+            list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
+            list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+            DrawCalls++;
+          }
         }
       }
     }
+
+    /// <summary>The see-through parts' glows drawn apart left out (for comparisons).</summary>
+    public bool NoGlow { get; set; }
 
     /// <summary>
     /// The instances marked <c>mirrored</c> drawn into the water's mirror (the page's reflection pass, ModelView.html
@@ -2759,7 +3485,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     public void Dispose()
     {
       Clear();
-      foreach (var p in _mirrorPipelines)
+      foreach (var p in _mirrorPipelines.Concat(_glowPipelines))
       {
         p?.Dispose();
       }
@@ -2775,6 +3501,13 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         g?.Dispose();
       }
       _below?.Dispose();
+      _lightCopy?.Dispose();
+      _solidDepth?.Dispose();
+      _fullDepth?.Dispose();
+      _coronaPipeline.Dispose();
+      _volumePipeline.Dispose();
+      _spotVolume.Dispose();
+      _pointVolume.Dispose();
       _noExtras.Dispose();
       _gBufferRtvs.Dispose();
       _gBufferSrvs.Dispose();

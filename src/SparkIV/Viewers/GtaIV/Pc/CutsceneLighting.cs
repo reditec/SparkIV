@@ -253,9 +253,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The fog (#112, the page's gameFog with TimeCycle.Message's fog): globalFogColorN = the modifier's near fog colour
       // or the sky bottom x SkyLightMult; globalFogColor = (SkyColor + AzimuthStrength x AzimuthColor) x SkyLightMult
       // (the page's farFogLight; without the sky's columns its haze's colour, here the near colour); FogStart; FarClip;
-      // NearFogAmount - all in the light's units (x Exposure). Not yet: the same pass's depth effect (gDepthFxParams,
-      // the page's depthFx: from 16 m on outside).
+      // NearFogAmount - all in the light's units (x Exposure); the same pass's depth effect before it (gDepthFxParams,
+      // the page's depthFx, gtaiv-pc.js ~304-311 and ~994: TimeCycle columns 48, 50, 51, 52).
       Fog = true,
+      DepthFx = c.DepthFx,
       FogNear = (c.NearFogColor ?? c.SkyBottom * c.SkyLightMultiplier) * c.Exposure,
       FogFar = (c.SkyColor == Vector3.Zero ? c.NearFogColor ?? c.SkyBottom * c.SkyLightMultiplier
                                            : (c.SkyColor + c.AzimuthStrength * c.AzimuthColor) * c.SkyLightMultiplier) * c.Exposure,
