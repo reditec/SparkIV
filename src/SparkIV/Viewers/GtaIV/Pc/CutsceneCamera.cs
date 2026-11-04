@@ -36,14 +36,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private readonly float[] _positions;
     private readonly float[] _rotations;
     private readonly float[]? _fov;
+    private readonly float[]? _dof;
 
-    private CutsceneCamera(int frames, float fps, float[] positions, float[] rotations, float[]? fov)
+    private CutsceneCamera(int frames, float fps, float[] positions, float[] rotations, float[]? fov, float[]? dof)
     {
       Frames = frames;
       FramesPerSecond = fps;
       _positions = positions;
       _rotations = rotations;
       _fov = fov;
+      _dof = dof;
     }
 
     public int Frames { get; }
@@ -55,13 +57,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var position = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraPosition && t.IsDecoded);
       var rotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraRotation && t.IsDecoded);
       var fov = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraFov && t.IsDecoded);
+      // The depth of field (#112 4h): near and far in metres and a third value, 0, per frame (as CutsceneMessages.Section's dof).
+      var dof = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraDof && t.IsDecoded);
       if (position == null || rotation == null)
       {
         return null;
       }
       int frames = Math.Max(1, clip.FrameCount);
       return new CutsceneCamera(frames, CutsceneMessages.FramesPerSecond(clip), Sample(clip, position, 3, frames),
-                                Sample(clip, rotation, 4, frames), fov == null ? null : Sample(clip, fov, 1, frames));
+                                Sample(clip, rotation, 4, frames), fov == null ? null : Sample(clip, fov, 1, frames),
+                                dof == null ? null : Sample(clip, dof, 3, frames));
     }
 
     private static float[] Sample(Animation clip, AnimationTrack track, int components, int frames)
@@ -103,6 +108,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       float degrees = _fov != null ? _fov[Math.Min(whole, _fov.Length - 1)] : 45;
       return (eye, Vector3.Normalize(Vector3.Transform(Vector3.UnitY, q)), Vector3.Normalize(Vector3.Transform(Vector3.UnitZ, q)),
               Math.Clamp(degrees, 1, 170) * MathF.PI / 180);
+    }
+
+    /// <summary>
+    /// The camera's depth of field at a frame of its clip (the page's filmCameraNow's dof): sharp from Near to Far
+    /// (metres from the camera), blurred nearer and beyond (GTAIV.exe's DOF_PARAMS, FUN_005E16F0); null without the track.
+    /// </summary>
+    public (float Near, float Far)? DofAt(double frame)
+    {
+      if (_dof == null || _dof.Length < 3)
+      {
+        return null;
+      }
+      int whole = (int)Math.Floor(Math.Clamp(frame, 0, Frames - 1) + 1e-6);
+      int at = Math.Min(whole, _dof.Length / 3 - 1) * 3;
+      return (_dof[at], _dof[at + 1]);
     }
 
     private Vector3 Position(int frame)

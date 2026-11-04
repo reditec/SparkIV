@@ -1092,7 +1092,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // (Made ahead on another thread as a rule; else now.)
         var (motions, camera) = NativeSectionOf(index).GetAwaiter().GetResult();
         _player.SetSection(motions, camera, _fps, _frames, _frame, play, s_camera && camera != null,
-                           CutsceneLights.TracksOf(_document.Cut.Sections[index], _document.Sections[index]));
+                           CutsceneLights.TracksOf(_document.Cut.Sections[index], _document.Sections[index]),
+                           CutsceneMessages.FadeOf(_document.Cut, index, _frames, _fps));
       }
       ShowFrame();
       PrepareNextSection();

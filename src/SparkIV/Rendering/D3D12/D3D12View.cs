@@ -66,6 +66,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
   {
     /// <summary>The lights added over the solid scene (lamps, a cutscene's own; see <see cref="DeferredLight"/>), or null.</summary>
     public System.Collections.Generic.IReadOnlyList<DeferredLight>? Lights { get; init; }
+
+    /// <summary>The frame's depth of field and fade (#112 step 4h); none by default.</summary>
+    public PostParams Post { get; init; }
   }
 
   /// <summary>
@@ -193,7 +196,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
           {
             _lastMeasure = now;
           }
-          _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone);
+          _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
           ulong mark = _swapChain.End();
           if (measured)
           {

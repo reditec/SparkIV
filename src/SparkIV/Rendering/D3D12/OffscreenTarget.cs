@@ -72,6 +72,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12GraphicsCommandList CommandList { get; }
     public CpuDescriptorHandle RenderTargetView => _rtvHeap.GetCPUDescriptorHandleForHeapStart();
     public CpuDescriptorHandle DepthView => _dsvHeap.GetCPUDescriptorHandleForHeapStart();
+    /// <summary>The depth buffer itself (in DepthWrite between draws; the post effects read it).</summary>
+    public ID3D12Resource DepthBuffer => _depth;
 
     /// <summary>Opens the command list for a frame.</summary>
     public ID3D12GraphicsCommandList Begin()

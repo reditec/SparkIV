@@ -819,14 +819,45 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public static object Fade(CutFile cut, int index, int frames, float fps)
     {
-      var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
+      var f = FadeOf(cut, index, frames, fps);
       return new
       {
         type = "fade",
-        inEnd = index == 0 ? cut.FadeIn * fps : 0,
-        outStart,
-        outEnd = outStart < 0 ? -1 : outStart + cut.FadeOutLength * fps,
+        inEnd = f.InEnd,
+        outStart = f.OutStart,
+        outEnd = f.OutEnd,
       };
+    }
+
+    /// <summary>A section's fades in its frames (see <see cref="Fade"/>), for the native renderer (#112 4h).</summary>
+    public static SectionFade FadeOf(CutFile cut, int index, int frames, float fps)
+    {
+      var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
+      return new SectionFade(index == 0 ? cut.FadeIn * fps : 0, outStart, outStart < 0 ? -1 : outStart + cut.FadeOutLength * fps);
+    }
+
+    /// <summary>
+    /// A section's fades (frames of the section): from black until InEnd (0: none), to black from OutStart to OutEnd
+    /// (OutStart -1: none).
+    /// </summary>
+    public readonly record struct SectionFade(float InEnd, float OutStart, float OutEnd)
+    {
+      public static SectionFade None => new SectionFade(0, -1, -1);
+
+      /// <summary>How dark the picture is at a frame (0 not, 1 black), as the page's showFade.</summary>
+      public float At(double frame)
+      {
+        double dark = 0;
+        if (InEnd > 0 && frame < InEnd)
+        {
+          dark = 1 - frame / InEnd;
+        }
+        if (OutStart >= 0 && frame > OutStart)
+        {
+          dark = Math.Max(dark, Math.Min(1, (frame - OutStart) / Math.Max(1, OutEnd - OutStart)));
+        }
+        return (float)dark;
+      }
     }
 
     /// <summary>

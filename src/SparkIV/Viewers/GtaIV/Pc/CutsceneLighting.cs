@@ -134,6 +134,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       AdaptedLumMin = c.AdaptedLumMin,
       AdaptedLumMax = c.AdaptedLumMax,
       AdaptTime = c.AdaptTime,
+      // #112 4h, as the page's tone (TimeCycle.Message): ToneMapParams.z = IntensityBloom (column 38) x 0.5, the
+      // bright pass (column 36), and the film grain NoiseParams.z = column 10 / 64 (TLAD only), x Exposure as the
+      // light here is the game's x Exposure.
+      Bloom = c.Bloom * 0.5f,
+      BrightPass = c.BrightPass,
+      Grain = c.Noise / 64f * c.Exposure,
     };
 
     /// <summary>

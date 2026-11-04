@@ -177,6 +177,17 @@ solid parts (instances added with `castsShadow`; the location casts none), sampl
 four rotated taps (its GL rows and pixel y turned over, so the reads are the page's). Other shadow lamps stay fully
 lit. Not yet: the lamps' shine, light volumes' visible cones and coronas.
 
+### Post effects (step 4h)
+
+`ToneMapper.Composite` now does the page's whole composite (gtaiv-pc.js `gamePostEnd`): the quarter copy, made once a
+frame (also when no measure is taken), is blurred across and down (the page's blur passes) into the bloom, added above
+the bright pass (`ToneParams.Bloom` = IntensityBloom x 0.5, `BrightPass`); the depth of field reads the depth buffer
+(`OffscreenTarget.DepthBuffer`, `PanelSwapChain.DepthBuffer`) with the cutscene camera's CameraDof track
+(`CutsceneCamera.DofAt`, near and far per frame), the four rotated reads in Direct3D's texture space; TLAD's film grain
+(`ToneParams.Grain` = column 10 / 64 x Exposure) from a 1024 x 1024 texture of random bytes (fixed seed); the fade to
+black (`CutsceneMessages.SectionFade`, only through the cutscene's camera) last. The frame's DOF and fade come in
+`PostParams` (`SceneView.Post` in the app). Not yet: the lamps' coronas and visible light volumes.
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

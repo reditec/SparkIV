@@ -102,6 +102,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12Resource BackBuffer => _buffers[BufferIndex]!;
     public CpuDescriptorHandle RenderTargetView => _rtvHeap.GetCPUDescriptorHandleForHeapStart() + BufferIndex * (int)_rtvSize;
     public CpuDescriptorHandle DepthView => _dsvHeap.GetCPUDescriptorHandleForHeapStart();
+    /// <summary>The depth buffer itself (in DepthWrite between draws; the post effects read it).</summary>
+    public ID3D12Resource? DepthBuffer => _depth;
 
     /// <summary>The panel's composition scale (DPI): the buffers have the size in pixels, shown at 1 / scale.</summary>
     public void SetScale(float scaleX, float scaleY)

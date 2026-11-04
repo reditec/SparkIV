@@ -117,11 +117,35 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public float AdaptedLumMin;
     public float AdaptedLumMax;
     public float AdaptTime;
+    /// <summary>
+    /// The bloom's strength (step 4h; the page's tone.bloom): what of the blurred quarter copy lies above
+    /// <see cref="BrightPass"/> (in the picture's units) is added x this x 0.25. 0: none.
+    /// </summary>
+    public float Bloom;
+    /// <summary>The bloom's threshold in the picture's units (after the scale MidGrey / adapted).</summary>
+    public float BrightPass;
+    /// <summary>The film grain's strength in the light's units (0: none): the grain texture's blue - 0.5, x this x 1.1.</summary>
+    public float Grain;
 
     /// <summary>No tone mapping to speak of (scale 1 for a luminance of 1).</summary>
     public static ToneParams Plain => new ToneParams
     {
       MidGrey = 1, Saturation = 1, ColorCorrect = new Vector3(0.5f), Gamma = 1, AdaptedLumMin = 1, AdaptedLumMax = 1,
     };
+  }
+
+  /// <summary>
+  /// The post effects of a frame besides the tone mapping (#112 step 4h): the depth of field (sharp between
+  /// <see cref="FocusNear"/> and <see cref="FocusFar"/>, metres from the camera, fully blurred half a metre nearer or
+  /// beyond; the depth read through the projection's <see cref="NearClip"/> and <see cref="FarClip"/>) and a fade to
+  /// black (0 none, 1 black).
+  /// </summary>
+  public struct PostParams
+  {
+    public bool DepthOfField;
+    public float NearClip, FarClip, FocusNear, FocusFar;
+    public float Fade;
+
+    public static PostParams None => default;
   }
 }

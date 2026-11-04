@@ -165,6 +165,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private bool _useCamera = true;
     private float _fps = 30;
     private int _frames = 1;
+    private CutsceneMessages.SectionFade _fade = CutsceneMessages.SectionFade.None;
     private double _time;
     private bool _playing;
     private double _last;
@@ -378,7 +379,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// not; through the camera or not; its own lights (CutsceneLights.TracksOf).
     /// </summary>
     public void SetSection(IReadOnlyList<CutsceneMessages.CastMotion> motions, CutsceneCamera? camera, float fps, int frames,
-                           int frame, bool play, bool useCamera, List<CutsceneLights.CutLight>? lights = null)
+                           int frame, bool play, bool useCamera, List<CutsceneLights.CutLight>? lights = null,
+                           CutsceneMessages.SectionFade? fade = null)
     {
       var poses = motions.ToDictionary(m => m.Actor, m => new CutscenePose(m));
       Order(() =>
@@ -387,6 +389,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _cutLights = lights ?? new List<CutsceneLights.CutLight>();
         _camera = camera;
         _useCamera = useCamera;
+        _fade = fade ?? CutsceneMessages.SectionFade.None;
         _fps = fps > 0 ? fps : 30;
         _frames = Math.Max(1, frames);
         _time = Math.Clamp(frame, 0, _frames - 1) / _fps;
@@ -509,6 +512,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       float aspect = width / (float)Math.Max(1, height);
       Matrix4x4 viewProjection;
       Vector3 eyeAt, toLight;
+      var post = PostParams.None;
       if (_useCamera && _camera != null)
       {
         var (eye, forward, up, fov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
@@ -516,6 +520,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         viewProjection = Matrix4x4.CreateLookAt(eye, eye + forward, up) * Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 0.1f, _far);
         eyeAt = eye;
         toLight = -forward + up * 0.55f - right * 0.35f;
+        // #112 4h: the camera's depth of field and the cutscene's fades, only through its camera (as the page).
+        var dof = _camera.DofAt(frame / _fps * _camera.FramesPerSecond);
+        post = new PostParams
+        {
+          DepthOfField = dof != null,
+          NearClip = 0.1f,
+          FarClip = _far,
+          FocusNear = dof?.Near ?? 0,
+          FocusFar = dof?.Far ?? 0,
+          Fade = _fade.At(frame),
+        };
       }
       else
       {
@@ -536,7 +551,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         lamps.SetSection(_cutLights);
         lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values);
       }
-      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights };
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Post = post };
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).
