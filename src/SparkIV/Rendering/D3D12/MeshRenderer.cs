@@ -122,7 +122,7 @@ struct Frame
   float4 Params2;  // x: the sun's share in the shine (gDirectionalLight.w)
   float4 FogNear;  // rgb: the near fog's colour (light), w: FogStart
   float4 FogFar;   // rgb: the far fog's colour (light), w: where it ends (FarClip)
-  float4 FogParams;// x: NearFogAmount, y: fog on (1)
+  float4 FogParams;// x: NearFogAmount, y: fog on (1), z: how far the camera sees (depth along the view; 0: no limit)
   // The sun's shadow (see SunShadow, FrameLight.SunShadow): the light's axes u and v across (U.w: the fade's scale), h
   // towards the sun (w: the heights' reference), the view's forward (w: the map's texture number, 0: no shadow), the
   // depths along it from which the next cascade is read (w: no shadow from this distance), each cascade's box.
@@ -428,6 +428,11 @@ float3 LitBy(float3 n, float ao, float sunShadow)
 // deferred: the solid pass and the decals (G-buffer); else the see-through pass (forward, blended).
 PsOut Shade(VsOut input, bool deferred)
 {
+  // Beyond the camera's reach nothing (the page's drawReach: the depth along the view, here the clip w).
+  if (f.FogParams.z > 0 && input.position.w > f.FogParams.z)
+  {
+    discard;
+  }
   PartData p = Parts[(uint)d.Part.x];
   uint bits = p.Bits.x;
   uint kind = (uint)(d.Material.z + 0.5);
@@ -2017,7 +2022,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       Put(52, light.FogFar, light.FogEnd);
       frame[56] = light.FogNearAmount;
       frame[57] = light.Fog && !NoFog ? 1 : 0;
-      frame[58] = 0;
+      frame[58] = light.DrawReach > 0 && float.IsFinite(light.DrawReach) ? light.DrawReach : 0;
       frame[59] = 0;
       // The sun's shadow (FrameLight.SunShadow): its axes, cascades and fade; the map's number once drawn (below).
       var sun = light.SunShadow;

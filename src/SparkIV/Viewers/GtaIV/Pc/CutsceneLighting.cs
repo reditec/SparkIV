@@ -436,6 +436,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public static float CasterReach(float fogEnd, float locationReach, IReadOnlyList<float[]>? drawSteps, double frame)
     {
       float reach = MathF.Min(fogEnd > 0 ? fogEnd : float.PositiveInfinity, locationReach);
+      return MathF.Min(reach, DrawDistance(drawSteps, frame));
+    }
+
+    /// <summary>
+    /// The shot's draw distance at <paramref name="frame"/> (<paramref name="drawSteps"/>: CutFile.DrawDistanceSteps,
+    /// [frame, metres]; the last step at or before the frame), infinity without one - the page's drawDistanceNow
+    /// (ModelView.html), which GTA IV makes the cutscene camera's far clip (0xD53280).
+    /// </summary>
+    public static float DrawDistance(IReadOnlyList<float[]>? drawSteps, double frame)
+    {
       float metres = float.PositiveInfinity;
       if (drawSteps != null)
       {
@@ -448,7 +458,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           metres = step[1];
         }
       }
-      return MathF.Min(reach, metres);
+      return metres;
     }
 
     /// <summary>

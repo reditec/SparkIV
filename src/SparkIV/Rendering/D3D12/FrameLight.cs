@@ -61,6 +61,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>The sun's shadow (cascaded maps; see the class SunShadow); null: none (the sun everywhere).</summary>
     public SunShadow? SunShadow;
 
+    /// <summary>
+    /// How far the camera sees, as depth along its view (0: no limit): every solid and see-through pixel beyond it is
+    /// left out (water, sky and the shadow maps are not) - the page's drawReach (a cutscene's draw distance as the
+    /// camera's far clip). A game's module sets it (GTA IV (PC): CutscenePlayer from the .cut's draw distance).
+    /// </summary>
+    public float DrawReach;
+
     /// <summary>A plain light for views without a game's light (the camera's side, a little ambient).</summary>
     public static FrameLight Plain(Vector3 toLight) => new FrameLight
     {

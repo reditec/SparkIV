@@ -117,6 +117,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
+      // The mirror first: the sky seen from the view mirrored in the water's level, without the near fog (the page's
+      // reflection pass, ModelView.html: drawSky(mirrored, mirroredEye, false, true)).
+      if (_sky != null && _water.MirrorOf(view.ViewProjection, view.Eye, out var mirroredViewProjection, out var mirroredEye))
+      {
+        var mirroredSky = sky;
+        mirroredSky.NearFogAmount = 0;
+        var (mirrorTarget, mirrorWidth, mirrorHeight) = _water.BeginMirror(list, width, height);
+        _sky.Draw(list, mirrorTarget, mirrorWidth, mirrorHeight, mirroredViewProjection, mirroredEye, mirroredSky);
+        _water.EndMirror(list);
+      }
       // (Its simulation warms up and catches up over the first frames by itself; exact while still: the water a pure
       // function of the section's time, while playing a small nudge back of the sync held.)
       _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time,
@@ -571,6 +581,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         (viewForward, viewUp, viewFov) = (Vector3.Normalize(_center - eyeAt), Vector3.UnitZ, MathF.PI / 4);
       }
       var (light, tone) = _lighting?.At(eyeAt, viewProjection) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
+      // Through the cutscene's camera nothing beyond the shot's draw distance (the page's drawReach, ModelView.html:
+      // reachNow = filmView() ? drawDistanceNow() : Infinity; the fragment discards beyond it, but not the water).
+      if (_useCamera && _camera != null)
+      {
+        float reach = CutsceneSunShadow.DrawDistance(_drawSteps, frame);
+        light.DrawReach = float.IsFinite(reach) ? reach : 0;
+      }
       // The sun's shadow wherever the game's light is (the page's: outside, which every cutscene with a location is).
       if (_lighting != null)
       {

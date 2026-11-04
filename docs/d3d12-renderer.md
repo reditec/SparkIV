@@ -152,8 +152,8 @@ normal and specular maps, shine.
 (`TimeCycle.SkySunDirection`, higher than the light's sun), the clouds from skydome.wtd's noise, made each time their
 Phase moves by a rage_perlinnoise pass into a 256 x 256 target (the Phase grows by CloudSpeed with the clock; in the
 visual tests it starts at the trace's value, `CLOUDPHASE`), below the horizon faded to the far fog colour on the game's
-dome, and the near fog's share. Only the main view: the parabolic surroundings map and the water's mirror come with
-the water and shadows. In the app the player draws it through `IRenderScene.DrawBackground`.
+dome, and the near fog's share. The main view, and the water's mirror (below, "The water's mirror"); the parabolic
+surroundings map not yet. In the app the player draws it through `IRenderScene.DrawBackground`.
 
 ### The water (step 4f, first version)
 
@@ -162,8 +162,39 @@ the water and shadows. In the app the player draws it through `IRenderScene.Draw
 colours, and outside the sea grid round the mission's marker (the script's, as the page's "water" message: else round
 the camera) with the page's swell and ripple simulation and the wind the mission script forces (bc_3: 0; else the
 page's breeze), the near field taken from a mask of the quads (their boxes, made on the CPU), Fresnel, the sun's glint
-and foam, the game's fog. Not yet: the mirrored scene (the mirror shows the sky only, so the sea comes out a little
-light), seeing through to the ground.
+and foam, the game's fog. Not yet: the mirrored meshes (the mirror shows the mirrored sky only, see "The water's
+mirror"), seeing through to the ground (the page's `waterBehind`, gtaiv-pc.js ~531-537 and ~606: the water is opaque
+and its depth behind taken as 1 m).
+
+**The sea grid's colour is 0 0 0** (2026-11-04). The near field's foam is weighted by the vertex colour's blue
+(`nearWeight = vColor.b x 0.25`, gtaiv-pc.js ~496). The page's grid has no colour attribute (`seaGridVao`, gtaiv-pc.js
+~883-904: positions only), so its blue is WebGL's generic value and the grid gets no foam. Native gave the grid 0 0 1
+(weight 0.25, taken as the game's). Measured at bc_3 s3 f140.5: the near water came out ~150/255 in native against ~100
+in both the game's picture and the page's, the far water equal in all three; with 0 0 0 native matches them (mean
+difference 13.52 -> 7.28). So native now follows the page. The game's real grid colour is still open (spec open
+question 9). The water.dat quads keep their own corner colours, as on the page.
+
+### The water's mirror (2026-11-04, first part)
+
+As the page's reflection pass (ModelView.html ~3896-3916; read in gtaiv-pc.js ~554-570 and ~583): outside, with a
+water level, `CutsceneWater.MirrorOf` gives the view mirrored in the water's level (p' = (x, y, 2 level - z): the
+mirror matrix times the view-projection, the eye mirrored likewise). `BeginMirror` makes the mirror ready, the page's
+`reflectionTarget`: max(1, width / 2) x max(1, height / 2) of the picture, the light's format, cleared to 0. Into it
+`CutsceneSky.Draw` draws the sky from the mirrored view without the near fog (the page's `drawSky(mirrored)`,
+`skyNearFog` 0, ModelView.html ~2265). `EndMirror` makes it readable (its SRV, t5). The water then reads the mirror at
+its own pixel shifted by the waves' slope (across and up the picture) x min(0.5 / (0.03 x view depth), 2), kept on
+the water's side of the horizon (the point 2000 m ahead on the water's plane, + 0.05 x near + 0.005; Direct3D's v
+grows downwards, so the page's up-shift and its "at most" turn round), and takes sky light x (1 - alpha) + the
+mirror's light. The player draws it in `DrawAfterSolid`, cutgen in `WaterOf` (`D3D12NOMIRROR=1`: none, the sky's light
+in the bounced direction as before). bc_3 s3 f140.5: 8.18 without, 7.28 with.
+
+Still missing (the page has them):
+- the mirrored meshes: the far versions only, no actors and no layered terrain, clipped 0.515 m under the water,
+  nothing smaller than 1 % of its distance, lit by the light from around and the sun without shadow, with the far
+  fog, culled the other way round (ModelView.html ~3272-3306 and ~494-505). Without them the shore's dark
+  reflection is missing: bc_3 s3 f357.25 is 11.73 natively against the page's 6.69;
+- the page draws its mirror with 4 samples a pixel (MSAA, ModelView.html ~2404); native's has one;
+- seeing through to the ground (`waterBehind`, above).
 
 Deterministic: the water at a section time t is a pure function of t, so a frame drawn alone holds the same water as
 one drawn after others (cutgen's D3D12CAP lists in any order give byte-identical pictures). The wave texture is a
@@ -204,8 +235,21 @@ ground from the origin: `CutsceneSunShadow.LocationReach`, the page's `hazeReach
 page's other caster rules hold already: mirror-only far versions aren't instances (`CutsceneDrawing.DrawnObjects`),
 floating litter casts none, hidden materials aren't in the models' parts (the page's skipping of water materials isn't
 ported: the sea is `CutsceneWater`'s quads, not checked whether a map model has a water material). Its main pass's same distance
-culling isn't ported (so beyond the draw distance a map object is still drawn, but casts nothing - as the page's
-shadow). cutgen: `D3D12NOCASTERREACH=1` leaves out the distance test.
+culling of whole objects isn't ported; beyond the draw distance the main pass cuts per pixel instead (below, "The
+draw distance"). cutgen: `D3D12NOCASTERREACH=1` leaves out the distance test.
+
+### The draw distance (2026-11-04)
+
+GTA IV makes the .cut's draw distance the cutscene camera's far clip (0xD53280). The page cuts it off per pixel
+(`drawReach`, ModelView.html ~408-409 and ~429: `dot(vPosition - eyeAt, -toEye) > drawReach` -> discard, the depth
+along the view, not the distance; set at ~3200-3201 `reachNow = filmView() ? drawDistanceNow() : Infinity`, with
+`drawDistanceNow` at ~2317-2323: the last of the section's draw distance steps at or before the frame). Native:
+`FrameLight.DrawReach` (0: no limit), written to the frame constants' `FogParams.z`; `Shade` (the solid pass, the
+decals and the see-through pass, MeshRenderer.cs) discards where the clip w is beyond it. Not cut, as on the page: the
+water (`CutsceneWater`'s own shader), the sky, the sun's and the lamps' shadow maps. Only through the cutscene's camera:
+`CutscenePlayer` sets it from `CutsceneSunShadow.DrawDistance(drawSteps, frame)` (factored out of `CasterReach`),
+cutgen likewise (`D3D12NODRAWREACH=1`: no limit). bc_3: the skyline towers and the far bridge are gone as in the game
+(s3 f829.5 25.27 -> 10.54, page 8.65; s1 f292.5 14.09 -> 9.37, page 5.15); et01_aa, intro and bc_1 unchanged.
 
 Identity: the per-part u/v test only drops parts that draw no texel, so it can't change the picture - bc_3 s3 f829.5
 byte-identical with `D3D12NOCASTERREACH=1`. With the distance test bc_3 s3 f829.5 (draw distance 89.2 m in that shot)

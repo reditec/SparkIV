@@ -226,9 +226,11 @@ struct Water
   float4 SunForward;
   float4 SunSplits;
   float4 SunBox[4];
+  float4 Mirror;       // xy: the picture's size in pixels, z: the mirror drawn this frame (1)
 };
 ConstantBuffer<Water> w : register(b1);
 Texture2D<float> SunMap : register(t4);   // the sun's shadow map (MeshRenderer.SunShadowMap)
+Texture2D MirrorTex : register(t5);       // the mirrored view's light (premultiplied, alpha what was drawn)
 Texture2D Sim : register(t0);             // the wave texture: r height, g speed, ba slope
 Texture2D Noise : register(t3);           // the wave step's random bytes
 StructuredBuffer<float> Swell : register(t1);  // the swell's heights, [ring y][ring x]
@@ -472,8 +474,27 @@ float4 PSWater(VsOut i) : SV_Target
   float fresnel = pow(1 - cosine, 5) * 0.6 + 0.2;
   float3 bounce = reflect(view, mirrorNormal);
 
-  // TODO: the mirrored scene (the reflection pass). For now the mirror shows the sky alone, in the bounced direction.
+  // The mirror (the page's, gtaiv-pc.js reflectOn / reflectLight): what the mirrored view drew (see BeginMirror) where it
+  // is, shifted by the waves as water.fxc does - their slope turned to the picture (across, up) x 0.5 / (0.03 x the
+  // view depth), at most twice - and kept on the water's side of the horizon (the point 2000 m ahead, level, on the
+  // water's plane: v at least 0.5 (1 - its y) + 0.05 x near + 0.005, Direct3D's v down); the sky in the bounced
+  // direction where nothing was drawn (or without a mirror).
   float3 mirroredLight = SkyLight(normalize(bounce));
+  if (w.Mirror.z > 0.5)
+  {
+    float3 across = normalize(cross(view, float3(0, 0, 1)) + 1e-5);
+    float2 ahead = normalize(view.xy + 1e-5);
+    float shift = min(0.5 / (0.03 * viewDepth), 2.0);
+    float2 at = i.position.xy / w.Mirror.xy + float2(dot(gentleNormal.xy, across.xy), -dot(gentleNormal.xy, ahead)) * shift;
+    float2 ahead2 = normalize(w.Forward.xy + 1e-5);
+    float4 farAt = mul(float4(eye.xy + ahead2 * 2000, p.z, 1), w.ViewProjection);
+    if (farAt.w > 0)
+    {
+      at.y = max(at.y, 0.5 - 0.5 * farAt.y / farAt.w + 0.05 * max(1 - dot(eye - p, eye - p) * 0.0004, 0) + 0.005);
+    }
+    float4 scene = MirrorTex.SampleLevel(Linear, clamp(at, 0.001, 0.999), 0);
+    mirroredLight = mirroredLight * (1 - saturate(scene.a)) + scene.rgb;
+  }
 
   float3 sunDir = w.SunDirection.xyz;
   float3 sunColor = w.Sun.rgb;
@@ -560,6 +581,14 @@ float4 PSWater(VsOut i) : SV_Target
     // The sun's shadow map whose view is in the heap's fourth slot.
     private ID3D12Resource? _sunMapSeen;
 
+    // The mirror (the page's reflectionTarget: half the picture's size, the light's format), its state, and whether it
+    // was drawn for the coming Draw.
+    private readonly Format _lightFormat;
+    private ID3D12Resource? _mirror;
+    private int _mirrorWidth, _mirrorHeight;
+    private ResourceStates _mirrorState;
+    private bool _mirrorDrawn;
+
     public unsafe CutsceneWater(D3D12Device device, Format lightFormat, Format depthFormat)
     {
       _device = device;
@@ -576,6 +605,8 @@ float4 PSWater(VsOut i) : SV_Target
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(2, 0), ShaderVisibility.Pixel),
         // t4: the sun's shadow map (its view in the heap's fourth slot).
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 4, 0, 0)), ShaderVisibility.Pixel),
+        // t5: the mirror (its view in the heap's fifth slot).
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 5, 0, 0)), ShaderVisibility.Pixel),
       };
       // The page's wave texture: LINEAR, REPEAT, one level (the game reads one level: far specks).
       var samplers = new[]
@@ -626,8 +657,10 @@ float4 PSWater(VsOut i) : SV_Target
         SampleDescription = new SampleDescription(1, 0),
       });
 
-      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 4, DescriptorHeapFlags.ShaderVisible));
-      _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 2));
+      _lightFormat = lightFormat;
+      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 5, DescriptorHeapFlags.ShaderVisible));
+      // (The third render target view: the mirror's.)
+      _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
       _srvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
       _rtvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
 
@@ -654,6 +687,14 @@ float4 PSWater(VsOut i) : SV_Target
         Shader4ComponentMapping = ShaderComponentMapping.Default,
         Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
       }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 3 * (int)_srvSize);
+      // The mirror's slot: empty until it is made (never read before: Mirror.z 0).
+      d3d.CreateShaderResourceView(null, new ShaderResourceViewDescription
+      {
+        Format = lightFormat,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 4 * (int)_srvSize);
 
       // The sea grid's indices: per cell a = j*101+i, b = a+1, c = a+101, d = c+1: (a, b, c), (b, d, c); 16-bit.
       var indices = new ushort[GridIndexCount];
@@ -1175,6 +1216,74 @@ float4 PSWater(VsOut i) : SV_Target
     }
 
     /// <summary>
+    /// The view mirrored in the water's level, where the page draws its reflection pass (ModelView.html: outside with
+    /// water, p' = (x, y, 2 level - z), the view-projection times that mirror, the eye mirrored likewise); false where
+    /// it has none (inside, no water level, no water).
+    /// </summary>
+    public bool MirrorOf(Matrix4x4 viewProjection, Vector3 eye, out Matrix4x4 mirroredViewProjection, out Vector3 mirroredEye)
+    {
+      mirroredViewProjection = viewProjection;
+      mirroredEye = eye;
+      if (_quadIndexCount == 0 || _quadVertices == null || !_outdoors || !_level.HasValue)
+      {
+        return false;
+      }
+      float level = _level.Value;
+      // (Row vectors: p' = p x M, then x the view-projection.)
+      var mirror = new Matrix4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 2 * level, 1);
+      mirroredViewProjection = mirror * viewProjection;
+      mirroredEye = new Vector3(eye.X, eye.Y, 2 * level - eye.Z);
+      return true;
+    }
+
+    /// <summary>
+    /// The mirror made ready to draw into (the page's reflectionTarget: max(1, width / 2) x max(1, height / 2) of the
+    /// picture's, the light's format, cleared to nothing): its render target view and size. What is drawn into it (the
+    /// mirrored sky first, see <see cref="MirrorOf"/>) the water shows; <see cref="EndMirror"/> after.
+    /// </summary>
+    public (CpuDescriptorHandle Target, int Width, int Height) BeginMirror(ID3D12GraphicsCommandList list, int width, int height)
+    {
+      int mw = Math.Max(1, width >> 1), mh = Math.Max(1, height >> 1);
+      var rtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
+      if (_mirror == null || _mirrorWidth != mw || _mirrorHeight != mh)
+      {
+        if (_mirror != null)
+        {
+          _device.WaitIdle();
+          _mirror.Dispose();
+        }
+        var d3d = _device.Device;
+        _mirror = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+          ResourceDescription.Texture2D(_lightFormat, (uint)mw, (uint)mh, 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+          ResourceStates.RenderTarget, new ClearValue(_lightFormat, new Vortice.Mathematics.Color4(0, 0, 0, 0)));
+        _mirrorState = ResourceStates.RenderTarget;
+        _mirrorWidth = mw;
+        _mirrorHeight = mh;
+        d3d.CreateRenderTargetView(_mirror, null, rtv);
+        d3d.CreateShaderResourceView(_mirror, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 4 * (int)_srvSize);
+      }
+      if (_mirrorState != ResourceStates.RenderTarget)
+      {
+        list.ResourceBarrierTransition(_mirror, _mirrorState, ResourceStates.RenderTarget);
+        _mirrorState = ResourceStates.RenderTarget;
+      }
+      list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 0));
+      return (rtv, mw, mh);
+    }
+
+    /// <summary>The mirror drawn: made readable, shown by the next <see cref="Draw"/>.</summary>
+    public void EndMirror(ID3D12GraphicsCommandList list)
+    {
+      if (_mirror == null)
+      {
+        return;
+      }
+      list.ResourceBarrierTransition(_mirror, _mirrorState, ResourceStates.PixelShaderResource);
+      _mirrorState = ResourceStates.PixelShaderResource;
+      _mirrorDrawn = true;
+    }
+
+    /// <summary>
     /// The water into the light target (in RENDER_TARGET state) with the scene's depth (the solid meshes drawn), after
     /// the solid meshes and before the see-through ones; <paramref name="seconds"/>: the section's time the simulations
     /// show (their state a pure function of it: a frame drawn alone holds the same water as one drawn after others;
@@ -1224,7 +1333,11 @@ float4 PSWater(VsOut i) : SV_Target
           Buffer.MemoryCopy(heights, slot + SwellOffset, SwellBytes, SwellBytes);
         }
         // The grid's points (the page's VS: the window's corner + (i, j) x 2 m, at the level + the swell x its edge),
-        // each with the sea's colour 0 0 1 (the game's; the page's grid has no colour attribute: spec open question 9).
+        // each with the colour 0 0 0 as the page's: its grid has no colour attribute (gtaiv-pc.js seaGridVao), so its
+        // vColor.b - the near field's weight, nearWeight = vColor.b x 0.25 - is WebGL's generic value, no foam on the
+        // grid. Measured at bc_3 s3 f140.5: the near water 0 0 1 (weight 0.25) ~150/255 against the game's and the
+        // page's ~100, with 0 the same as theirs (mean difference 13.5 -> 7.3). The game's own grid colour stays open
+        // (spec open question 9).
         var g = (float*)(slot + GridOffset);
         int ci = Ring(_swellX0), cj = Ring(_swellY0);
         int k = 0;
@@ -1239,7 +1352,7 @@ float4 PSWater(VsOut i) : SV_Target
             g[k++] = level + h * SeaEdge(i * 2, j * 2);
             g[k++] = 0;
             g[k++] = 0;
-            g[k++] = 1;
+            g[k++] = 0;
           }
         }
       }
@@ -1287,6 +1400,9 @@ float4 PSWater(VsOut i) : SV_Target
           *(Vector4*)(f + 104 + c * 4) = sun.Boxes[c];
         }
       }
+      // The mirror, when drawn for this Draw (BeginMirror / EndMirror).
+      Put(f, 120, new Vector3(width, height, _mirrorDrawn ? 1 : 0), 0);
+      _mirrorDrawn = false;
 
       var gpu = _srvHeap.GetGPUDescriptorHandleForHeapStart();
       list.OMSetRenderTargets(lightTarget, depth);
@@ -1299,6 +1415,7 @@ float4 PSWater(VsOut i) : SV_Target
       list.SetGraphicsRootShaderResourceView(4, gpuSlot + SwellOffset);
       list.SetGraphicsRootShaderResourceView(5, gpuSlot + MaskOffset);
       list.SetGraphicsRootDescriptorTable(6, gpu + 3 * (int)_srvSize);
+      list.SetGraphicsRootDescriptorTable(7, gpu + 4 * (int)_srvSize);
 
       var constants = stackalloc float[4];
       constants[0] = 0;
@@ -1335,6 +1452,7 @@ float4 PSWater(VsOut i) : SV_Target
       _quadVertices?.Dispose();
       _quadIndices?.Dispose();
       _noise?.Dispose();
+      _mirror?.Dispose();
       _sim[0].Dispose();
       _sim[1].Dispose();
       _simBase.Dispose();
