@@ -270,10 +270,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // The native renderer (#112), with SPARKIV_D3D12=1 instead of the page.
     private D3D12View? _native;
 
+    // The scene the native renderer plays (#112 4b): told here what the page is told (location, section, seek, play,
+    // sync), it says which frame it shows and its frame rate as the page does.
+    private CutscenePlayer? _player;
+
     /// <summary>
-    /// SPARKIV_D3D12=1: the view drawn by the native Direct3D 12 renderer instead of the WebView2 page. The prototype
-    /// (#112 step 1) draws the first actor's model, once the cast is loaded, with the camera going round it; the
-    /// page's paths stay as they are (without a page, its messages go nowhere).
+    /// SPARKIV_D3D12=1: the view drawn by the native Direct3D 12 renderer instead of the WebView2 page (#112 4b): the
+    /// cutscene played by a <see cref="CutscenePlayer"/>, everything else here as with the page (the page's messages go
+    /// nowhere without one; at each place one goes out, the player is told the same).
     /// </summary>
     private async void StartNative()
     {
@@ -281,12 +285,24 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Native.Visibility = Visibility.Visible;
       try
       {
-        _native = new D3D12View(Native, text => FpsText.Text = text);
+        _player = new CutscenePlayer(DispatcherQueue)
+        {
+          FrameChanged = OnFrame,
+          FpsMeasured = OnFps,
+          FpsBelow = OnFpsBelow,
+          Loaded = () => Working.IsActive = _locationLoading || _castLoading,
+        };
+        _native = new D3D12View(Native, _player, text =>
+        {
+          Message.Text = text;
+          Message.Visibility = Visibility.Visible;
+        });
         _document.Log?.Step("open the view, start the native renderer (Direct3D 12, " + _native.AdapterName + ")");
       }
       catch (Exception ex)
       {
         D3D12Device.Log("start failed: " + ex);
+        _player = null;
         Working.IsActive = false;
         Message.Text = "The Direct3D 12 renderer couldn't start: " + ex.Message;
         Message.Visibility = Visibility.Visible;
@@ -296,17 +312,85 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         await _castTask;
       }
-      Working.IsActive = false;
       if (_disposed)
       {
         return;
       }
-      var scene = _document.Actors.Select(a => a.Scene).FirstOrDefault(s => s != null && s.Meshes.Count > 0);
-      if (scene != null)
+      _player.SetCast(_document.Actors);
+      // As when the page is ready: the scene (the location loads), then the section.
+      ShowSceneWhenCastLoaded();
+    }
+
+    /// <summary>The motions and camera of a section for the player, made once on another thread (as SectionDataOf).</summary>
+    private readonly Dictionary<int, System.Threading.Tasks.Task<(List<CutsceneMessages.CastMotion> Motions, CutsceneCamera? Camera)>> _nativeSections =
+      new Dictionary<int, System.Threading.Tasks.Task<(List<CutsceneMessages.CastMotion>, CutsceneCamera?)>>();
+
+    private System.Threading.Tasks.Task<(List<CutsceneMessages.CastMotion> Motions, CutsceneCamera? Camera)> NativeSectionOf(int index)
+    {
+      if (!_nativeSections.TryGetValue(index, out var task))
       {
-        _native.SetModel(scene);
+        var cut = _document.Cut;
+        var section = cut.Sections[index];
+        var wad = _document.Sections[index];
+        var actors = _document.Actors;
+        task = System.Threading.Tasks.Task.Run(() =>
+        {
+          var motions = CutsceneMessages.Motions(section, actors, wad, cut.Sections.Take(index), null);
+          var clip = section.Camera != null ? wad?.Animations.FirstOrDefault(a => string.Equals(a.ShortName, section.Camera, StringComparison.OrdinalIgnoreCase)) : null;
+          return (motions, clip != null ? CutsceneCamera.From(clip) : null);
+        });
+        _nativeSections[index] = task;
+      }
+      return task;
+    }
+
+    /// <summary>The frame shown (the page's "frame" message, or the player's).</summary>
+    private void OnFrame(int frame, bool playing)
+    {
+      if (_disposed)
+      {
+        return;
+      }
+      _frame = frame;
+      // With the sound, it keeps the time and says when the next section begins (the timer); without,
+      // the end of a section while playing goes on with the next.
+      if (_audio == null && _playing && !playing)
+      {
+        if (_section + 1 < _document.Cut.Sections.Count)
+        {
+          ShowSection(_section + 1, 0, play: true);
+          return;
+        }
+        _playing = false;
+      }
+      ShowFrame();
+    }
+
+    /// <summary>The frames per second while playing, once a second, with the lowest and highest rate (the page's "fps").</summary>
+    private void OnFps(int fps, (double Fps, int Frame)? low, (double Fps, int Frame)? high)
+    {
+      if (_disposed)
+      {
+        return;
+      }
+      FpsText.Text = _playing ? $"{fps} fps" : "";
+      if (_playing)
+      {
+        if (low is var (lowFps, lowFrame) && (_fpsMin == null || lowFps < _fpsMin.Value.Fps))
+        {
+          _fpsMin = (lowFps, _section, lowFrame);
+        }
+        if (high is var (highFps, highFrame) && (_fpsMax == null || highFps > _fpsMax.Value.Fps))
+        {
+          _fpsMax = (highFps, _section, highFrame);
+        }
       }
     }
+
+    /// <summary>The rate fell below 30 frames a second, or is back (the page's "fpsBelow"), into SparkIV-fps.log.</summary>
+    private void OnFpsBelow(bool below, double fps, int frame) =>
+      FpsLog((below ? "below 30 fps" : "back at 30 fps or more").PadRight(24) +
+             $"{fps.ToString("0.0", CultureInfo.InvariantCulture),6} fps   section {_section + 1}, frame {frame + 1}");
 
     private void Core_WebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
     {
@@ -371,40 +455,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         case "fps":
           // The page's frames per second while playing (once a second); cleared when playing stops. With it the lowest
           // and highest rate since the page began playing (its section), kept here across the sections.
-          FpsText.Text = _playing && root.TryGetProperty("fps", out var fps) ? $"{fps.GetInt32()} fps" : "";
-          if (_playing)
-          {
-            if (root.TryGetProperty("min", out var low) && low.ValueKind == JsonValueKind.Object &&
-                (_fpsMin == null || low.GetProperty("fps").GetDouble() < _fpsMin.Value.Fps))
-            {
-              _fpsMin = (low.GetProperty("fps").GetDouble(), _section, low.GetProperty("frame").GetInt32());
-            }
-            if (root.TryGetProperty("max", out var high) && high.ValueKind == JsonValueKind.Object &&
-                (_fpsMax == null || high.GetProperty("fps").GetDouble() > _fpsMax.Value.Fps))
-            {
-              _fpsMax = (high.GetProperty("fps").GetDouble(), _section, high.GetProperty("frame").GetInt32());
-            }
-          }
+          static (double, int)? Rate(JsonElement root, string name) =>
+            root.TryGetProperty(name, out var r) && r.ValueKind == JsonValueKind.Object ? (r.GetProperty("fps").GetDouble(), r.GetProperty("frame").GetInt32()) : null;
+          OnFps(root.TryGetProperty("fps", out var fps) ? fps.GetInt32() : 0, Rate(root, "min"), Rate(root, "max"));
           break;
         case "fpsBelow":
-          // The rate fell below 30 frames a second, or is back at 30 or more (over the last half second).
-          FpsLog((root.GetProperty("below").GetBoolean() ? "below 30 fps" : "back at 30 fps or more").PadRight(24) +
-                 $"{root.GetProperty("fps").GetDouble().ToString("0.0", CultureInfo.InvariantCulture),6} fps   section {_section + 1}, frame {root.GetProperty("frame").GetInt32() + 1}");
+          // The rate fell below 30 frames a second, or is back at 30 or more (over the last second).
+          OnFpsBelow(root.GetProperty("below").GetBoolean(), root.GetProperty("fps").GetDouble(), root.GetProperty("frame").GetInt32());
           break;
         case "frame":
-          _frame = root.GetProperty("frame").GetInt32();
-          // With the sound, it keeps the time and says when the next section begins (the timer); without,
-          // the page's end of a section while playing goes on with the next.
-          if (_audio == null && _playing && !root.GetProperty("playing").GetBoolean())
-          {
-            if (_section + 1 < _document.Cut.Sections.Count)
-            {
-              ShowSection(_section + 1, 0, play: true);
-              return;
-            }
-            _playing = false;
-          }
-          ShowFrame();
+          OnFrame(root.GetProperty("frame").GetInt32(), root.GetProperty("playing").GetBoolean());
           break;
         case "filmCamera":
           // The view was turned by mouse: the cutscene's camera is left.
@@ -776,6 +836,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
+      _player?.SetLocation(s_location ? _document.Location : null, _drawDistance);
       _ = SendLocationScene(_locationKey);
       Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? LocationUrl(CutsceneLocation.LightVolumeKey) : null,
                                             _document.Location.Corona != null ? LocationUrl(CutsceneLocation.CoronaKey) : null));
@@ -907,6 +968,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         _sectionData.Remove(old);
       }
+      if (_player != null)
+      {
+        // The player's: the next section's motions made ahead too, the others no longer kept.
+        foreach (int old in _nativeSections.Keys.Where(k => k != _section && k != next).ToList())
+        {
+          _nativeSections.Remove(old);
+        }
+        if (next < _document.Cut.Sections.Count && !_castLoading)
+        {
+          _ = NativeSectionOf(next);
+        }
+      }
       if (_sectionsPrepared.RemoveWhere(k => k != _section && k != next) > 0)
       {
         Post(new { type = "unprepare", keep = new[] { _section, next } });
@@ -998,6 +1071,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       PostJson(_sectionsPrepared.Contains(index)
         ? "{\"type\":\"batch\",\"prepared\":" + index + ",\"messages\":[" + bundled + rest.Substring(1) + "}"
         : "{\"type\":\"batch\",\"messages\":" + data.Json.Substring(0, data.Json.Length - 1) + "," + bundled + rest.Substring(1) + "}");
+      if (_player != null)
+      {
+        // (Made ahead on another thread as a rule; else now.)
+        var (motions, camera) = NativeSectionOf(index).GetAwaiter().GetResult();
+        _player.SetSection(motions, camera, _fps, _frames, _frame, play, s_camera && camera != null);
+      }
       ShowFrame();
       PrepareNextSection();
 
@@ -1034,6 +1113,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void Location_Click(object sender, RoutedEventArgs e)
     {
       s_location = LocationButton.IsChecked == true;
+      _player?.SetLocation(s_location ? _document.Location : null, _drawDistance);
       if (s_location)
       {
         LoadLocation();
@@ -1066,9 +1146,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         _frame = Math.Clamp(frame, 0, _frames - 1);
         Post(new { type = "seek", frame = _frame });
+        _player?.Seek(_frame);
         if (play)
         {
           Post(new { type = "play", on = true });
+          _player?.Play(true);
         }
         ShowFrame();
       }
@@ -1114,6 +1196,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _playing = false;
         _audio.Pause();
         Post(new { type = "play", on = false });
+        _player?.Play(false);
         ShowFrame();
         return;
       }
@@ -1126,6 +1209,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         // The sound's time with its fraction; the page follows it gently.
         Post(new { type = "sync", frame = (seconds - _sectionStart[section]) * _fps });
+        _player?.Sync((seconds - _sectionStart[section]) * _fps);
       }
     }
 
@@ -1135,6 +1219,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         _playing = false;
         Post(new { type = "play", on = false });
+        _player?.Play(false);
         try
         {
           _audio?.Pause();
@@ -1301,11 +1386,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       double now = Now;
       if (!_playing)
       {
-        if (_native == null)
-        {
-          // The native renderer shows its own rate all the time.
-          FpsText.Text = "";
-        }
+        FpsText.Text = "";
         FpsSummary();
       }
       FrameText.Text = TimeSpan.FromSeconds(now).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(Length).ToString(@"m\:ss\.f");
@@ -1364,6 +1445,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // Off: the free view goes on from where the cutscene's camera is (the page does that).
       s_camera = CameraButton.IsChecked == true;
       Post(new { type = "useCamera", on = s_camera });
+      _player?.UseCamera(s_camera);
     }
 
     private void ShowCamera_Click(object sender, RoutedEventArgs e)

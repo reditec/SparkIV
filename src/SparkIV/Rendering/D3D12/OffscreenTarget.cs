@@ -81,6 +81,14 @@ namespace SparkIV.WinUI.Rendering.D3D12
       return CommandList;
     }
 
+    /// <summary>Ends the frame without reading it back: sent, the GPU done (for timing).</summary>
+    public void End()
+    {
+      CommandList.Close();
+      _device.Queue.ExecuteCommandList(CommandList);
+      _device.WaitIdle();
+    }
+
     /// <summary>Ends the frame: the colour copied into the readback buffer, the GPU done, the picture saved as PNG.</summary>
     public unsafe void EndAndSave(string path)
     {

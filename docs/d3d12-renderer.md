@@ -1,6 +1,6 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 4a, the cast** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
+Status: **step 4b, playing** – in the app behind the switch `SPARKIV_D3D12=1`.
 Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
 
 ## Why
@@ -76,6 +76,33 @@ checks indoors, outdoors with the skyline, TLAD and the intro's crane from above
 | Date | Machine | Case | Result |
 |---|---|---|---|
 | 2026-11-04 | RTX 2060, 60 Hz, Debug build with the debug layer | `bc_1.cut`, Bernie (12 meshes, 14 889 triangles, on the GPU in 6.4 ms), 774 × 537 px, 33 s | 60 fps every second, mean 16.7 ms; longest frame mostly 16.7–18.9 ms, twice 33 ms (one refresh missed), single 24–27 ms; no debug-layer messages. UI over the panel works. |
+
+### The harbour, offscreen (step 4b)
+
+cutgen's `D3D12BENCH=<step>` draws every step-th frame of a section without saving it, waiting for each (poses,
+recording and the GPU one after the other, so the worst case), with the debug layer off (`SPARKIV_D3D12_DEBUG=0`; on, it
+checks each of the 16 000 calls and a frame takes some 300 ms), Release build:
+
+| Date | Case | Frames | Mean | Median | p95 | p99 | Max | Draws a frame |
+|---|---|---|---|---|---|---|---|---|
+| 2026-11-04 | intro s4 (the harbour: 5 379 instances, 4.0 M triangles, 5 509 textures / 300 MB), 1920 × 1080, RTX 2060 | 2 049 (all) | 2.76 ms | 2.60 ms | 3.15 ms | 3.73 ms | 29.9 ms (frame 0) | 16 078 |
+
+Only the first eight frames take longer (22–30 ms: the driver and pipelines warming up). The page took 34 ms and more
+for the same harbour (#94), so the call submission, not the GPU, was what held it back. No culling yet: every
+instance is drawn every frame.
+
+### Playing in the app (step 4b)
+
+`CutscenePlayer` (`Viewers/GtaIV/Pc`, GTA IV PC) is the `IRenderScene` `D3D12View` draws in the cutscene view. The view
+stays in charge as with the page (sound, sections, locations by origin) and tells the player at each place it tells
+the page: the location shown (`SetLocation`, also with the Location button), the section with its actors' motions and
+camera (`SetSection`, made ahead on another thread like the page's section data), `Seek`, `Play`, `Sync` (the sound's
+time, followed gently as the page does) and the camera button. The render thread takes those orders at the start of a
+frame, keeps the clock as the page's `tick` does, poses the section's actors (the others hidden) and looks through the
+section's camera (else it goes round the cast). It reports the frame it shows, its frames per second while playing and
+when the rate falls below 30 or is back, as the page's `frame`, `fps` and `fpsBelow`, so the status bar and
+`SparkIV-fps.log` work as before. For now a new location puts the whole scene onto the GPU again on the render
+thread (a pause when a section at another origin starts); loading on a thread of its own comes next.
 
 ## Next steps (#112)
 

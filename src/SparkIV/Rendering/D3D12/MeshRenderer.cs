@@ -195,7 +195,14 @@ float4 PSMain(VsOut input) : SV_Target
       public Matrix4x4 World;
       public Matrix4x4[]? Palette;
       public ulong PaletteAddress;
+      public bool Visible = true;
     }
+
+    /// <summary>The draw calls of the last frame.</summary>
+    public int DrawCalls { get; private set; }
+
+    /// <summary>Shows or hides an instance (an actor not in the section played).</summary>
+    public void SetVisible(int instance, bool visible) => _instances[instance].Visible = visible;
 
     private readonly D3D12Device _device;
     private readonly TextureCache _textures;
@@ -477,6 +484,7 @@ float4 PSMain(VsOut input) : SV_Target
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
       list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
       list.RSSetScissorRect(width, height);
+      DrawCalls = 0;
       if (_instances.Count == 0)
       {
         return;
@@ -526,7 +534,7 @@ float4 PSMain(VsOut input) : SV_Target
       var material = stackalloc float[MaterialFloats];
       foreach (var instance in _instances)
       {
-        if (_models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
+        if (!instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
         {
           continue;
         }
@@ -570,6 +578,7 @@ float4 PSMain(VsOut input) : SV_Target
             lastTexture = part.Texture;
           }
           list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+          DrawCalls++;
         }
       }
     }
