@@ -105,7 +105,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
       // (Its simulation warms up over the first frames by itself.)
-      _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky), _time);
+      _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky), _time,
+                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null);
     }
 
     public void Dispose()
@@ -287,7 +288,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             return;
           }
           var numbers = renderer.Register(prepared, group.Group);
-          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0)).ToArray();
+          // (Floating litter casts no sun shadow, as the page's.)
+          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0, castsSunShadow: o.FloatAt == null)).ToArray();
           group.Lights = lamps;
           group.Registered = true;
           ShowLocations();
@@ -512,10 +514,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       float aspect = width / (float)Math.Max(1, height);
       Matrix4x4 viewProjection;
       Vector3 eyeAt, toLight;
+      // The camera's axes and opening (for the sun's shadow cascades).
+      Vector3 viewForward, viewUp;
+      float viewFov;
       var post = PostParams.None;
       if (_useCamera && _camera != null)
       {
         var (eye, forward, up, fov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
+        (viewForward, viewUp, viewFov) = (forward, up, fov);
         var right = Vector3.Normalize(Vector3.Cross(forward, up));
         viewProjection = Matrix4x4.CreateLookAt(eye, eye + forward, up) * Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 0.1f, _far);
         eyeAt = eye;
@@ -540,8 +546,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         eyeAt = _center + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, _radius * 0.6f);
         viewProjection = Matrix4x4.CreateLookAt(eyeAt, _center, Vector3.UnitZ) * Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, aspect, 0.05f, _far);
         toLight = new Vector3(0.4f, -0.5f, 0.8f);
+        (viewForward, viewUp, viewFov) = (Vector3.Normalize(_center - eyeAt), Vector3.UnitZ, MathF.PI / 4);
       }
       var (light, tone) = _lighting?.At(eyeAt, viewProjection) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
+      // The sun's shadow wherever the game's light is (the page's: outside, which every cutscene with a location is).
+      if (_lighting != null)
+      {
+        light.SunShadow = CutsceneSunShadow.Cascades(eyeAt, viewForward, viewUp, viewFov, aspect, light.SunDirection);
+      }
       // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
       List<DeferredLight>? lights = null;
       if (_showLights && _lighting != null)

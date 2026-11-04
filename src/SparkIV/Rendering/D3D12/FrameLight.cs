@@ -58,6 +58,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public float FogEnd;
     public float FogNearAmount;
 
+    /// <summary>The sun's shadow (cascaded maps; see the class SunShadow); null: none (the sun everywhere).</summary>
+    public SunShadow? SunShadow;
+
     /// <summary>A plain light for views without a game's light (the camera's side, a little ambient).</summary>
     public static FrameLight Plain(Vector3 toLight) => new FrameLight
     {
@@ -71,6 +74,28 @@ namespace SparkIV.WinUI.Rendering.D3D12
       AoScale = 1,
       ShineScale = 1,
     };
+  }
+
+  /// <summary>
+  /// The sun's shadow over a frame, in cascades (#112; MeshRenderer draws and reads it, a game's module lays it out -
+  /// GTA IV (PC): CutsceneSunShadow). Across the sun the axes <see cref="U"/> and <see cref="V"/>, <see cref="H"/>
+  /// towards it; heights along it from <see cref="Reference"/>. Each of the <see cref="MeshRenderer.SunCascades"/> cascades
+  /// covers a box on u and v (<see cref="Boxes"/>: its centre on u and v, 1 / half its width on u and v) drawn into its
+  /// quarter of the map, the heights stored less its <see cref="Biases"/> entry. A point is read from the cascade picked by
+  /// its depth along <see cref="ViewForward"/> (the next from each of <see cref="Splits"/>' x, y, z on), lit where it is
+  /// at least as high as what is stored round it (twelve taps); plus <see cref="FadeScale"/> x (distance /
+  /// <see cref="FadeEnd"/>)², none from <see cref="FadeEnd"/> on. Drawn from what casts (see MeshRenderer.AddInstance).
+  /// </summary>
+  public sealed class SunShadow
+  {
+    public Vector3 U, V, H;
+    public float Reference;
+    public Vector4[] Boxes = new Vector4[MeshRenderer.SunCascades];
+    public float[] Biases = new float[MeshRenderer.SunCascades];
+    public Vector3 ViewForward;
+    public Vector3 Splits;
+    public float FadeEnd;
+    public float FadeScale;
   }
 
   /// <summary>Which of the deferred light's formulas a light takes (see <see cref="DeferredLight"/>).</summary>

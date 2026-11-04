@@ -351,4 +351,82 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return value;
     }
   }
+
+  /// <summary>
+  /// The sun's shadow cascades of a GTA IV (PC) cutscene's frame for the native renderer (#112), as the page's
+  /// sunShadowCascades (gtaiv-pc.js) lays them out after the TLAD trace GTAIV.4 (frame 9350): across the sun, u is the
+  /// camera's forward laid flat onto the plane square to the sun, v = u x sun; four cascades over the view's depth from
+  /// its near plane to 9.5, 20, 50 and 175 m (gFacetCentre), each the box round its slice of the view on u and v (measured
+  /// there 10 x 14, 13 x 29, 37 x 73 and 147 x 254 m: the slices' corners give the same); the stored heights each lower
+  /// than the sun pass's by its bias (the cascades' gShadowMatrix fourth constants against the sun pass's: 0.14, 0.24,
+  /// 0.5, 0.75 m). Read as deferred_lighting.fxc's sun pass (program 21) reads it: the cascade by the depth along the
+  /// view, the shadow fading out to none at 175 m (+ 1.5 (distance / 175)², c53.w). (Here with the light, not in a file
+  /// of its own: the visual tests' cutgen compiles CutsceneLighting.cs.)
+  /// </summary>
+  public static class CutsceneSunShadow
+  {
+    private static readonly float[] Splits = { 0.1f, 9.5f, 20f, 50f, 175f };
+    private static readonly float[] Biases = { 0.14f, 0.24f, 0.5f, 0.75f };
+    private const float FadeScale = 1.5f;
+
+    /// <summary>
+    /// The cascades for a camera at <paramref name="eye"/> looking along <paramref name="forward"/> (its up
+    /// <paramref name="up"/>, made square to forward as the page's view does), its vertical opening <paramref name="fov"/>
+    /// (radians) and <paramref name="aspect"/>, and the sun towards <paramref name="sun"/>.
+    /// </summary>
+    public static SunShadow Cascades(Vector3 eye, Vector3 forward, Vector3 up, float fov, float aspect, Vector3 sun)
+    {
+      var f = Vector3.Normalize(forward);
+      // The page's viewProjection: s = norm(f x up), u = s x f.
+      var right = Unit(Vector3.Cross(f, up));
+      var upright = Vector3.Cross(right, f);
+      var h = Unit(sun);
+      var u = Unit(f - h * Vector3.Dot(f, h));
+      if (MathF.Abs(Vector3.Dot(f, h)) > 0.999f)
+      {
+        u = Unit(new Vector3(1 - h.X * h.X, -h.X * h.Y, -h.X * h.Z));
+      }
+      var v = Vector3.Cross(u, h);
+      float tanV = MathF.Tan(fov / 2), tanH = tanV * aspect;
+      var shadow = new SunShadow
+      {
+        U = u,
+        V = v,
+        H = h,
+        Reference = Vector3.Dot(eye, h),
+        ViewForward = f,
+        Splits = new Vector3(Splits[1], Splits[2], Splits[3]),
+        FadeEnd = Splits[4],
+        FadeScale = FadeScale,
+      };
+      for (int k = 0; k < MeshRenderer.SunCascades; k++)
+      {
+        float u0 = float.PositiveInfinity, u1 = float.NegativeInfinity, v0 = float.PositiveInfinity, v1 = float.NegativeInfinity;
+        foreach (float d in new[] { Splits[k], Splits[k + 1] })
+        {
+          for (int a = -1; a <= 1; a += 2)
+          {
+            for (int b = -1; b <= 1; b += 2)
+            {
+              var p = eye + (f + right * (a * tanH) + upright * (b * tanV)) * d;
+              float pu = Vector3.Dot(p, u), pv = Vector3.Dot(p, v);
+              u0 = MathF.Min(u0, pu);
+              u1 = MathF.Max(u1, pu);
+              v0 = MathF.Min(v0, pv);
+              v1 = MathF.Max(v1, pv);
+            }
+          }
+        }
+        shadow.Boxes[k] = new Vector4((u0 + u1) / 2, (v0 + v1) / 2, 2 / MathF.Max(u1 - u0, 1e-3f), 2 / MathF.Max(v1 - v0, 1e-3f));
+        shadow.Biases[k] = Biases[k];
+      }
+      return shadow;
+    }
+
+    private static Vector3 Unit(Vector3 a)
+    {
+      float l = a.Length();
+      return l > 0 ? a / l : a;
+    }
+  }
 }

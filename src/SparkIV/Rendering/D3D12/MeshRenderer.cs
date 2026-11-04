@@ -123,6 +123,15 @@ struct Frame
   float4 FogNear;  // rgb: the near fog's colour (light), w: FogStart
   float4 FogFar;   // rgb: the far fog's colour (light), w: where it ends (FarClip)
   float4 FogParams;// x: NearFogAmount, y: fog on (1)
+  // The sun's shadow (see SunShadow, FrameLight.SunShadow): the light's axes u and v across (U.w: the fade's scale), h
+  // towards the sun (w: the heights' reference), the view's forward (w: the map's texture number, 0: no shadow), the
+  // depths along it from which the next cascade is read (w: no shadow from this distance), each cascade's box.
+  float4 SunU;
+  float4 SunV;
+  float4 SunH;
+  float4 SunForward;
+  float4 SunSplits;
+  float4 SunBox[4];
 };
 ConstantBuffer<Frame> f : register(b1);
 
@@ -297,6 +306,50 @@ float PSShadow(ShOut input) : SV_Target
   return input.lamp.y;
 }
 
+// Drawing into a cascade of the sun's shadow map (the page's shadowVertex / shadowFragment, gtaiv-pc.js; GTA IV's
+// shadow VS 0x247AF240 and PS 0x23CFA7A0 in the TLAD trace): across, the point on the cascade's u and v (d.Tint: the
+// box's centre and 1 / half its size), the depth from its height along the sun (the highest kept; 1 km either way of
+// the reference, GL's -1..1 here 0..1), stored: that height less the cascade's bias (d.Material.x). A see-through, decal
+// or cut-out material blended in by its texture's alpha (d.Material.y 1; else alpha 1).
+struct SunIn { float3 position : POSITION; float2 uv : TEXCOORD0; };
+struct SunSkinIn { float3 position : POSITION; float2 uv : TEXCOORD0; float4 bones : BLENDINDICES; float4 boneWeights : BLENDWEIGHT; };
+struct SunOut { float4 position : SV_Position; float up : UP; float2 uv : TEXCOORD0; };
+
+SunOut SunFinish(float4 local, float2 uv)
+{
+  float3 p = mul(local, d.World).xyz;
+  float up0 = dot(p, f.SunH.xyz) - f.SunH.w;
+  SunOut o;
+  o.position = float4((dot(p, f.SunU.xyz) - d.Tint.x) * d.Tint.z, (dot(p, f.SunV.xyz) - d.Tint.y) * d.Tint.w,
+                      clamp(-up0 / 1000.0, -1.0, 1.0) * 0.5 + 0.5, 1);
+  o.up = up0;
+  o.uv = uv;
+  return o;
+}
+
+SunOut VSSun(SunIn input)
+{
+  return SunFinish(float4(input.position, 1), input.uv);
+}
+
+SunOut VSSunSkinned(SunSkinIn input)
+{
+  float4 p;
+  float3 n, t;
+  Skin(input.position, 0, 0, input.bones, input.boneWeights, p, n, t);
+  return SunFinish(p, input.uv);
+}
+
+float4 PSSun(SunOut input) : SV_Target
+{
+  float a = 1;
+  if (d.Material.y > 0.5)
+  {
+    a = saturate(Tex[Parts[(uint)d.Part.x].Tex.x].Sample(Linear, input.uv).a);
+  }
+  return float4(input.up - d.Material.x, 0, 0, a);
+}
+
 // The light target and the G-buffer the lamps are added over (#112 step 5): what the lamps' light is multiplied by
 // (the albedo; a glowing material laid over by its alpha only by the rest), the normal and AO the light was made with,
 // the place (w: 1 written, 2 written and baked: the game's stencil for its cutscene lights).
@@ -321,12 +374,55 @@ float3 Rounded(float3 g)
   return normalize(s * 2 - 0.99999);
 }
 
-// The light of a surface (no albedo): the light from around by the normal's z x AO + the sun past n.l 0.25.
-float3 LitBy(float3 n, float ao)
+// How much of the sun reaches the point P (0 to 1), the page's gameSunShadow (gtaiv-pc.js; GTA IV's
+// deferred_lighting.fxc sun pass, program 21): the cascade by the point's depth along the view (SunSplits), its place
+// in that cascade's quarter of the map, twelve taps round it (the game's c8 to c13, x 1 / 2048 of the map), each lit
+// where the point is as high along the sun as what is stored there or higher; their share plus FadeScale (distance /
+// FadeEnd)², saturated; 1 from FadeEnd on. The map is the four cascades side by side, 2048 x 2048 each. The page's
+// coordinates are GL's (a map's rows from the bottom): here its rows turned over (a cascade's NDC y up is row 0 at the
+// bottom there, at the top here), the same texels read, clamped to the whole map's edge as the page's CLAMP_TO_EDGE.
+static const float2 SunTaps[12] = { float2(-0.326212, -0.40581), float2(-0.840144, -0.07358), float2(-0.695914, 0.457137),
+  float2(-0.203345, 0.620716), float2(0.96234, -0.194983), float2(0.473434, -0.480026), float2(0.519456, 0.767022),
+  float2(0.185461, -0.893124), float2(0.507431, 0.064425), float2(0.89642, 0.412458), float2(-0.32194, -0.932615), float2(-0.791559, -0.59771) };
+static const int SunMapSize = 2048;
+
+float SunShadow(float3 P)
+{
+  uint map = (uint)(f.SunForward.w + 0.5);
+  if (map == 0)
+  {
+    return 1;
+  }
+  float dist = length(P - f.Eye.xyz);
+  if (dist >= f.SunSplits.w)
+  {
+    return 1;
+  }
+  float depth = dot(P - f.Eye.xyz, f.SunForward.xyz);
+  int k = (depth >= f.SunSplits.x ? 1 : 0) + (depth >= f.SunSplits.y ? 1 : 0) + (depth >= f.SunSplits.z ? 1 : 0);
+  float4 box = f.SunBox[k];
+  float2 at = float2((dot(P, f.SunU.xyz) - box.x) * box.z, (dot(P, f.SunV.xyz) - box.y) * box.w) * 0.5 + 0.5;
+  float up0 = dot(P, f.SunH.xyz) - f.SunH.w;
+  float lit = 0;
+  [unroll] for (int i = 0; i < 12; i++)
+  {
+    float2 t = at + SunTaps[i] / SunMapSize;
+    int x = clamp((int)floor((k + t.x) * 0.25 * (4 * SunMapSize)), 0, 4 * SunMapSize - 1);
+    int y = clamp((int)floor(t.y * SunMapSize), 0, SunMapSize - 1);
+    float stored = Tex[map].Load(int3(x, SunMapSize - 1 - y, 0)).r;
+    lit += up0 >= stored ? 1 : 0;
+  }
+  float away = dist / f.SunSplits.w;
+  return saturate(lit / 12 + f.SunU.w * away * away);
+}
+
+// The light of a surface (no albedo): the light from around by the normal's z x AO + the sun past n.l 0.25, x its
+// shadow (the page's outsideLight: sunColor x sunLit x sunShadow).
+float3 LitBy(float3 n, float ao, float sunShadow)
 {
   float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
   float sunLit = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
-  return around * ao + f.Sun.rgb * sunLit;
+  return around * ao + f.Sun.rgb * sunLit * sunShadow;
 }
 
 // deferred: the solid pass and the decals (G-buffer); else the see-through pass (forward, blended).
@@ -468,10 +564,12 @@ PsOut Shade(VsOut input, bool deferred)
       ao = below.w;
     }
   }
-  float3 lit = LitBy(n, ao);
+  // The sun's shadow at the point (1 without one), on the sun's light and its shine (the page's sunShadow).
+  float sunShadow = SunShadow(input.world);
+  float3 lit = LitBy(n, ao, sunShadow);
   if ((bits & FDecalBelow) != 0 && f.Screen.z > 0.5)
   {
-    lit = LitBy(normalize(below.xyz + 1e-6), below.w);
+    lit = LitBy(normalize(below.xyz + 1e-6), below.w, sunShadow);
   }
   // The sun's shine (the page's vehicleShine and pedShine, sun parts; the mirrored surroundings and the lamps' shine
   // not yet).
@@ -489,7 +587,7 @@ PsOut Shade(VsOut input, bool deferred)
       strength = min(strength, 1);
     }
     float power = vs.a * p.VShine.y * reflective;
-    float3 sunShine = f.Sun.rgb * pow(sunR + 1e-4, power + 1e-4);
+    float3 sunShine = f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4);
     if (vehicleGlassShader || p.VShine.z > 2.5)
     {
       float fr = pow(1 - abs(dot(view, n)), 4);
@@ -514,13 +612,13 @@ PsOut Shade(VsOut input, bool deferred)
     if ((bits & FForwardShine) != 0)
     {
       // Forward (glass, see-through map materials, a ped's see-through parts): no halving, no 0.75 on the power.
-      shine = amount * f.Sun.rgb * pow(sunR + 1e-4, spec.a * p.Spec.x + 1e-4) * shineScale;
+      shine = amount * f.Sun.rgb * sunShadow * pow(sunR + 1e-4, spec.a * p.Spec.x + 1e-4) * shineScale;
     }
     else
     {
       // The G-buffer's (deferred_lighting's sun pass): 2 x GB2.x x the sun x 2 gDirectionalLight.w.
       float power = spec.a * p.Spec.x * (baked ? 1 : 0.75);
-      shine = 2 * (baked ? 0.5 : 0.25) * amount * f.Sun.rgb * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale;
+      shine = 2 * (baked ? 0.5 : 0.25) * amount * f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale;
     }
   }
   // How much of it shows (the see-through pass and decals): the texture's alpha x the vertex's (a vehicle lamp's
@@ -761,10 +859,23 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
   }
   return float4(FogColour(distance), amount);
 }
+
+// The sun's shadow map from a cascade's 4096 x 4096 work target (the page's shadowConvert, GTA IV's cascadeConvert ps 2:
+// its four reads half a texel off, x 0.25): each texel of the cascade's quarter the mean of its 2 x 2 (the max of the
+// map's objects and the cast is already in the work target, see DrawSunShadow).
+Texture2D<float> SunWork : register(t8);
+
+float4 PSSunConvert(float4 position : SV_Position) : SV_Target
+{
+  int2 at = (int2(position.xy) % SunMapSize) * 2;
+  float sum = SunWork.Load(int3(at, 0)) + SunWork.Load(int3(at + int2(1, 0), 0)) +
+              SunWork.Load(int3(at + int2(0, 1), 0)) + SunWork.Load(int3(at + int2(1, 1), 0));
+  return float4(sum * 0.25, 0, 0, 1);
+}
 ";
 
     private const int DrawConstants = 16 + 4 + 4 + 4 + 4 + 4;
-    private const int FrameFloats = 16 + 4 * 11;
+    private const int FrameFloats = 16 + 4 * 20;
     // A part's material for the shader (PartData: 11 x 4 numbers), and the per-vertex extras (tangent, layer texture
     // coordinates, layer weights: 14 floats) of models that have any.
     private const int PartWords = 44;
@@ -785,7 +896,16 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
     /// </summary>
     public const int ShadowSlots = 4;
     private const int ShadowSize = 1024;
-    private const int FrameSlotBytes = 256;
+    // (The frame's constants, FrameFloats, rounded up to the constant buffers' 256-byte steps.)
+    private const int FrameSlotBytes = (FrameFloats * 4 + 255) / 256 * 256;
+
+    /// <summary>
+    /// The sun's shadow map (see <see cref="SunShadow"/>): its cascades, each drawn at 4096 x 4096 (R32F, with a depth)
+    /// and averaged 2 x 2 into its 2048 x 2048 quarter of the map read by the light (R16F), as the page's shadowTarget.
+    /// </summary>
+    public const int SunCascades = 4;
+    private const int SunWorkSize = 4096;
+    private const int SunMapSize = 2048;
     private const int VertexFloats = 12;
     private const int SkinFloats = 8;
 
@@ -835,6 +955,15 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       /// <summary>Its number in its model's PartData.</summary>
       public int Index { get; init; }
 
+      /// <summary>See-through (the page's seeThrough: glass, or blended with a texture): a cast's not in the sun's shadow map.</summary>
+      public bool SeeThrough { get; init; }
+
+      /// <summary>
+      /// Into the sun's shadow map blended by its texture's alpha, after the solid ones (the page's alphaShadow: what the
+      /// game's own module marks so, see <see cref="SceneMaterial.ShadowByAlpha"/>).
+      /// </summary>
+      public bool AlphaShadow { get; init; }
+
       public uint Start { get; }
       public uint Count { get; }
       public int Texture { get; }
@@ -856,6 +985,8 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       public uint IndexCount;
       public Part[] Parts = Array.Empty<Part>();
       public Vector3 Min, Max;
+      // A cutscene's cast (ModelSource.Actor): drawn into the sun's shadow map each frame with the cast, else with the map.
+      public bool Actor;
       // The parts' materials (PartData, t2) and the vertices' extras (null: none, the shared zeros read instead).
       public ID3D12Resource PartData = null!;
       public ID3D12Resource? Extras;
@@ -881,6 +1012,7 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       public float ActorAmbient = 1;
       public bool InRoom;
       public bool CastsShadow;
+      public bool CastsSunShadow = true;
     }
 
     /// <summary>An actor's share of the light from around (its room's AmbientDownMult; 1 outside).</summary>
@@ -942,6 +1074,21 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
     private readonly ID3D12DescriptorHeap _shadowDsv;
     private readonly ID3D12PipelineState[] _shadowPipelines = new ID3D12PipelineState[4];
     private readonly int[] _slotOf = new int[ShadowSlots];
+
+    // The sun's shadow map: a cascade's work target and its depth, the map of the four cascades (read by its number among
+    // the textures), their views (made when first drawn), the pipelines drawing into a cascade (skinned or not x the map's
+    // solid objects, its blended ones, the cast) and the one averaging a cascade into the map.
+    private ID3D12Resource? _sunWork;
+    private ID3D12Resource? _sunDepth;
+    private ID3D12Resource? _sunMap;
+    private readonly ID3D12DescriptorHeap _sunRtvs;
+    private readonly ID3D12DescriptorHeap _sunDsv;
+    private readonly ID3D12PipelineState[] _sunPipelines = new ID3D12PipelineState[6];
+    private readonly ID3D12PipelineState _sunConvertPipeline;
+    private readonly int _sunSlot;
+
+    /// <summary>Whether the sun's shadow map was drawn last frame.</summary>
+    public bool SunShadowDrawn { get; private set; }
 
     /// <summary>The shadow maps drawn last frame (lights).</summary>
     public int ShadowMapsDrawn { get; private set; }
@@ -1056,7 +1203,7 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       {
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(3, 0), ShaderVisibility.All),
-        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 4, 4, 0, 0)), ShaderVisibility.Pixel),
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 5, 4, 0, 0)), ShaderVisibility.Pixel),
       }));
       _lightPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
       {
@@ -1096,7 +1243,8 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       _lights.Map(0, null, &lightsMapped).CheckError();
       _lightsMapped = (byte*)lightsMapped;
       _gBufferRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
-      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 4, DescriptorHeapFlags.ShaderVisible));
+      // (The G-buffer's three, the lamps' shadow atlas, the sun's cascade work target: t4 to t8.)
+      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 5, DescriptorHeapFlags.ShaderVisible));
 
       // The shadow atlas (t7, after the G-buffer's three) and its depth; the pipelines drawing into it.
       _shadowAtlas = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
@@ -1137,6 +1285,60 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
           });
         }
       }
+      // The sun's shadow map (its targets made when first drawn, see SizeSun): into a cascade with the page's states - the
+      // map's solid objects with the depth test (LEQUAL, writing: the highest along the sun kept), its see-through, decal
+      // and cut-out materials blended SRCALPHA / INVSRCALPHA over them (writing depth, as the game's wd_draw), the cast
+      // by MAX (the page's max of the map and the cast, each with its own depth: the same), all faces, nothing cut out.
+      _sunRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 2));
+      _sunDsv = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.DepthStencilView, 1));
+      d3d.CreateShaderResourceView(null, new ShaderResourceViewDescription
+      {
+        Format = Format.R32_Float,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() + 4 * (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
+      var sunVertex = Compile(DxcShaderStage.Vertex, "VSSun");
+      var sunSkinned = Compile(DxcShaderStage.Vertex, "VSSunSkinned");
+      var sunPixel = Compile(DxcShaderStage.Pixel, "PSSun");
+      var sunAlpha = new BlendDescription(Blend.SourceAlpha, Blend.InverseSourceAlpha);
+      var sunMax = new BlendDescription(Blend.One, Blend.One);
+      sunMax.RenderTarget[0] = sunMax.RenderTarget[0] with { BlendOperation = BlendOperation.Max, BlendOperationAlpha = BlendOperation.Max };
+      var sunDepthTest = new DepthStencilDescription(true, DepthWriteMask.All, ComparisonFunction.LessEqual);
+      for (int s = 0; s < 2; s++)
+      {
+        for (int phase = 0; phase < 3; phase++)
+        {
+          _sunPipelines[s * 3 + phase] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+          {
+            RootSignature = _rootSignature,
+            VertexShader = s == 1 ? sunSkinned : sunVertex,
+            PixelShader = sunPixel,
+            InputLayout = new InputLayoutDescription(s == 1 ? shadowSkinnedInput : shadowInput),
+            SampleMask = uint.MaxValue,
+            PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+            RasterizerState = RasterizerDescription.CullNone,
+            BlendState = phase == 0 ? BlendDescription.Opaque : phase == 1 ? sunAlpha : sunMax,
+            DepthStencilState = phase == 2 ? DepthStencilDescription.None : sunDepthTest,
+            RenderTargetFormats = new[] { Format.R32_Float },
+            DepthStencilFormat = Format.D32_Float,
+            SampleDescription = new SampleDescription(1, 0),
+          });
+        }
+      }
+      _sunConvertPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _lightSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSFog"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSSunConvert"),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        RasterizerState = RasterizerDescription.CullNone,
+        BlendState = BlendDescription.Opaque,
+        DepthStencilState = DepthStencilDescription.None,
+        RenderTargetFormats = new[] { Format.R16_Float },
+        SampleDescription = new SampleDescription(1, 0),
+      });
       // The frame's constants (camera, light), a slot per frame in flight.
       _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
                                            ResourceDescription.Buffer((ulong)PaletteSlots * FrameSlotBytes), ResourceStates.GenericRead);
@@ -1158,7 +1360,43 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       new Span<byte>(zeros, 256).Clear();
       _noExtras.Unmap(0);
       _belowSlot = _textures.Reserve();
+      _sunSlot = _textures.Reserve();
     }
+
+    // The sun's shadow map's targets, made when first drawn (some 160 MB: not for views without a sun's shadow).
+    private void SizeSun()
+    {
+      if (_sunMap != null)
+      {
+        return;
+      }
+      var d3d = _device.Device;
+      _sunWork = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.R32_Float, SunWorkSize, SunWorkSize, 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+        ResourceStates.RenderTarget, new ClearValue(Format.R32_Float, new Vortice.Mathematics.Color4(-100, 0, 0, 0)));
+      _sunDepth = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.D32_Float, SunWorkSize, SunWorkSize, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+        ResourceStates.DepthWrite, new ClearValue(Format.D32_Float, 1.0f, 0));
+      _sunMap = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.R16_Float, SunMapSize * SunCascades, SunMapSize, 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+        ResourceStates.PixelShaderResource, new ClearValue(Format.R16_Float, new Vortice.Mathematics.Color4(0, 0, 0, 0)));
+      uint rtvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      d3d.CreateRenderTargetView(_sunWork, null, _sunRtvs.GetCPUDescriptorHandleForHeapStart());
+      d3d.CreateRenderTargetView(_sunMap, null, _sunRtvs.GetCPUDescriptorHandleForHeapStart() + (int)rtvSize);
+      d3d.CreateDepthStencilView(_sunDepth, null, _sunDsv.GetCPUDescriptorHandleForHeapStart());
+      d3d.CreateShaderResourceView(_sunWork, null, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() +
+        4 * (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
+      if (_sunSlot > 0)
+      {
+        d3d.CreateShaderResourceView(_sunMap, null, _textures.CpuHandle(_sunSlot));
+      }
+    }
+
+    /// <summary>
+    /// The sun's shadow map as last drawn (the four cascades side by side, R16F, readable by pixel shaders; see
+    /// <see cref="SunShadow"/>), for what is drawn after the solid scene (the water); null before the first.
+    /// </summary>
+    public ID3D12Resource? SunShadowMap => _sunMap;
 
     // A light added onto the light target's colour (one + one), its alpha left.
     private static BlendDescription AddedLight()
@@ -1573,6 +1811,8 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
           // glass and see-through materials.
           Culled = culled || (baked && !material.Tree && pass == Pass.Solid),
           Index = partIndex,
+          SeeThrough = material.Glass || (material.Blend && textured),
+          AlphaShadow = material.ShadowByAlpha,
         });
       }
       pending += textureBytes;
@@ -1584,7 +1824,7 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
         }
         return null;
       }
-      var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray() };
+      var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray(), Actor = source.Actor };
       model.Textures.AddRange(textures);
       pending += (long)vertices.Count * 4 + (long)indices.Count * 4 + (skin?.Count ?? 0) * 4L + (extras?.Count ?? 0) * 4L + partData.Count * 4L;
       model.Vertices = Upload(vertices.ToArray(), list, uploads, out ulong vertexBytes);
@@ -1647,11 +1887,13 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
 
     /// <summary>
     /// A model drawn with a model-to-scene matrix (and, skinned, its bones' matrices); its instance's number.
-    /// <paramref name="castsShadow"/>: its solid parts drawn into the lights' shadow maps (while visible).
+    /// <paramref name="castsShadow"/>: its solid parts drawn into the lights' shadow maps (while visible);
+    /// <paramref name="castsSunShadow"/>: drawn into the sun's shadow map (while visible; see <see cref="SunShadow"/>).
     /// </summary>
-    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false, bool castsShadow = false)
+    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false, bool castsShadow = false,
+                           bool castsSunShadow = true)
     {
-      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom, CastsShadow = castsShadow });
+      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom, CastsShadow = castsShadow, CastsSunShadow = castsSunShadow });
       return _instances.Count - 1;
     }
 
@@ -1767,15 +2009,37 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       frame[57] = light.Fog && !NoFog ? 1 : 0;
       frame[58] = 0;
       frame[59] = 0;
+      // The sun's shadow (FrameLight.SunShadow): its axes, cascades and fade; the map's number once drawn (below).
+      var sun = light.SunShadow;
+      bool sunOn = sun != null && sun.Boxes.Length >= SunCascades && sun.Biases.Length >= SunCascades && _sunSlot > 0;
+      new Span<float>(frame + 60, FrameFloats - 60).Clear();
+      if (sunOn)
+      {
+        Put(60, sun!.U, sun.FadeScale);
+        Put(64, sun.V);
+        Put(68, sun.H, sun.Reference);
+        Put(72, sun.ViewForward, _sunSlot);
+        Put(76, sun.Splits, sun.FadeEnd);
+        for (int k = 0; k < SunCascades; k++)
+        {
+          *(Vector4*)(frame + 80 + k * 4) = sun.Boxes[k];
+        }
+      }
 
-      // The shadowed lights' maps (step 5), before anything else is drawn.
+      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
+
+      // The shadowed lights' maps (step 5) and the sun's, before anything else is drawn.
       ShadowMapsDrawn = 0;
       if (lights != null)
       {
         DrawShadowMaps(list, lights);
       }
-
-      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
+      SunShadowDrawn = false;
+      if (sunOn)
+      {
+        DrawSunShadow(list, sun!, frameAddress);
+        SunShadowDrawn = true;
+      }
       void Bind(bool gBuffer)
       {
         if (gBuffer)
@@ -1907,6 +2171,137 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       }
       list.ResourceBarrierTransition(_shadowAtlas, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
     }
+
+    // The sun's shadow map (the page's sunShadowCascades drawing, ModelView.html: castBox / shadowConvert): per cascade the
+    // work target cleared to -100 (the game's cascadeConvert ps 1), the map's objects lying across the cascade's box
+    // (solid, then those blended by their texture's alpha), the cast (each frame; max with the map), then its 2 x 2 mean
+    // into the cascade's quarter of the map. The page keeps the map's objects' part per cascade and draws it again only
+    // when the cascades change; drawn whole each frame here (the same map).
+    private unsafe void DrawSunShadow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress)
+    {
+      SizeSun();
+      var d3d = _device.Device;
+      var workRtv = _sunRtvs.GetCPUDescriptorHandleForHeapStart();
+      var mapRtv = workRtv + (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      var dsv = _sunDsv.GetCPUDescriptorHandleForHeapStart();
+      list.ResourceBarrierTransition(_sunMap!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      var draw = stackalloc float[DrawConstants];
+      for (int k = 0; k < SunCascades; k++)
+      {
+        list.OMSetRenderTargets(workRtv, dsv);
+        list.ClearRenderTargetView(workRtv, new Vortice.Mathematics.Color4(-100, 0, 0, 0));
+        list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+        list.RSSetViewport(new Vortice.Mathematics.Viewport(SunWorkSize, SunWorkSize));
+        list.RSSetScissorRect(SunWorkSize, SunWorkSize);
+        list.SetGraphicsRootSignature(_rootSignature);
+        list.SetDescriptorHeaps(_textures.Heap);
+        list.SetGraphicsRootConstantBufferView(3, frameAddress);
+        list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        for (int phase = 0; phase < 3; phase++)
+        {
+          DrawSunPhase(list, sun, k, phase, draw);
+        }
+        list.ResourceBarrierTransition(_sunWork!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+        list.OMSetRenderTargets(mapRtv, null);
+        list.RSSetViewport(new Vortice.Mathematics.Viewport(k * SunMapSize, 0, SunMapSize, SunMapSize));
+        list.RSSetScissorRect(new Vortice.Mathematics.RectI(k * SunMapSize, 0, SunMapSize, SunMapSize));
+        list.SetGraphicsRootSignature(_lightSignature);
+        list.SetPipelineState(_sunConvertPipeline);
+        list.SetDescriptorHeaps(_gBufferSrvs);
+        list.SetGraphicsRootConstantBufferView(0, frameAddress);
+        list.SetGraphicsRootShaderResourceView(1, _lights.GPUVirtualAddress);
+        list.SetGraphicsRootDescriptorTable(2, _gBufferSrvs.GetGPUDescriptorHandleForHeapStart());
+        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        list.DrawInstanced(3, 1, 0, 0);
+        DrawCalls++;
+        list.ResourceBarrierTransition(_sunWork!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      }
+      list.ResourceBarrierTransition(_sunMap!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+    }
+
+    // One phase of a cascade (the page's drawMeshes with castBox): 0 the map's objects' parts not blended (all but those
+    // marked AlphaShadow), 1 those blended by their texture's alpha (alpha 1 without a texture), 2 the cast's parts that
+    // aren't see-through. The map's objects only where their sphere lies across the cascade's box on u and v.
+    private unsafe void DrawSunPhase(ID3D12GraphicsCommandList list, SunShadow sun, int k, int phase, float* draw)
+    {
+      var box = sun.Boxes[k];
+      int lastPipeline = -1;
+      foreach (var instance in _instances)
+      {
+        if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || model.Actor != (phase == 2))
+        {
+          continue;
+        }
+        if (!model.Actor)
+        {
+          if (!instance.CastsSunShadow)
+          {
+            continue;
+          }
+          var center = Vector3.Transform((model.Min + model.Max) * 0.5f, instance.World);
+          float scale = MathF.Max(new Vector3(instance.World.M11, instance.World.M12, instance.World.M13).Length(),
+                        MathF.Max(new Vector3(instance.World.M21, instance.World.M22, instance.World.M23).Length(),
+                                  new Vector3(instance.World.M31, instance.World.M32, instance.World.M33).Length()));
+          float radius = (model.Max - model.Min).Length() * 0.5f * scale;
+          if (MathF.Abs(Vector3.Dot(center, sun.U) - box.X) > 1 / box.Z + radius ||
+              MathF.Abs(Vector3.Dot(center, sun.V) - box.Y) > 1 / box.W + radius)
+          {
+            continue;
+          }
+        }
+        bool any = false;
+        foreach (var part in model.Parts)
+        {
+          if (SunDrawn(part, phase))
+          {
+            any = true;
+            break;
+          }
+        }
+        if (!any)
+        {
+          continue;
+        }
+        bool skinned = model.Skin != null;
+        int pipeline = (skinned ? 3 : 0) + phase;
+        if (pipeline != lastPipeline)
+        {
+          list.SetPipelineState(_sunPipelines[pipeline]);
+          lastPipeline = pipeline;
+        }
+        list.IASetVertexBuffers(0, model.VertexView);
+        if (skinned)
+        {
+          list.IASetVertexBuffers(1, model.SkinView);
+          list.SetGraphicsRootShaderResourceView(2, instance.PaletteAddress != 0 ? instance.PaletteAddress : _palette.GPUVirtualAddress);
+        }
+        list.SetGraphicsRootShaderResourceView(4, model.PartData.GPUVirtualAddress);
+        list.IASetIndexBuffer(model.IndexView);
+        new Span<float>(draw, DrawConstants).Clear();
+        *(Matrix4x4*)draw = instance.World;
+        draw[18] = instance.PaletteAddress != 0 ? instance.Palette!.Length : 0;
+        draw[20] = sun.Biases[k];
+        draw[28] = box.X;
+        draw[29] = box.Y;
+        draw[30] = box.Z;
+        draw[31] = box.W;
+        foreach (var part in model.Parts)
+        {
+          if (!SunDrawn(part, phase))
+          {
+            continue;
+          }
+          draw[21] = phase == 1 && part.Texture != 0 ? 1 : 0;
+          draw[32] = part.Index;
+          list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+          list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+          DrawCalls++;
+        }
+      }
+    }
+
+    private static bool SunDrawn(Part part, int phase) => phase == 2 ? !part.SeeThrough : part.AlphaShadow == (phase == 1);
 
     // The lights into this frame's slot of the light buffer, then a box each (instanced) over the G-buffer.
     private unsafe void DrawLights(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
@@ -2090,6 +2485,16 @@ float4 PSFog(float4 position : SV_Position) : SV_Target
       {
         pipeline.Dispose();
       }
+      _sunWork?.Dispose();
+      _sunDepth?.Dispose();
+      _sunMap?.Dispose();
+      _sunRtvs.Dispose();
+      _sunDsv.Dispose();
+      foreach (var pipeline in _sunPipelines)
+      {
+        pipeline.Dispose();
+      }
+      _sunConvertPipeline.Dispose();
       _lightPipeline.Dispose();
       _fogPipeline.Dispose();
       _lightSignature.Dispose();

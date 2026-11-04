@@ -162,8 +162,29 @@ the water and shadows. In the app the player draws it through `IRenderScene.Draw
 colours, and outside the sea grid round the camera with the page's swell and ripple simulation (made deterministic:
 the given time instead of the wall clock, a seeded random), the near field taken from a mask of the quads (their boxes,
 made on the CPU), Fresnel, the sun's glint and foam, the game's fog. Not yet: the mirrored scene (the mirror shows the
-sky only, so the sea comes out a little light), seeing through to the ground, the sun's shadow on it. Its simulation
-warms up over the first frames; inside, where the sea isn't simulated, there is nothing to warm up.
+sky only, so the sea comes out a little light), seeing through to the ground. Its simulation warms up over the first
+frames; inside, where the sea isn't simulated, there is nothing to warm up. The sun's glint and light on it x the sun's
+shadow (the page's waterShadow: at the point a metre up, that metre x (1 - 0.0004 d²)), read from
+`MeshRenderer.SunShadowMap` when it was drawn this frame (its own SRV, t4).
+
+### The sun's shadow (step 5)
+
+As the page's (gtaiv-pc.js `sunShadowCascades`, `shadowTarget`, `gameSunShadow`; ModelView.html `castBox`,
+`shadowConvert`), wherever the game's light is (the page's `outside`, true for every cutscene with a location, inside
+too: et01_aa's room gets no sun through its walls). `CutsceneSunShadow` (GTA IV PC, in CutsceneLighting.cs) lays out
+the four cascades per frame from the camera (u: forward laid flat across the sun, v = u x sun; slices to 9.5, 20, 50,
+175 m; each the box round its slice's corners; biases 0.14/0.24/0.5/0.75 m) into `FrameLight.SunShadow` (the generic
+`SunShadow` class). `MeshRenderer.DrawSunShadow` draws each cascade before the G-buffer into a 4096² R32F work target
+(cleared to -100, depth 0..1 from the height along the sun, LEQUAL): the map's objects whose sphere crosses the box
+(solid parts, then the parts marked `SceneMaterial.ShadowByAlpha` - GTA IV buckets 1-3, not trees or vehicles - blended
+SRCALPHA/INVSRCALPHA by their texture's alpha), then the cast's non-see-through parts with MAX blending (the page's max
+of map and cast), nothing culled or cut out; then the 2 x 2 mean into the cascade's 2048² quarter of an 8192 x 2048
+R16F map (read by its number in the texture heap). `Shade` multiplies the sun (and the sun's shine on peds, vehicles,
+the map) by `SunShadow(world)`: cascade by view depth, twelve taps 1/2048 apart, + 1.5 (d / 175)², none from 175 m; the
+page's GL rows turned over so the same texels are read. Floating litter casts none (`AddInstance(castsSunShadow:)`).
+Unlike the page: the map's part of the cascades is drawn whole each frame (the page keeps it until the cascades
+change: same map, more GPU work); the page's culling by draw distance and haze end isn't there (nor in the main pass);
+glowing glass (gta_glass_emissive, left out of the models) casts nothing. cutgen: `D3D12NOSUNSHADOW=1` turns it off.
 
 ### Lights and lamps (step 5, first version)
 

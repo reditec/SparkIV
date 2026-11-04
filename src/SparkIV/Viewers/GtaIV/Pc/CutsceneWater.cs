@@ -103,6 +103,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// swelling, simulated on the CPU) where the quads lie inside its window, both shaded by the game's water: three
   /// sizes of ripples from the wave texture (waterTex.fxc, 1024 x 1024, simulated on the GPU), the swell's slope, the
   /// Fresnel mix of the water's colour and the mirror, the sun's glint, the foam of the near field, then the game's fog.
+  /// The sun's glint and light x its shadow (the page's waterShadow) from the map MeshRenderer drew this frame.
   /// Drawn after the solid meshes and before the see-through ones, into the light target, blended premultiplied
   /// (ONE, ONE_MINUS_SRC_ALPHA), depth tested LESS_EQUAL and written, both faces.
   ///
@@ -114,7 +115,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   ///   lookup is taken as the bounce off the steep normal.
   /// - the scene's depth behind the water (see-through shallows, the shore's normal bend): taken as 1 m everywhere, and
   ///   the water opaque (a = 1), as the page without its depth copy.
-  /// - the sun's shadow on the water (gameSunShadow): 1.
   /// - the stencil "no water inside boats" (bucket 30 planes).
   /// - the page's haze edge (a page device) and its culling.
   ///
@@ -183,8 +183,17 @@ struct Water
   float4 AzimuthEast;  // rgb, w: the page's exposure
   float4 SkySunColor;  // rgb
   float4 Hdr;          // HDRExposure, HDRSunExposure.xy, HDRExposureClamp
+  // The sun's shadow as MeshRenderer reads it (FrameLight.SunShadow): u (w: the fade's scale), v, h (w: the heights'
+  // reference), the view's forward (w: 1 with a map), the cascades' splits (w: the fade's end), each cascade's box.
+  float4 SunU;
+  float4 SunV;
+  float4 SunH;
+  float4 SunForward;
+  float4 SunSplits;
+  float4 SunBox[4];
 };
 ConstantBuffer<Water> w : register(b1);
+Texture2D<float> SunMap : register(t4);   // the sun's shadow map (MeshRenderer.SunShadowMap)
 Texture2D Sim : register(t0);             // the wave texture: r height, g speed, ba slope
 Texture2D Noise : register(t3);           // the wave step's random bytes
 StructuredBuffer<float> Swell : register(t1);  // the swell's heights, [ring y][ring x]
@@ -324,6 +333,41 @@ float3 GameFog(float3 light, float d)
   return light + GameFogAmount(d) * (colour - light);
 }
 
+// The page's gameSunShadow (gtaiv-pc.js) as MeshRenderer's SunShadow reads the same map: the cascade by the depth along
+// the view, twelve taps 1 / 2048 of the map apart, lit where the point is at least as high along the sun as what is
+// stored, + 1.5 (distance / 175)², none from 175 m; the page's GL rows turned over.
+static const float2 SunTaps[12] = { float2(-0.326212, -0.40581), float2(-0.840144, -0.07358), float2(-0.695914, 0.457137),
+  float2(-0.203345, 0.620716), float2(0.96234, -0.194983), float2(0.473434, -0.480026), float2(0.519456, 0.767022),
+  float2(0.185461, -0.893124), float2(0.507431, 0.064425), float2(0.89642, 0.412458), float2(-0.32194, -0.932615), float2(-0.791559, -0.59771) };
+
+float SunShadow(float3 P)
+{
+  if (w.SunForward.w < 0.5)
+  {
+    return 1;
+  }
+  float dist = length(P - w.Eye.xyz);
+  if (dist >= w.SunSplits.w)
+  {
+    return 1;
+  }
+  float depth = dot(P - w.Eye.xyz, w.SunForward.xyz);
+  int k = (depth >= w.SunSplits.x ? 1 : 0) + (depth >= w.SunSplits.y ? 1 : 0) + (depth >= w.SunSplits.z ? 1 : 0);
+  float4 box = w.SunBox[k];
+  float2 at = float2((dot(P, w.SunU.xyz) - box.x) * box.z, (dot(P, w.SunV.xyz) - box.y) * box.w) * 0.5 + 0.5;
+  float up0 = dot(P, w.SunH.xyz) - w.SunH.w;
+  float lit = 0;
+  [unroll] for (int s = 0; s < 12; s++)
+  {
+    float2 t = at + SunTaps[s] / 2048;
+    int x = clamp((int)floor((k + t.x) * 2048), 0, 8191);
+    int y = clamp((int)floor(t.y * 2048), 0, 2047);
+    lit += up0 >= SunMap.Load(int3(x, 2047 - y, 0)) ? 1 : 0;
+  }
+  float away = dist / w.SunSplits.w;
+  return saturate(lit / 12 + w.SunU.w * away * away);
+}
+
 float4 PSWater(VsOut i) : SV_Target
 {
   bool grid = pc.v.x > 0.5, seaOn = pc.v.y > 0.5, waves = pc.v.z > 0.5;
@@ -398,7 +442,10 @@ float4 PSWater(VsOut i) : SV_Target
 
   float3 sunDir = w.SunDirection.xyz;
   float3 sunColor = w.Sun.rgb;
-  float waterShadow = 1;                            // TODO: gameSunShadow at the lifted point
+  // The sun's shadow where water.fxc reads it (the page's waterShadow): at the point a metre up, that metre x
+  // (1 - 0.0004 d²) (its r0.z), in the world's heights (the scene's z + WaterOriginZ).
+  float shadowNear = max(1 - liftedD2 * 0.0004, 0);
+  float waterShadow = SunShadow(float3(lifted.xy, (lifted.z + w.Eye.w) * shadowNear - w.Eye.w));
   float glint = pow(saturate(dot(bounce, sunDir)) + 1e-4, 512) * waterShadow * w.SunDirection.w
               * (10 - 9 * pow(nearField, 0.25));
   float upHigh = saturate((p.z + w.Eye.w - 1) * 0.5);           // VS o1.w (waterRenderSimParam.z = 0 in the traces)
@@ -468,6 +515,8 @@ float4 PSWater(VsOut i) : SV_Target
     // The water mask (a byte per texel, row by world y), and the window it was made for.
     private readonly byte[] _mask = new byte[MaskSize * MaskSize];
     private int _maskX0 = int.MinValue, _maskY0 = int.MinValue;
+    // The sun's shadow map whose view is in the heap's fourth slot.
+    private ID3D12Resource? _sunMapSeen;
 
     public unsafe CutsceneWater(D3D12Device device, Format lightFormat, Format depthFormat)
     {
@@ -483,6 +532,8 @@ float4 PSWater(VsOut i) : SV_Target
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 3, 0, 0)), ShaderVisibility.Pixel),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(1, 0), ShaderVisibility.Pixel),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(2, 0), ShaderVisibility.Pixel),
+        // t4: the sun's shadow map (its view in the heap's fourth slot).
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 4, 0, 0)), ShaderVisibility.Pixel),
       };
       // The page's wave texture: LINEAR, REPEAT, one level (the game reads one level: far specks).
       var samplers = new[]
@@ -533,7 +584,7 @@ float4 PSWater(VsOut i) : SV_Target
         SampleDescription = new SampleDescription(1, 0),
       });
 
-      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
+      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 4, DescriptorHeapFlags.ShaderVisible));
       _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 2));
       _srvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
       _rtvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
@@ -550,6 +601,14 @@ float4 PSWater(VsOut i) : SV_Target
       }
       // The noise's slot shows the first state until the noise is made (never read before: no steps without it).
       d3d.CreateShaderResourceView(_sim[0], null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_srvSize);
+      // The sun's shadow map's slot: empty until one is given (never read without: SunForward.w 0).
+      d3d.CreateShaderResourceView(null, new ShaderResourceViewDescription
+      {
+        Format = Format.R16_Float,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 3 * (int)_srvSize);
 
       // The sea grid's indices: per cell a = j*101+i, b = a+1, c = a+101, d = c+1: (a, b, c), (b, d, c); 16-bit.
       var indices = new ushort[GridIndexCount];
@@ -973,7 +1032,7 @@ float4 PSWater(VsOut i) : SV_Target
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle lightTarget, CpuDescriptorHandle depth,
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light, WaterParams p,
-                            double seconds)
+                            double seconds, ID3D12Resource? sunShadowMap = null)
     {
       if (_quadIndexCount == 0 || _quadVertices == null)
       {
@@ -1055,6 +1114,25 @@ float4 PSWater(VsOut i) : SV_Target
       Put(f, 72, sky.AzimuthColorEast, sky.PageExposure);
       Put(f, 76, sky.SunColor, 0);
       Put(f, 80, new Vector3(sky.HdrExposure, sky.HdrSunExposure.X, sky.HdrSunExposure.Y), sky.HdrClamp);
+      // The sun's shadow (the frame's, read from the map MeshRenderer drew this frame; none without either).
+      new Span<float>(f + 84, 36).Clear();
+      if (light.SunShadow is SunShadow sun && sunShadowMap != null)
+      {
+        if (!ReferenceEquals(sunShadowMap, _sunMapSeen))
+        {
+          _sunMapSeen = sunShadowMap;
+          _device.Device.CreateShaderResourceView(sunShadowMap, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 3 * (int)_srvSize);
+        }
+        Put(f, 84, sun.U, sun.FadeScale);
+        Put(f, 88, sun.V, 0);
+        Put(f, 92, sun.H, sun.Reference);
+        Put(f, 96, sun.ViewForward, 1);
+        Put(f, 100, sun.Splits, sun.FadeEnd);
+        for (int c = 0; c < MeshRenderer.SunCascades; c++)
+        {
+          *(Vector4*)(f + 104 + c * 4) = sun.Boxes[c];
+        }
+      }
 
       var gpu = _srvHeap.GetGPUDescriptorHandleForHeapStart();
       list.OMSetRenderTargets(lightTarget, depth);
@@ -1066,6 +1144,7 @@ float4 PSWater(VsOut i) : SV_Target
       list.SetGraphicsRootDescriptorTable(3, gpu + 2 * (int)_srvSize);
       list.SetGraphicsRootShaderResourceView(4, gpuSlot + SwellOffset);
       list.SetGraphicsRootShaderResourceView(5, gpuSlot + MaskOffset);
+      list.SetGraphicsRootDescriptorTable(6, gpu + 3 * (int)_srvSize);
 
       var constants = stackalloc float[4];
       constants[0] = 0;
