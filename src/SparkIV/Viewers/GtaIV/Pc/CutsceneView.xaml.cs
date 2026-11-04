@@ -318,6 +318,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           // says "loaded" again when its textures are there).
           Working.IsActive = _locationLoading;
           break;
+        case "fps":
+          // The page's frames per second while playing (once a second); cleared when playing stops.
+          FpsText.Text = _playing && root.TryGetProperty("fps", out var fps) ? $"{fps.GetInt32()} fps" : "";
+          break;
         case "frame":
           _frame = root.GetProperty("frame").GetInt32();
           // With the sound, it keeps the time and says when the next section begins (the timer); without,
@@ -1181,6 +1185,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void ShowFrame()
     {
       double now = Now;
+      if (!_playing)
+      {
+        FpsText.Text = "";
+      }
       FrameText.Text = TimeSpan.FromSeconds(now).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(Length).ToString(@"m\:ss\.f");
       SectionText.Text = "Section " + (_section + 1) + " of " + _document.Cut.Sections.Count + "   ·   frame " + (_frame + 1) + " / " + _frames;
       _settingSlider = true;

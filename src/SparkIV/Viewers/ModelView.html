@@ -76,7 +76,7 @@
       };
     };
     for (const n of ["uniform1i", "uniform1f", "uniform2f", "uniform3f", "uniform4f", "uniform2i"]) scalar(n);
-    for (const n of ["uniform1fv", "uniform2fv", "uniform3fv", "uniform4fv", "uniform1iv"]) vector(n);
+    for (const n of ["uniform1fv", "uniform2fv", "uniform3fv", "uniform4fv", "uniform1iv", "uniform4iv"]) vector(n);
     const matrix = gl.uniformMatrix4fv.bind(gl);
     gl.uniformMatrix4fv = (location, transpose, values) => {
       if (location === null || location === undefined) return;
@@ -317,6 +317,8 @@
     // all round); colour times strength and a lamp's cone scale (for a cutscene's own light, no inner angle
     // known: -(its room + 2), so -1 outside any room).
     uniform bool forwardLit; uniform float actorAmbient; uniform vec2 aoScale;
+    // The lights reaching the mesh drawn (indices into the arrays below, 4 to an ivec4; count -1: all of them).
+    uniform ivec4 meshLights[8]; uniform int meshLightCount;
     uniform int sceneLights; uniform vec4 sceneLightAt[80]; uniform vec4 sceneLightDir[80]; uniform vec4 sceneLightColor[80];
     // How the game draws a location's lamp (see below): 1 as a "filler" (its 2dfx flag 0x100000), else as a light,
     // 0 outside, 2 in an interior's room.
@@ -557,8 +559,15 @@
       vec3 lampShine = vec3(0.0);
       float lampPower = 0.0;
       if (outdoor && !vehicle && (useSpecMap || specFlat) && useTexture) lampPower = (useSpecMap ? texture(specTex, vUv).a : 1.0) * specPower * (baked ? 1.0 : 0.75);
-      for (int i = 0; i < 80; i++) {
-        if (i >= sceneLights) break;
+      for (int j = 0; j < 80; j++) {
+        // Only the lights whose reach touches this mesh when the page lists them (meshLightCount >= 0, see
+        // meshLightList): the same picture, without every pixel going through all of them.
+        int i = j;
+        if (meshLightCount >= 0) {
+          if (j >= meshLightCount) break;
+          i = meshLights[j / 4][j % 4];
+        }
+        else if (j >= sceneLights) break;
         // A cutscene's light only on the peds, whatever room it and they stand in: its pass (deferred_lighting.fxc,
         // PS 0x25d41500) lights only where the G-buffer's stencil marks a ped. Inside (TLAD trace GTAIV.3, et01_aa
         // frame 10210) its five lights add nothing to the walls, the curtain or Elizabeta's earrings csElizEarRing,
@@ -854,6 +863,8 @@
       emissiveGlow: gl.getUniformLocation(program, "emissiveGlow"),
       glowOver: gl.getUniformLocation(program, "glowOver"),
       decalBelow: gl.getUniformLocation(program, "decalBelow"),
+      meshLights: gl.getUniformLocation(program, "meshLights"),
+      meshLightCount: gl.getUniformLocation(program, "meshLightCount"),
       decalAoBelow: gl.getUniformLocation(program, "decalAoBelow"),
       vehicleLight: gl.getUniformLocation(program, "vehicleLight"),
       lightDimmers: gl.getUniformLocation(program, "lightDimmers"),
@@ -2475,11 +2486,48 @@
     draw();
   }
 
+  // The lights whose reach touches a mesh (its sphere against theirs), into meshLightIndices; their count, or -1 for
+  // all of them: with few lights (going through all of them costs little), for what moves (the cast) and for a mesh
+  // that more than 32 reach. A light reaches nothing beyond its range, so the picture is the same; outside with its
+  // lamps in view the harbour's skyline (intro s2 f352.75) took 35 ms a frame with all 80 for every pixel, 31 ms
+  // before those lamps were taken.
+  // The location's lamps (after the cutscene's and the vehicles' lights, lights.moving of them) stand still: their
+  // part of a mesh's list kept with the mesh until the lamps taken change (lights.lampKey), the moving ones looked at
+  // each frame.
+  const meshLightIndices = new Int32Array(32);
+  function reaches(l, m) {
+    if (!(l.range > 0)) return true;
+    const r = l.range + m.radius, dx = l.at[0] - m.center[0], dy = l.at[1] - m.center[1], dz = l.at[2] - m.center[2];
+    return dx * dx + dy * dy + dz * dz < r * r;
+  }
+  function meshLightList(m, lights) {
+    if (lights.length <= 16 || m.actor || !m.center) return -1;
+    const moving = lights.moving ?? lights.length;
+    if (lights.lampKey === undefined) lights.lampKey = lights.slice(moving).map(l => l.at.join() + "/" + l.range).join(";");
+    if (m.lampKey !== lights.lampKey) {
+      const list = [];
+      for (let i = moving; i < lights.length && list.length <= 32; i++) if (reaches(lights[i], m)) list.push(i);
+      m.lampList = list;
+      m.lampKey = lights.lampKey;
+    }
+    let n = 0;
+    for (let i = 0; i < moving; i++) {
+      if (!reaches(lights[i], m)) continue;
+      if (n >= 32) return -1;
+      meshLightIndices[n++] = i;
+    }
+    if (n + m.lampList.length > 32) return -1;
+    for (const i of m.lampList) meshLightIndices[n++] = i;
+    return n;
+  }
+
   // The lights now, at most MaxLights: the cutscene's own (whole frames: their values step as the game's
   // do; the strongest first, up to 8), then the location's lamps nearest to the camera that reach near it.
   function sceneLightsNow() {
     if (!showSceneLights) return [];
     const now = cutLightsNow().slice(0, 8).concat(vehicleLightsNow());
+    // (The lights before the location's lamps: these move, see meshLightList.)
+    now.moving = now.length;
     if (mapLights.length && visible.size) {
       const film = filmView();
       const e = film ? film.eye : eye();
@@ -2899,8 +2947,22 @@
     }
   }
 
+  // Frames shown per second while playing, told to the host once a second (its status bar): a count per frame and
+  // one message a second, nothing drawn or read back for it.
+  const fpsCount = { frames: 0, since: 0 };
+  function countFrame(now) {
+    if (!fpsCount.since) fpsCount.since = now;
+    fpsCount.frames++;
+    if (now - fpsCount.since >= 1000) {
+      post({ type: "fps", fps: Math.round(fpsCount.frames * 1000 / (now - fpsCount.since)) });
+      fpsCount.frames = 0;
+      fpsCount.since = now;
+    }
+  }
+
   function tick(now) {
-    if (!playback.playing || !clip) return;
+    if (!playback.playing || !clip) { fpsCount.frames = 0; fpsCount.since = 0; return; }
+    countFrame(now);
     const dt = playback.last ? (now - playback.last) / 1000 : 0;
     playback.last = now;
     const length = (clip.frames - 1) / clip.fps;
@@ -3417,6 +3479,9 @@
           // takes 4 spots and 2 lamps of the flat. Lit by them here, the pane's picture didn't change.)
           const forwardMap = glassPass && m.baked && !m.actor && !mat.vehicle && !mat.decal && !mat.emissive && outside;
           gl.uniform1i(loc.sceneLights, mapGlass ? 0 : lightsNow.length);
+          const listed = mapGlass || castBox || mapPass ? -1 : meshLightList(m, lightsNow);
+          gl.uniform1i(loc.meshLightCount, listed);
+          if (listed > 0) gl.uniform4iv(loc.meshLights, meshLightIndices);
           gl.uniform1i(loc.forwardLit, forwardMap && !mapGlass);
           gl.uniform1i(loc.glassForward, mapGlass);
           // Decals a little in front of the surface they lie on, so they don't flicker into it.
