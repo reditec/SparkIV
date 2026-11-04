@@ -19,6 +19,8 @@
     <EnableMsixTooling>true</EnableMsixTooling>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
+    <!-- Rendering/D3D12: buffer uploads and the SwapChainPanel's native interface. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- File and Directory are also RageLib type names. -->
     <ImplicitUsings>disable</ImplicitUsings>
     <!-- Program.cs is the entry point, so the updater (Velopack) runs before the app starts. -->
@@ -35,6 +37,10 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Velopack" Version="1.2.161" />
+    <!-- The native Direct3D 12 renderer (#112, behind SPARKIV_D3D12=1 for now). -->
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.Dxc" Version="3.8.3" />
   </ItemGroup>
 
   <ItemGroup>

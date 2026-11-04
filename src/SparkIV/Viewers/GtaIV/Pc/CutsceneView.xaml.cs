@@ -31,6 +31,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.Web.WebView2.Core;
+using SparkIV.WinUI.Rendering.D3D12;
 
 namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
@@ -242,6 +243,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The cast loads now, in the background, while the page starts (the view is already there).
       _castTask = LoadCastAsync();
 
+      if (D3D12View.Enabled)
+      {
+        StartNative();
+        return;
+      }
+
       if (!await ViewerPages.StartAsync(Web, null, _context, Core_WebMessageReceived, allowCopyMenu: false))
       {
         Working.IsActive = false;
@@ -258,6 +265,47 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
       };
       core.Navigate(Host + "index.html");
+    }
+
+    // The native renderer (#112), with SPARKIV_D3D12=1 instead of the page.
+    private D3D12View? _native;
+
+    /// <summary>
+    /// SPARKIV_D3D12=1: the view drawn by the native Direct3D 12 renderer instead of the WebView2 page. The prototype
+    /// (#112 step 1) draws the first actor's model, once the cast is loaded, with the camera going round it; the
+    /// page's paths stay as they are (without a page, its messages go nowhere).
+    /// </summary>
+    private async void StartNative()
+    {
+      Web.Visibility = Visibility.Collapsed;
+      Native.Visibility = Visibility.Visible;
+      try
+      {
+        _native = new D3D12View(Native, text => FpsText.Text = text);
+        _document.Log?.Step("open the view, start the native renderer (Direct3D 12, " + _native.AdapterName + ")");
+      }
+      catch (Exception ex)
+      {
+        D3D12Device.Log("start failed: " + ex);
+        Working.IsActive = false;
+        Message.Text = "The Direct3D 12 renderer couldn't start: " + ex.Message;
+        Message.Visibility = Visibility.Visible;
+        return;
+      }
+      if (_castTask != null)
+      {
+        await _castTask;
+      }
+      Working.IsActive = false;
+      if (_disposed)
+      {
+        return;
+      }
+      var scene = _document.Actors.Select(a => a.Scene).FirstOrDefault(s => s != null && s.Meshes.Count > 0);
+      if (scene != null)
+      {
+        _native.SetModel(scene);
+      }
     }
 
     private void Core_WebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
@@ -1253,7 +1301,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       double now = Now;
       if (!_playing)
       {
-        FpsText.Text = "";
+        if (_native == null)
+        {
+          // The native renderer shows its own rate all the time.
+          FpsText.Text = "";
+        }
         FpsSummary();
       }
       FrameText.Text = TimeSpan.FromSeconds(now).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(Length).ToString(@"m\:ss\.f");
@@ -1402,6 +1454,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         // The device is gone already.
       }
+      _native?.Dispose();
+      _native = null;
       if (Web.CoreWebView2 != null)
       {
         Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;
