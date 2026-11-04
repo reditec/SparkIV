@@ -215,10 +215,13 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="Status" Margin="4,0,0,0" Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
-            <TextBlock x:Name="ClockText" Grid.Column="1" Margin="0,0,4,0" Style="{StaticResource CaptionTextBlockStyle}"
+            <TextBlock x:Name="FpsText" Grid.Column="1" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" ToolTipService.ToolTip="Frames shown per second while playing" />
+            <TextBlock x:Name="ClockText" Grid.Column="2" Margin="0,0,4,0" Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" ToolTipService.ToolTip="Time of day in the scene" />
         </Grid>
     </Grid>
