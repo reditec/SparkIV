@@ -36,8 +36,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
   public sealed class PanelSwapChain : IDisposable
   {
     public const int BufferCount = 3;
-    public const Format BackBufferFormat = Format.B8G8R8A8_UNorm;
-    public const Format DepthFormat = Format.D32_Float;
+    public const Format BackBufferFormat = PanelSwapChainFormats.Color;
+    public const Format DepthFormat = PanelSwapChainFormats.Depth;
     private const SwapChainFlags Flags = SwapChainFlags.FrameLatencyWaitableObject;
 
     private readonly D3D12Device _device;

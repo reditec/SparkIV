@@ -21,6 +21,7 @@
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.UI.Dispatching;
@@ -69,7 +70,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
       _device = new D3D12Device();
       _swapChain = new PanelSwapChain(_device, panel, _width, _height, _scaleX, _scaleY);
-      _renderer = new MeshRenderer(_device);
+      _renderer = new MeshRenderer(_device, PanelSwapChain.BackBufferFormat);
 
       panel.SizeChanged += Panel_SizeChanged;
       panel.CompositionScaleChanged += Panel_CompositionScaleChanged;
@@ -146,13 +147,21 @@ namespace SparkIV.WinUI.Rendering.D3D12
           if (model != null)
           {
             var load = Stopwatch.StartNew();
-            _renderer.SetModel(model);
+            _renderer.Clear();
+            int number = _renderer.AddModels(new[] { model })[0];
+            _renderer.AddInstance(number, Matrix4x4.Identity);
+            if (_renderer.Bounds(number) is var (min, max))
+            {
+              _center = (min + max) * 0.5f;
+              _radius = Math.Max(0.1f, (max - min).Length() * 0.5f);
+            }
             D3D12Device.Log($"model: {model.Meshes.Count} meshes, {_renderer.Triangles} triangles, on the GPU in {load.Elapsed.TotalMilliseconds:0.0} ms");
           }
 
           double now = clock.Elapsed.TotalSeconds;
           var list = _swapChain.Begin();
-          _renderer.Draw(list, _swapChain, (float)(now * 0.4));
+          _renderer.Draw(list, _swapChain.RenderTargetView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height,
+                         OrbitViewProjection((float)(now * 0.4)), new Vector3(0.4f, -0.5f, 0.8f), 0.35f);
           _swapChain.End();
 
           // Frame times: from present to present.
@@ -184,6 +193,20 @@ namespace SparkIV.WinUI.Rendering.D3D12
         D3D12Device.Log("render thread stopped: " + ex);
         _dispatcher.TryEnqueue(() => _fpsChanged("D3D12 error: " + ex.Message));
       }
+    }
+
+    // The prototype's camera: going slowly round the model (Z up, as in GTA).
+    private Vector3 _center;
+    private float _radius = 1;
+
+    private Matrix4x4 OrbitViewProjection(float angle)
+    {
+      float distance = _radius * 2.6f;
+      var eye = _center + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, _radius * 0.6f);
+      var view = Matrix4x4.CreateLookAt(eye, _center, Vector3.UnitZ);
+      var projection = Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, _swapChain.Width / (float)_swapChain.Height,
+                                                              Math.Max(0.01f, distance - _radius * 2), distance + _radius * 2);
+      return view * projection;
     }
 
     [DllImport("kernel32.dll")]

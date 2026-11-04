@@ -1,7 +1,7 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 1, prototype** – behind the switch `SPARKIV_D3D12=1`. Without it SparkIV draws with the WebView2/WebGL
-page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
+Status: **step 2, offscreen mode** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
+Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
 
 ## Why
 
@@ -16,7 +16,12 @@ timeline, status bar, dialogs) stays; only the drawing area changes.
 |---|---|
 | `D3D12Device` | DXGI factory, adapter by `GpuPreference.HighPerformance` (no software adapter), `ID3D12Device` at feature level 11.0, the direct queue and one fence (`Signal`/`Wait`/`WaitIdle`). Debug build only: debug layer and `ID3D12InfoQueue`, its messages written to `SparkIV-d3d12.log` beside `SparkIV.exe`. |
 | `PanelSwapChain` | Composition swap chain (`CreateSwapChainForComposition`, flip-discard, 3 × B8G8R8A8, `FrameLatencyWaitableObject`, maximum latency 2) set on the WinUI `SwapChainPanel` through `ISwapChainPanelNative::SetSwapChain` (IID `63aad0b8-7c24-40ff-85a8-640d944cc325`, vtable slot 3). Buffers in pixels (`ActualSize × CompositionScale`), shown at `1 / CompositionScale` via `IDXGISwapChain2.MatrixTransform`. An RTV per buffer, one D32 depth buffer, per buffer a command allocator and the fence mark of its last frame. |
-| `MeshRenderer` | Root signature with 20 root constants (row-major view-projection, light direction + ambient), HLSL compiled at run time with DXC (`vs_6_0`/`ps_6_0`) to DXIL. One model's meshes in one vertex buffer (position + normal, 24 bytes) and one 32-bit index buffer, both copied from an upload heap into default heaps. Lambert + ambient, no textures, both faces drawn. |
+| `MeshRenderer` | Root signature with 36 root constants (row-major view-projection, the instance's model-to-scene matrix, light direction + ambient), HLSL compiled at run time with DXC (`vs_6_0`/`ps_6_0`) to DXIL. Per model its meshes in one vertex buffer (position + normal, 24 bytes) and one 32-bit index buffer, copied from upload heaps into default heaps, all models' copies in one command list. Models are drawn as instances (one draw each). Meshes of hidden materials are left out. Lambert + ambient, no textures, both faces drawn. Draws into any target (render target and depth view, size). |
+| `OffscreenTarget` | Drawing without a window: a B8G8R8A8 texture and a D32 depth buffer of a given size; after a frame the colour is copied into a readback buffer (rows every 256 bytes) and saved as PNG (System.Drawing). |
+| `CutsceneCamera` (`Viewers/GtaIV/Pc`, GTA IV PC) | A section's camera clip (camera_0) at any frame: the page's `filmCameraNow` in C# – positions linear, the turn by normalized linear interpolation, looking along its y with z up, FOV of the whole frame, not smoothed across a cut (> 25 cm or 5°). `ViewProjection`: near 0.1 m like the page. |
+
+`D3D12Device`, `MeshRenderer`, `OffscreenTarget` and `CutsceneCamera` use no WinUI, so the visual tests' cutgen
+compiles them in.
 | `D3D12View` | Ties the panel to device, swap chain and renderer. Draws on its own thread, which waits on the waitable object before each frame, so frames go out at the refresh rate and the UI thread stays free (loading the cast doesn't stall the view). Size and DPI changes are recorded on the UI thread and applied at the next frame. Once a second: frames per second, mean and longest frame time into the status bar (`FpsText`) and the log. |
 
 Frame: wait on the waitable object → apply size/DPI → wait for the buffer's last fence mark → reset its allocator and
@@ -42,6 +47,22 @@ swap chain off the panel and releases everything after the GPU is idle.
 `dxil.dll` (DirectX Shader Compiler: Microsoft licence, LLVM licence, MIT), copied next to `SparkIV.exe`. Listed in
 `licenses/THIRD-PARTY-NOTICES.txt`, texts in `licenses/DirectXShaderCompiler-*.txt`.
 
+### Offscreen mode for the visual tests (step 2)
+
+The visual regression run (local test tools, not in the repository) can draw every reference with the native
+renderer instead of the page in headless Edge (`lauf.ps1 -Renderer d3d12`): cutgen loads the section's location as
+before and, with `D3D12CAP=<frames>` (`D3D12SIZE=WxH`, `D3D12TAG`, `D3D12FOV` for a reference whose trace froze the
+field of view), draws those frames into an `OffscreenTarget` at the reference's size and saves them as PNG. The
+comparison with the game's picture is the same as for the page; the values are kept apart from the page's.
+
+Drawn so far: the location (all placed objects but mirror-only far versions) through the cutscene's camera. Not yet:
+the cast (needs skinning and the clips, step 4), textures (step 3), lighting, sky, water, post effects (steps 4–5).
+The differences are therefore large; what the run shows now is that framing, camera and geometry match the game.
+First check (bc_1, 13 references): walls, door frames, pipes and furniture lie exactly over the game's, also at the
+reference with a frozen FOV (s3 f994.50); a section with its location takes about 5–10 s. Full run (2026-11-04): all
+72 references (bc_1, bc_3, et01_aa, et01_ba, intro) in 3 minutes (the page in headless Edge: over an hour); spot
+checks indoors, outdoors with the skyline, TLAD and the intro's crane from above all lie over the game's picture.
+
 ## Measurements
 
 | Date | Machine | Case | Result |
@@ -50,8 +71,6 @@ swap chain off the panel and releases everything after the GPU is idle.
 
 ## Next steps (#112)
 
-2. **Offscreen mode** for the visual test suite: render a frame to a texture, save it as PNG, compare the 72
-   references against the new renderer from the first image on.
 3. **Geometry straight from `ModelScene`** for the whole cast and the location: vertex/index buffers per mesh,
    textures (DXT straight from the WTD).
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation
