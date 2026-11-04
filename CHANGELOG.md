@@ -2,6 +2,14 @@
 
 Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC). SparkIV shows this file in Settings → About, and after an update the part of the new version.
 
+## v0.9.0-alpha.5 – 2026-11-04
+
+- Cutscenes: the intro starts at 05:15 and its clock stands still, as in the game.
+- Cutscenes inside interiors are lit as in the game: room lighting blends through doors and windows, lamps light only from visible rooms, and glowing lamps, posters and rugs are lit like the walls under them.
+- Cutscenes: taxis whose lights the mission turns on show their red tail light.
+- Cutscenes: scenes with many lamps draw a little faster.
+- The cutscene view shows the frames per second while playing. SparkIV-fps.log (next to SparkIV.exe) records where a cutscene's frame rate drops below 30, with section and frame, and its lowest and highest rate.
+
 ## v0.9.0-alpha.4 – 2026-11-02
 
 - Cutscenes (highly experimental): the viewer shows a running time of day that follows playback, also when rewinding. The start time can be set from the top bar, and "Lock time" keeps the clock and the clouds at it. So far cutscenes were tested mainly at noon, so other times of day can look noticeably wrong and will take a lot more work.
