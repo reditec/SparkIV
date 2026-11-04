@@ -856,12 +856,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // player stands, the mission's marker (CutsceneScriptIndex.Entry), in the page's metres (less the origin).
       var script = _document.Script;
       float[]? origin = OriginOf(Math.Max(0, _section));
+      float[]? swellAt = script?.Marker is float[] marker && origin != null ? new[] { marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2] } : null;
       Post(new
       {
         type = "water",
         wind = script?.Wind,
-        swellAt = script?.Marker is float[] marker && origin != null ? new[] { marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2] } : null,
+        swellAt,
       });
+      // (The same to the native renderer.)
+      _player?.SetWater(script?.Wind, swellAt != null ? new Vector3(swellAt[0], swellAt[1], swellAt[2]) : null);
       _locationVisible = _locationVisibleOf.TryGetValue(_locationKey, out var shown) ? shown : new List<int>();
       PostVisible();
       PostBackground();
@@ -1093,7 +1096,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         var (motions, camera) = NativeSectionOf(index).GetAwaiter().GetResult();
         _player.SetSection(motions, camera, _fps, _frames, _frame, play, s_camera && camera != null,
                            CutsceneLights.TracksOf(_document.Cut.Sections[index], _document.Sections[index]),
-                           CutsceneMessages.FadeOf(_document.Cut, index, _frames, _fps));
+                           CutsceneMessages.FadeOf(_document.Cut, index, _frames, _fps),
+                           _document.Cut.DrawDistanceSteps(index, _fps));
       }
       ShowFrame();
       PrepareNextSection();

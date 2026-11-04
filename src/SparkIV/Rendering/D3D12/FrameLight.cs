@@ -96,6 +96,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public Vector3 Splits;
     public float FadeEnd;
     public float FadeScale;
+
+    /// <summary>
+    /// The camera, and how far from it the map's objects cast at all (each part by its bounding sphere: left out where
+    /// its nearest point lies farther; infinity: no limit) - the page's caster culling, see CutsceneSunShadow.
+    /// </summary>
+    public Vector3 Eye;
+    public float CasterReach = float.PositiveInfinity;
   }
 
   /// <summary>Which of the deferred light's formulas a light takes (see <see cref="DeferredLight"/>).</summary>

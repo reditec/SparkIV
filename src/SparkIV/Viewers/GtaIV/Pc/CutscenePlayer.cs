@@ -78,6 +78,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private CutsceneWater? _water;
     private CutsceneLocation? _waterLocation;
     private bool _waterNew;
+    // The mission script's wind (null: the page's breeze) and the swell's centre, scene-local (null: round the camera).
+    private float? _waterWind;
+    private Vector3? _swellAt;
+
+    /// <summary>
+    /// The water as the mission script leaves it (the page's "water" message): the wind it forces (null: none), and the
+    /// point the sea's swell keeps round (the mission's marker, scene-local; null: the camera).
+    /// </summary>
+    public void SetWater(float? wind, Vector3? swellAt) => Order(() =>
+    {
+      _waterWind = wind;
+      _swellAt = swellAt;
+    });
 
     public void DrawAfterSolid(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
                                Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view)
@@ -104,9 +117,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
-      // (Its simulation warms up over the first frames by itself.)
-      _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky), _time,
-                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null);
+      // (Its simulation warms up and catches up over the first frames by itself; exact while still: the water a pure
+      // function of the section's time, while playing a small nudge back of the sync held.)
+      _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time,
+                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null, exact: !view.Playing);
     }
 
     public void Dispose()
@@ -147,7 +161,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       public bool Registered;
       // Its lamps (#112 step 5), made on the loading thread.
       public CutsceneLights? Lights;
+      // The farthest of its objects across the ground (CutsceneSunShadow.LocationReach: the page's hazeReach).
+      public float Reach = float.PositiveInfinity;
     }
+
+    // The section's draw distances by its frames (CutFile.DrawDistanceSteps; the page's drawSteps).
+    private IReadOnlyList<float[]>? _drawSteps;
 
     // The section's own lights' tracks, and whether lights are shown at all (the view's light button, the page's
     // "sceneLights").
@@ -291,6 +310,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           // (Floating litter casts no sun shadow, as the page's.)
           group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0, castsSunShadow: o.FloatAt == null)).ToArray();
           group.Lights = lamps;
+          group.Reach = CutsceneSunShadow.LocationReach(location, m => renderer.Bounds(numbers[m]));
           group.Registered = true;
           ShowLocations();
           LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
@@ -378,16 +398,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>
     /// A section: its actors' motions, its camera (null: none), its frames a second and frames; at a frame, playing or
-    /// not; through the camera or not; its own lights (CutsceneLights.TracksOf).
+    /// not; through the camera or not; its own lights (CutsceneLights.TracksOf); its draw distances by its frames
+    /// (CutFile.DrawDistanceSteps).
     /// </summary>
     public void SetSection(IReadOnlyList<CutsceneMessages.CastMotion> motions, CutsceneCamera? camera, float fps, int frames,
                            int frame, bool play, bool useCamera, List<CutsceneLights.CutLight>? lights = null,
-                           CutsceneMessages.SectionFade? fade = null)
+                           CutsceneMessages.SectionFade? fade = null, IReadOnlyList<float[]>? drawSteps = null)
     {
       var poses = motions.ToDictionary(m => m.Actor, m => new CutscenePose(m));
       Order(() =>
       {
         _poses = poses;
+        _drawSteps = drawSteps;
         _cutLights = lights ?? new List<CutsceneLights.CutLight>();
         _camera = camera;
         _useCamera = useCamera;
@@ -552,7 +574,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The sun's shadow wherever the game's light is (the page's: outside, which every cutscene with a location is).
       if (_lighting != null)
       {
-        light.SunShadow = CutsceneSunShadow.Cascades(eyeAt, viewForward, viewUp, viewFov, aspect, light.SunDirection);
+        // (Its casters as far as the page draws them: the haze's end, the shot's draw distance.)
+        float locationReach = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var at) ? at.Reach : float.PositiveInfinity;
+        light.SunShadow = CutsceneSunShadow.Cascades(eyeAt, viewForward, viewUp, viewFov, aspect, light.SunDirection,
+                                                     CutsceneSunShadow.CasterReach(light.FogEnd, locationReach, _drawSteps, frame));
       }
       // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
       List<DeferredLight>? lights = null;

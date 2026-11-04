@@ -159,11 +159,22 @@ the water and shadows. In the app the player draws it through `IRenderScene.Draw
 
 `CutsceneWater` (GTA IV PC) draws the location's water between the solid meshes and the see-through ones
 (`MeshRenderer.Draw`'s `afterSolid`, in the app `IRenderScene.DrawAfterSolid`): the water.dat quads with their vertex
-colours, and outside the sea grid round the camera with the page's swell and ripple simulation (made deterministic:
-the given time instead of the wall clock, a seeded random), the near field taken from a mask of the quads (their boxes,
-made on the CPU), Fresnel, the sun's glint and foam, the game's fog. Not yet: the mirrored scene (the mirror shows the
-sky only, so the sea comes out a little light), seeing through to the ground. Its simulation warms up over the first
-frames; inside, where the sea isn't simulated, there is nothing to warm up. The sun's glint and light on it x the sun's
+colours, and outside the sea grid round the mission's marker (the script's, as the page's "water" message: else round
+the camera) with the page's swell and ripple simulation and the wind the mission script forces (bc_3: 0; else the
+page's breeze), the near field taken from a mask of the quads (their boxes, made on the CPU), Fresnel, the sun's glint
+and foam, the game's fog. Not yet: the mirrored scene (the mirror shows the sky only, so the sea comes out a little
+light), seeing through to the ground.
+
+Deterministic: the water at a section time t is a pure function of t, so a frame drawn alone holds the same water as
+one drawn after others (cutgen's D3D12CAP lists in any order give byte-identical pictures). The wave texture is a
+warmed-up base (the page's 20000 steps of 16 ms, kick 0.25; made once, the same for every location, kept on the GPU)
+plus floor(t x 60) steps of 1/60 s from the section's start (at most the last 18000), the kick of the wind; the swell
+starts flat at its window and takes floor(t / 0.02) steps of 0.02 s (at most the last 1500). Each step's random numbers
+come from its index (SplitMix64), not from a running generator. A later time goes on from the state held, an earlier
+one (or a new section) starts again from the base; at most 2000 wave steps per command list (the GPU's timeout), the
+rest in the next frames (cutgen draws `CutsceneWater.StepsLeft` rounds first, at most 30; 0 inside, where the sea
+isn't simulated). While playing (`exact: false`) a small step back of the sound's sync is held and a window moving
+with the camera carries the swell on. The sun's glint and light on it x the sun's
 shadow (the page's waterShadow: at the point a metre up, that metre x (1 - 0.0004 d²)), read from
 `MeshRenderer.SunShadowMap` when it was drawn this frame (its own SRV, t4).
 
@@ -175,16 +186,68 @@ too: et01_aa's room gets no sun through its walls). `CutsceneSunShadow` (GTA IV 
 the four cascades per frame from the camera (u: forward laid flat across the sun, v = u x sun; slices to 9.5, 20, 50,
 175 m; each the box round its slice's corners; biases 0.14/0.24/0.5/0.75 m) into `FrameLight.SunShadow` (the generic
 `SunShadow` class). `MeshRenderer.DrawSunShadow` draws each cascade before the G-buffer into a 4096² R32F work target
-(cleared to -100, depth 0..1 from the height along the sun, LEQUAL): the map's objects whose sphere crosses the box
-(solid parts, then the parts marked `SceneMaterial.ShadowByAlpha` - GTA IV buckets 1-3, not trees or vehicles - blended
+(cleared to -100, depth 0..1 from the height along the sun, LEQUAL): the map's objects' parts chosen as the page
+chooses its casters (below; solid parts, then the parts marked `SceneMaterial.ShadowByAlpha` - GTA IV buckets 1-3, not trees or vehicles - blended
 SRCALPHA/INVSRCALPHA by their texture's alpha), then the cast's non-see-through parts with MAX blending (the page's max
 of map and cast), nothing culled or cut out; then the 2 x 2 mean into the cascade's 2048² quarter of an 8192 x 2048
 R16F map (read by its number in the texture heap). `Shade` multiplies the sun (and the sun's shine on peds, vehicles,
 the map) by `SunShadow(world)`: cascade by view depth, twelve taps 1/2048 apart, + 1.5 (d / 175)², none from 175 m; the
 page's GL rows turned over so the same texels are read. Floating litter casts none (`AddInstance(castsSunShadow:)`).
-Unlike the page: the map's part of the cascades is drawn whole each frame (the page keeps it until the cascades
-change: same map, more GPU work); the page's culling by draw distance and haze end isn't there (nor in the main pass);
-glowing glass (gta_glass_emissive, left out of the models) casts nothing. cutgen: `D3D12NOSUNSHADOW=1` turns it off.
+
+**Casters** (the page's `drawMeshes` `seen` with `castBox`, ModelView.html ~3281-3312, and the loop ~3385-3407): per
+part (the page's mesh; `Part.Center` / `Radius`, the sphere of its mesh's box, x the instance's largest scale), after a
+first test with the whole model's sphere: across the cascade's box on u and v (`|centre·u - box.x| > 1/box.z + r`:
+out), and not wholly farther from the camera than `SunShadow.CasterReach` - the page's `outside` test, nothing beyond
+`hazeEnd()` (the time cycle's FarClip, here the light's FogEnd, or nearer the farthest location object across the
+ground from the origin: `CutsceneSunShadow.LocationReach`, the page's `hazeReach`) nor beyond `drawDistanceNow()` (the
+.cut's draw distance steps of the section, `CutFile.DrawDistanceSteps`; the app passes them with `SetSection`). The
+page's other caster rules hold already: mirror-only far versions aren't instances (`CutsceneDrawing.DrawnObjects`),
+floating litter casts none, hidden materials aren't in the models' parts (the page's skipping of water materials isn't
+ported: the sea is `CutsceneWater`'s quads, not checked whether a map model has a water material). Its main pass's same distance
+culling isn't ported (so beyond the draw distance a map object is still drawn, but casts nothing - as the page's
+shadow). cutgen: `D3D12NOCASTERREACH=1` leaves out the distance test.
+
+Identity: the per-part u/v test only drops parts that draw no texel, so it can't change the picture - bc_3 s3 f829.5
+byte-identical with `D3D12NOCASTERREACH=1`. With the distance test bc_3 s3 f829.5 (draw distance 89.2 m in that shot)
+differs in 93 of 2.04 M pixels by 1 level (x 1704-1786, y 603-807, right side), the diff against the game unchanged at
+25.27; et01_aa s3 f49.75 byte-identical (2.66); intro s4 f420.5 3.83 (no draw distance steps, its haze end beyond the
+cascades: nothing culled there by distance).
+
+Not safe for identity, so not done: leaving out an object lying wholly low along the sun (below -100 or below every
+point the camera can see). A cascade's texel isn't max(clear, objects): the depth is cleared to the far end, so any
+fragment replaces the -100; and the 2 x 2 mean into the map mixes a changed low texel with its neighbours, so even a
+value below every receiver can move the mean across a receiver's height.
+
+**Cost** (cutgen `D3D12BENCH=1`, Release, debug layer off, RTX 2060, all frames; the step-4b line above had no lights,
+fog, materials or post effects yet; map objects per cascade: the bench's means a frame):
+
+| Date | Case | Sun shadow | Mean | Median | p95 | p99 | Max | Draws a frame | Map triangles per cascade |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-04 | intro s4, 1920 × 1080 | off | 8.21 ms | 8.10 | 9.40 | 9.75 | 82.8 (f0) | 16 939 | - |
+| 2026-11-04 | intro s4 | on, whole models by their sphere (commit 4d1b9f8) | 15.70 ms | 16.32 | 18.21 | 18.53 | 158.0 (f0) | 21 635 | 216 k / 249 k / 352 k / 748 k |
+| 2026-11-04 | intro s4 | on, map objects kept (the page's cache; not kept, see below) | 15.75 ms | 16.74 | 18.64 | 18.94 | 209.4 (f0) | 21 291 | - |
+| 2026-11-04 | intro s4 | on, casters per part + reach | 15.66 ms | 16.30 | 18.25 | 18.66 | 154.6 (f0) | 20 574 | 141 k / 175 k / 279 k / 685 k |
+| 2026-11-04 | bc_3 s3 (harbour, outdoor), 1920 × 1061 | off | 5.66 ms | 5.17 | 7.10 | 8.34 | 131.6 (f0) | 11 019 | - |
+| 2026-11-04 | bc_3 s3 | on, whole models by their sphere | 8.82 ms | 8.17 | 11.08 | 16.47 | 224.8 (f0) | 13 419 | - |
+| 2026-11-04 | bc_3 s3 | on, map objects kept | 8.42 ms | 7.35 | 11.55 | 16.06 | 76.7 (f0) | 12 039 | - |
+| 2026-11-04 | bc_3 s3 | on, casters per part (no reach) | 8.83 ms | 8.27 | 11.01 | 13.97 | 220.9 (f0) | 13 228 | 53 k / 55 k / 144 k / 296 k |
+| 2026-11-04 | bc_3 s3 | on, casters per part + reach | 8.59 ms | 7.99 | 10.68 | 12.54 | 187.7 (f0) | 12 610 | 53 k / 55 k / 144 k / 190 k |
+
+Where the ~7.4 ms (intro s4) go, by experiments since removed: the map objects into a 1 x 1 scissor (same vertices,
+no texels) 10.9 ms, the map objects left out 9.4 ms, nothing 8.2 ms: some 4.8 ms are the map objects' texels (four
+4096² R32F + D32 targets: bandwidth), 1.5 ms their vertices and recording (1.1 ms on the CPU), 1.1 ms the rest (cast,
+clears, the 2 x 2 means, the taps in `Shade`). Culling takes vertices off (intro's map triangles 1.56 M to 1.28 M a
+frame), not texels: whatever lies in a cascade's box is drawn there, as by the game. Drawing the map objects highest
+along the sun first (early depth rejection) didn't help either (15.61 ms).
+
+The page's cache of the map objects (kept per cascade at 4096, drawn again only when its `shadowKey` changes,
+ModelView.html ~3819-3841) was tried and taken out again: in cutscenes the camera mostly moves and every cascade with
+it, so the map objects were drawn again in 91 % of intro s4's frames and 65 % of bc_3 s3's (exact key; the page's
+rounding of the boxes to three decimals lets the far cascade drift up to ~6 % before redrawing). Kept, a frame saved
+~6 ms; redrawn, the separate target cost a little more; net -0.4 ms on bc_3, +0.2 ms on intro, for 256 MB more.
+
+Unlike the page: its main pass's culling by draw distance and haze end isn't there; glowing glass (gta_glass_emissive,
+left out of the models) casts nothing. cutgen: `D3D12NOSUNSHADOW=1` turns it off.
 
 ### Lights and lamps (step 5, first version)
 

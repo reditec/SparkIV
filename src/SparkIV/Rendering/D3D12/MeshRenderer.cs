@@ -964,6 +964,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       /// </summary>
       public bool AlphaShadow { get; init; }
 
+      /// <summary>Its bounding sphere in the model's space (its mesh's box: the centre, half the diagonal).</summary>
+      public Vector3 Center { get; init; }
+      public float Radius { get; init; }
+
       public uint Start { get; }
       public uint Count { get; }
       public int Texture { get; }
@@ -1641,11 +1645,15 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         // Without vertex colours: a baked mesh 0.45 (the page's guess), others white (the page's defaults).
         float noColor = source.Baked && !material.Vehicle && !(material.EmissiveMultiplier != null) ? 0.45f : 1f;
         bool skinned = mesh.SkinBones != null && mesh.SkinWeights != null && mesh.SkinBones.Length >= count * 4 && mesh.SkinWeights.Length >= count * 4;
+        var meshMin = new Vector3(float.MaxValue);
+        var meshMax = new Vector3(float.MinValue);
         for (int v = 0; v < count; v++)
         {
           var p = new Vector3(mesh.Positions[v * 3], mesh.Positions[v * 3 + 1], mesh.Positions[v * 3 + 2]);
           min = Vector3.Min(min, p);
           max = Vector3.Max(max, p);
+          meshMin = Vector3.Min(meshMin, p);
+          meshMax = Vector3.Max(meshMax, p);
           vertices.Add(p.X);
           vertices.Add(p.Y);
           vertices.Add(p.Z);
@@ -1813,6 +1821,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           Index = partIndex,
           SeeThrough = material.Glass || (material.Blend && textured),
           AlphaShadow = material.ShadowByAlpha,
+          Center = count > 0 ? (meshMin + meshMax) * 0.5f : Vector3.Zero,
+          Radius = count > 0 ? (meshMax - meshMin).Length() * 0.5f : float.PositiveInfinity,
         });
       }
       pending += textureBytes;
@@ -2179,6 +2189,20 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     // when the cascades change; drawn whole each frame here (the same map).
     private unsafe void DrawSunShadow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress)
     {
+      var recording = System.Diagnostics.Stopwatch.StartNew();
+      Array.Clear(SunTriangles);
+      Array.Clear(SunParts);
+      DrawSunShadowNow(list, sun, frameAddress);
+      SunRecordMs = recording.Elapsed.TotalMilliseconds;
+    }
+
+    /// <summary>Last frame's sun shadow: the map objects' triangles and parts drawn per cascade, the recording's time on the CPU.</summary>
+    public long[] SunTriangles { get; } = new long[SunCascades];
+    public int[] SunParts { get; } = new int[SunCascades];
+    public double SunRecordMs { get; private set; }
+
+    private unsafe void DrawSunShadowNow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress)
+    {
       SizeSun();
       var d3d = _device.Device;
       var workRtv = _sunRtvs.GetCPUDescriptorHandleForHeapStart();
@@ -2222,7 +2246,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
 
     // One phase of a cascade (the page's drawMeshes with castBox): 0 the map's objects' parts not blended (all but those
     // marked AlphaShadow), 1 those blended by their texture's alpha (alpha 1 without a texture), 2 the cast's parts that
-    // aren't see-through. The map's objects only where their sphere lies across the cascade's box on u and v.
+    // aren't see-through. Of the map's objects only the parts whose sphere lies across the cascade's box on u and v and
+    // within SunShadow.CasterReach of the camera (see InCascade).
     private unsafe void DrawSunPhase(ID3D12GraphicsCommandList list, SunShadow sun, int k, int phase, float* draw)
     {
       var box = sun.Boxes[k];
@@ -2233,33 +2258,38 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         {
           continue;
         }
+        float scale = 1;
         if (!model.Actor)
         {
           if (!instance.CastsSunShadow)
           {
             continue;
           }
-          var center = Vector3.Transform((model.Min + model.Max) * 0.5f, instance.World);
-          float scale = MathF.Max(new Vector3(instance.World.M11, instance.World.M12, instance.World.M13).Length(),
-                        MathF.Max(new Vector3(instance.World.M21, instance.World.M22, instance.World.M23).Length(),
-                                  new Vector3(instance.World.M31, instance.World.M32, instance.World.M33).Length()));
-          float radius = (model.Max - model.Min).Length() * 0.5f * scale;
-          if (MathF.Abs(Vector3.Dot(center, sun.U) - box.X) > 1 / box.Z + radius ||
-              MathF.Abs(Vector3.Dot(center, sun.V) - box.Y) > 1 / box.W + radius)
+          // (The whole model's sphere first: what lies outside the box draws nothing there.)
+          scale = MathF.Max(new Vector3(instance.World.M11, instance.World.M12, instance.World.M13).Length(),
+                  MathF.Max(new Vector3(instance.World.M21, instance.World.M22, instance.World.M23).Length(),
+                            new Vector3(instance.World.M31, instance.World.M32, instance.World.M33).Length()));
+          if (!InCascade(sun, box, Vector3.Transform((model.Min + model.Max) * 0.5f, instance.World), (model.Max - model.Min).Length() * 0.5f * scale, false))
           {
             continue;
           }
         }
-        bool any = false;
-        foreach (var part in model.Parts)
+        // The parts drawn: those of the phase; of a map object only those whose own sphere lies across the box and
+        // within the caster reach (the page culls each mesh so).
+        int drawn = 0;
+        if (_sunPartOn.Length < model.Parts.Length)
         {
-          if (SunDrawn(part, phase))
-          {
-            any = true;
-            break;
-          }
+          _sunPartOn = new bool[model.Parts.Length * 2];
         }
-        if (!any)
+        for (int i = 0; i < model.Parts.Length; i++)
+        {
+          var part = model.Parts[i];
+          bool on = SunDrawn(part, phase) &&
+                    (model.Actor || InCascade(sun, box, Vector3.Transform(part.Center, instance.World), part.Radius * scale, true));
+          _sunPartOn[i] = on;
+          drawn += on ? 1 : 0;
+        }
+        if (drawn == 0)
         {
           continue;
         }
@@ -2286,9 +2316,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         draw[29] = box.Y;
         draw[30] = box.Z;
         draw[31] = box.W;
-        foreach (var part in model.Parts)
+        for (int i = 0; i < model.Parts.Length; i++)
         {
-          if (!SunDrawn(part, phase))
+          var part = model.Parts[i];
+          if (!_sunPartOn[i])
           {
             continue;
           }
@@ -2297,9 +2328,30 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
           list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
           DrawCalls++;
+          if (phase < 2)
+          {
+            SunTriangles[k] += part.Count / 3;
+            SunParts[k]++;
+          }
         }
       }
     }
+
+    // Whether a map object's sphere (world centre, radius) casts into the cascade's box: across it on u and v (the page's
+    // castBox test, ModelView.html drawMeshes' seen) and, with reach, not wholly farther from the camera than the
+    // caster reach (the page's outside test there: beyond the haze's end or the shot's draw distance nothing is drawn).
+    private static bool InCascade(SunShadow sun, Vector4 box, Vector3 center, float radius, bool reach)
+    {
+      if (MathF.Abs(Vector3.Dot(center, sun.U) - box.X) > 1 / box.Z + radius ||
+          MathF.Abs(Vector3.Dot(center, sun.V) - box.Y) > 1 / box.W + radius)
+      {
+        return false;
+      }
+      return !reach || !(Vector3.Distance(center, sun.Eye) - radius > sun.CasterReach);
+    }
+
+    // DrawSunPhase's parts of the model at hand drawn or not (grown to the most parts a model has).
+    private bool[] _sunPartOn = new bool[64];
 
     private static bool SunDrawn(Part part, int phase) => phase == 2 ? !part.SeeThrough : part.AlphaShadow == (phase == 1);
 

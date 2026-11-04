@@ -374,7 +374,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <paramref name="up"/>, made square to forward as the page's view does), its vertical opening <paramref name="fov"/>
     /// (radians) and <paramref name="aspect"/>, and the sun towards <paramref name="sun"/>.
     /// </summary>
-    public static SunShadow Cascades(Vector3 eye, Vector3 forward, Vector3 up, float fov, float aspect, Vector3 sun)
+    public static SunShadow Cascades(Vector3 eye, Vector3 forward, Vector3 up, float fov, float aspect, Vector3 sun,
+                                     float casterReach = float.PositiveInfinity)
     {
       var f = Vector3.Normalize(forward);
       // The page's viewProjection: s = norm(f x up), u = s x f.
@@ -398,6 +399,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         Splits = new Vector3(Splits[1], Splits[2], Splits[3]),
         FadeEnd = Splits[4],
         FadeScale = FadeScale,
+        Eye = eye,
+        CasterReach = casterReach,
       };
       for (int k = 0; k < MeshRenderer.SunCascades; k++)
       {
@@ -421,6 +424,51 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         shadow.Biases[k] = Biases[k];
       }
       return shadow;
+    }
+
+    /// <summary>
+    /// How far from the camera the map's objects cast (SunShadow.CasterReach), as the page culls them (ModelView.html
+    /// drawMeshes' seen, outside: nothing wholly beyond hazeEnd(), nor beyond drawDistanceNow()): the haze's end - the
+    /// light's fog end (the time cycle's FarClip), or nearer the farthest of the location's objects (<paramref
+    /// name="locationReach"/>, see <see cref="LocationReach"/>) - and the shot's draw distance (<paramref
+    /// name="drawSteps"/>: CutFile.DrawDistanceSteps, [frame, metres]) at <paramref name="frame"/>.
+    /// </summary>
+    public static float CasterReach(float fogEnd, float locationReach, IReadOnlyList<float[]>? drawSteps, double frame)
+    {
+      float reach = MathF.Min(fogEnd > 0 ? fogEnd : float.PositiveInfinity, locationReach);
+      float metres = float.PositiveInfinity;
+      if (drawSteps != null)
+      {
+        foreach (var step in drawSteps)
+        {
+          if (step.Length < 2 || step[0] > frame + 1e-3)
+          {
+            break;
+          }
+          metres = step[1];
+        }
+      }
+      return MathF.Min(reach, metres);
+    }
+
+    /// <summary>
+    /// The page's hazeReach: the farthest of a location's objects across the ground from its origin (each by the
+    /// centre of its model's box placed; <paramref name="bounds"/>: a model's box by its number in the location, null
+    /// when it draws nothing); infinity without any.
+    /// </summary>
+    public static float LocationReach(CutsceneLocation location, Func<int, (Vector3 Min, Vector3 Max)?> bounds)
+    {
+      float farthest = 0;
+      foreach (var o in location.Objects)
+      {
+        if (bounds(o.Model) is not var (min, max))
+        {
+          continue;
+        }
+        var c = Vector3.Transform((min + max) * 0.5f, o.Place);
+        farthest = MathF.Max(farthest, MathF.Sqrt(c.X * c.X + c.Y * c.Y));
+      }
+      return farthest > 0 ? farthest : float.PositiveInfinity;
     }
 
     private static Vector3 Unit(Vector3 a)

@@ -118,18 +118,34 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// - the stencil "no water inside boats" (bucket 30 planes).
   /// - the page's haze edge (a page device) and its culling.
   ///
-  /// Deterministic, unlike the page (spec open question 13): wall-clock time is replaced by the given time in seconds,
-  /// Math.random by seeded System.Random (the wave noise, its per-step shift, the swell's kicks).
+  /// Deterministic, unlike the page (spec open question 13): the water at a section time is a pure function of that
+  /// time (the same whether the frame is drawn alone or after others). Wall-clock time is replaced by the section's
+  /// time, stepped at fixed rates from a warmed-up base (the wave texture: 60 steps a second; the swell: 50, from flat),
+  /// Math.random by a seeded System.Random (the wave noise) and per-step numbers from the step's index (SplitMix64: the
+  /// wave step's shift, the swell's kicks).
   /// </summary>
   public sealed class CutsceneWater : IDisposable
   {
     // The wave texture (waterTex.fxc): 128 << water quality, 1024 in GTAIV.1; RGBA8 ping-ponged.
     private const int SimSize = 1024;
     private const Format SimFormat = Format.R8G8B8A8_UNorm;
-    // The page's warm-up: 20000 steps of 16 ms with kick 0.25 [PAGE, tuned to the trace's spread at bc_3 s1 f79]. Done
-    // a share per frame (all in one list could run the GPU past its timeout).
+    // The page's warm-up: 20000 steps of 16 ms with kick 0.25 [PAGE, tuned to the trace's spread at bc_3 s1 f79]. Made
+    // once (the same for every location: the noise is seeded) and kept as the base every section time starts from.
     private const int WarmUpSteps = 20000;
-    private const int WarmUpPerFrame = 2000;
+    private const float WarmUpKick = 0.25f;
+    private static readonly float WarmUpStep = MathF.Round(16) * 0.02f;
+    // At most this many steps (warm-up and catch-up together) in one list: more could run the GPU past its timeout.
+    private const int StepsPerList = 2000;
+    // The playback after the base: a step every 1/60 s of the section's time (the page's 60 a second: round(16.67 ms)
+    // x 0.02), at most the last SimCap of them (5 minutes; older ones no longer show after the damping).
+    private const double SimRate = 60.0;
+    private static readonly float SimStep = MathF.Round(1000f / 60) * 0.02f;
+    private const int SimCap = 18000;
+    // A small step back while playing (the sound's sync nudging the clock) is held, not recomputed.
+    private const int HoldSteps = 12;
+    // The sea swell: a step of 0.02 s from the section's start, at most the last 1500 (30 s, as the page's warm-up).
+    private const double SwellStepSeconds = 0.02;
+    private const int SwellCap = 1500;
 
     // The sea swell (0xADBA40, 0xADB770): 100 x 100 points 2 m apart, a 200 m window.
     private const int SwellSize = 100;
@@ -144,8 +160,27 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private const int QuadVertexFloats = 6;
 
     private const int NoiseSeed = 0x5EA1;
-    private const int StepSeed = 0x5EA2;
-    private const int SwellSeed = 0x5EA3;
+    private const ulong WarmSeed = 0x5EA2;
+    private const ulong SwellSeed = 0x5EA3;
+    private const ulong PlaySeed = 0x5EA4;
+
+    // A counter-based random number (SplitMix64 of the seed and the step's index): the same for a step however it is
+    // reached, so a frame drawn alone and one drawn after others hold the same water.
+    private static ulong Mix(ulong seed, long k)
+    {
+      ulong z = (seed << 32) ^ (ulong)k;
+      z += 0x9E3779B97F4A7C15;
+      z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+      z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+      return z ^ (z >> 31);
+    }
+
+    // A wave step's shift of its noise lookup, two numbers in [0, 1) (24 bits each).
+    private static (float X, float Y) Shift(ulong seed, long k)
+    {
+      ulong z = Mix(seed, k);
+      return ((z >> 40) / 16777216f, ((z >> 16) & 0xFFFFFF) / 16777216f);
+    }
 
     // Each frame's slot of the upload ring: the constants, the grid's vertices, the swell's heights, the mask.
     private const int ConstantBytes = 512;
@@ -480,9 +515,15 @@ float4 PSWater(VsOut i) : SV_Target
     private readonly ResourceStates[] _simState = { ResourceStates.RenderTarget, ResourceStates.RenderTarget };
     private int _simCurrent;
     private bool _simCleared;
-    private int _warmUpLeft;
-    private double? _simLast;
-    private Random _stepRandom = new Random(StepSeed);
+    private int _warmUpLeft = WarmUpSteps;
+    // The warmed-up base (kept in COPY_SOURCE once made), and the playback the latest state holds: its steps done
+    // (base + steps [_simStart, _simN); -1: none yet), and the wind they were made with.
+    private readonly ID3D12Resource _simBase;
+    private ResourceStates _baseState = ResourceStates.CopyDest;
+    private bool _baseReady;
+    private int _simN = -1;
+    private int _simStart;
+    private float _simWind;
     private ID3D12Resource? _noise;
 
     // The location's quads.
@@ -509,8 +550,9 @@ float4 PSWater(VsOut i) : SV_Target
     private readonly float[] _speed = new float[SwellCells];
     private bool _swellStarted;
     private int _swellX0, _swellY0;
-    private double? _swellLast;
-    private Random _swellRandom = new Random(SwellSeed);
+    // The swell's steps done (steps [_swellStart, _swellM) from flat; -1: none yet).
+    private int _swellM = -1;
+    private int _swellStart;
 
     // The water mask (a byte per texel, row by world y), and the window it was made for.
     private readonly byte[] _mask = new byte[MaskSize * MaskSize];
@@ -599,6 +641,9 @@ float4 PSWater(VsOut i) : SV_Target
         d3d.CreateRenderTargetView(_sim[k], null, _rtvHeap.GetCPUDescriptorHandleForHeapStart() + k * (int)_rtvSize);
         d3d.CreateShaderResourceView(_sim[k], null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + k * (int)_srvSize);
       }
+      // The warmed-up base: copied from and to the states, never drawn into.
+      _simBase = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(SimFormat, SimSize, SimSize, 1, 1), ResourceStates.CopyDest);
       // The noise's slot shows the first state until the noise is made (never read before: no steps without it).
       d3d.CreateShaderResourceView(_sim[0], null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_srvSize);
       // The sun's shadow map's slot: empty until one is given (never read without: SunForward.w 0).
@@ -658,14 +703,43 @@ float4 PSWater(VsOut i) : SV_Target
     /// <summary>The water level (the most frequent corner height, to 0.1 m, scene-local), or null without water.</summary>
     public float? Level => _level;
 
-    /// <summary>The wave texture's warm-up steps still to do (a share each frame); 0 once settled.</summary>
-    public int WarmUpLeft => _outdoors && _level.HasValue && _waves && _noise != null ? _warmUpLeft : 0;
+    // Whether Draw runs the wave texture's simulation (water quads, outside, a water level, waves, the noise made).
+    private bool SimActive => _quadIndexCount > 0 && _quadVertices != null && _outdoors && _level.HasValue && _waves && _noise != null;
+
+    /// <summary>
+    /// The wave texture's steps still to do before it holds its state at <paramref name="seconds"/> of the section (the
+    /// base's warm-up left and the playback's catch-up; at most <c>StepsPerList</c> are done per Draw); 0 where Draw
+    /// runs no simulation (inside, no waves). Taken with the wind of the Draw before, as Draw with
+    /// <paramref name="exact"/> takes it (not exact: a small step back held, a run past the cap continued).
+    /// </summary>
+    public int StepsLeft(double seconds, bool exact = true)
+    {
+      if (!SimActive)
+      {
+        return 0;
+      }
+      int warm = _baseReady ? 0 : _warmUpLeft;
+      int n = PlaySteps(seconds), s = Math.Max(0, n - SimCap);
+      bool same = _baseReady && _simN >= 0;
+      if (same && n >= _simN && (s == _simStart || !exact))
+      {
+        return warm + n - _simN;
+      }
+      if (same && !exact && n < _simN && _simN - n <= HoldSteps)
+      {
+        return warm;
+      }
+      return warm + n - s;
+    }
+
+    private static int PlaySteps(double seconds) => (int)Math.Floor(Math.Max(seconds, 0) * SimRate + 1e-6);
 
     /// <summary>
     /// The location's water quads onto the GPU (positions, water.dat corner colours), their copies recorded into
     /// <paramref name="list"/>, the upload buffers added to <paramref name="uploads"/> for the caller to free once the
     /// list is done (nothing without water); the water level, the mask's boxes, and the simulations started afresh (the
-    /// wave noise made on first use). Ones before are freed (the GPU done with them first).
+    /// wave noise made on first use; the wave texture's warmed-up base kept). Ones before are freed (the GPU done with
+    /// them first).
     /// </summary>
     public unsafe void SetWater(CutsceneLocation location, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
     {
@@ -684,15 +758,12 @@ float4 PSWater(VsOut i) : SV_Target
       _waves = location.WaterSurface != null;   // the page's waterWaves (the texture itself is never sampled)
       _waterZ = location.WaterOriginZ;
       _swellStarted = false;
-      _swellLast = null;
-      _swellRandom = new Random(SwellSeed);
+      _swellM = -1;
       Array.Clear(_height);
       Array.Clear(_speed);
       _maskX0 = _maskY0 = int.MinValue;
-      _simCleared = false;
-      _simLast = null;
-      _warmUpLeft = WarmUpSteps;
-      _stepRandom = new Random(StepSeed);
+      // The playback starts again from the base (which, as the noise, stays: the same for every location).
+      _simN = -1;
 
       var water = location.Water;
       if (water.Count < 4)
@@ -802,12 +873,14 @@ float4 PSWater(VsOut i) : SV_Target
 
     // ---- The wave texture (waterTex.fxc, spec 6.1) ----
 
-    // The page's waterSimStep: the warm-up's share, then one step of the time passed (round(ms) x 0.02; 33 ms after a
-    // jump back or of 200 ms and more, as the page's; nothing while the time stands: the page keeps moving on the wall
-    // clock, here a paused frame stays as it is).
-    private unsafe void Simulate(ID3D12GraphicsCommandList list, WaterParams p, double seconds)
+    // The page's waterSimStep, made a pure function of the section's time: the state at t is the warmed-up base (made
+    // once, a share per list) + floor(t x 60) steps of 1/60 s from the section's start (at most the last SimCap), each
+    // step's noise shift by its index. Continued step by step where it can (the same as computed afresh), else the
+    // base restored and stepped again; at most StepsPerList steps per list (the rest in the lists after). Not exact
+    // (while playing): a small step back is held, and a run past the cap goes on instead of starting again.
+    private unsafe void Simulate(ID3D12GraphicsCommandList list, WaterParams p, double seconds, bool exact)
     {
-      if (!_simCleared)
+      if (!_baseReady && !_simCleared)
       {
         for (int k = 0; k < 2; k++)
         {
@@ -827,41 +900,100 @@ float4 PSWater(VsOut i) : SV_Target
       list.RSSetViewport(new Vortice.Mathematics.Viewport(SimSize, SimSize));
       list.RSSetScissorRect(SimSize, SimSize);
       list.SetPipelineState(_stepPipeline);
-      if (_warmUpLeft > 0)
+      int budget = StepsPerList;
+      if (!_baseReady)
       {
-        int steps = Math.Min(_warmUpLeft, WarmUpPerFrame);
+        int steps = Math.Min(_warmUpLeft, budget);
         for (int k = 0; k < steps; k++)
         {
-          Step(list, 0.25f, MathF.Round(16) * 0.02f);
+          Step(list, WarmUpKick, WarmUpStep, Shift(WarmSeed, WarmUpSteps - _warmUpLeft + k));
         }
         _warmUpLeft -= steps;
-        _simLast = seconds;
+        budget -= steps;
+        if (_warmUpLeft > 0)
+        {
+          return;
+        }
+        CopySimToBase(list);
+        _baseReady = true;
+        _simN = 0;
+        _simStart = 0;
+        _simWind = p.WaterWind;
+        if (budget == 0)
+        {
+          return;
+        }
+      }
+      float wind = p.WaterWind;
+      int n = PlaySteps(seconds), s = Math.Max(0, n - SimCap);
+      bool same = _simN >= 0 && _simWind == wind;
+      if (same && n >= _simN && s == _simStart)
+      {
+        // Going on from the state held: the same steps as from the base.
+      }
+      else if (same && !exact && n < _simN && _simN - n <= HoldSteps)
+      {
+        // A small step back while playing: held.
         return;
       }
-      double ms = _simLast is double last ? (seconds - last) * 1000 : 33;
-      if (ms < 0 || ms >= 200)
+      else if (same && !exact && n >= _simN)
       {
-        ms = 33;
+        // Playing on past the cap.
+        _simStart = s;
       }
-      _simLast = seconds;
-      float step = (float)Math.Round(ms) * 0.02f;
-      if (step > 0)
+      else
       {
-        // The kick of the wind (0xADC280): (WaterWind x 0.75 + 0.25) x 0.1.
-        Step(list, (p.WaterWind * 0.75f + 0.25f) * 0.1f, step);
+        RestoreBaseToSim(list);
+        _simN = s;
+        _simStart = s;
+        _simWind = wind;
       }
+      int todo = Math.Min(n - _simN, budget);
+      // The kick of the wind (0xADC280): (WaterWind x 0.75 + 0.25) x 0.1.
+      float kick = (wind * 0.75f + 0.25f) * 0.1f;
+      for (int k = 0; k < todo; k++)
+      {
+        Step(list, kick, SimStep, Shift(PlaySeed, _simN + k));
+      }
+      _simN += todo;
     }
 
-    // One step: the latest state read, the other drawn, then swapped (both kept readable between steps).
-    private unsafe void Step(ID3D12GraphicsCommandList list, float kick, float step)
+    // The latest state into the base (both states stay PIXEL_SHADER_RESOURCE between steps, the base COPY_SOURCE).
+    private void CopySimToBase(ID3D12GraphicsCommandList list)
+    {
+      var sim = _sim[_simCurrent];
+      list.ResourceBarrierTransition(sim, ResourceStates.PixelShaderResource, ResourceStates.CopySource);
+      if (_baseState != ResourceStates.CopyDest)
+      {
+        list.ResourceBarrierTransition(_simBase, _baseState, ResourceStates.CopyDest);
+      }
+      list.CopyResource(_simBase, sim);
+      list.ResourceBarrierTransition(sim, ResourceStates.CopySource, ResourceStates.PixelShaderResource);
+      list.ResourceBarrierTransition(_simBase, ResourceStates.CopyDest, ResourceStates.CopySource);
+      _baseState = ResourceStates.CopySource;
+    }
+
+    // The base into the first state, made the latest.
+    private void RestoreBaseToSim(ID3D12GraphicsCommandList list)
+    {
+      var sim = _sim[0];
+      list.ResourceBarrierTransition(sim, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
+      list.CopyResource(sim, _simBase);
+      list.ResourceBarrierTransition(sim, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+      _simCurrent = 0;
+    }
+
+    // One step: the latest state read, the other drawn, then swapped (both kept readable between steps); the noise's
+    // lookup shifted by <shift>.
+    private unsafe void Step(ID3D12GraphicsCommandList list, float kick, float step, (float X, float Y) shift)
     {
       int target = 1 - _simCurrent;
       list.ResourceBarrierTransition(_sim[target], ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
       var constants = stackalloc float[4];
       constants[0] = kick;
       constants[1] = step;
-      constants[2] = (float)_stepRandom.NextDouble();
-      constants[3] = (float)_stepRandom.NextDouble();
+      constants[2] = shift.X;
+      constants[3] = shift.Y;
       var gpu = _srvHeap.GetGPUDescriptorHandleForHeapStart();
       list.OMSetRenderTargets(_rtvHeap.GetCPUDescriptorHandleForHeapStart() + target * (int)_rtvSize);
       list.SetGraphicsRoot32BitConstants(0, 4, constants, 0);
@@ -897,63 +1029,82 @@ float4 PSWater(VsOut i) : SV_Target
       Array.Clear(_speed, ring * SwellSize, SwellSize);
     }
 
-    // The window round the mission marker or the eye (the game's player, 0x93F090), moved and stepped. The page's real
-    // time is the given time here: dt = the time passed (at most 0.13 s; 1/30 the first time; nothing while it stands
-    // or goes back); a new or jumped window starts flat and warms up the cutscene's time so far (at most 30 s) in steps
-    // of 0.02 s (the game's grid started flat when the cutscene camera came, 0xAD4E80).
-    private void Swell(WaterParams p, Vector3 eye, double seconds)
+    // The window round the mission marker or the eye (the game's player, 0x93F090), moved and stepped, as a pure
+    // function of the section's time: flat at the window, then m = floor(t / 0.02) steps of 0.02 s from the section's
+    // start (at most the last 1500, 30 s), step j at (j + 1) x 20 ms with its kicks' numbers by j (the game's grid
+    // started flat when the cutscene camera came, 0xAD4E80). Continued step by step where it can (the same window, on
+    // in time), else made afresh at the window. Not exact (while playing): a moved window clears what it leaves (as the
+    // game's) and goes on (at most 7 steps made up after a step back or a jump on).
+    private void Swell(WaterParams p, Vector3 eye, double seconds, bool exact)
     {
       var centre = p.SwellAt ?? eye;
       int x0 = EvenDown(centre.X), y0 = EvenDown(centre.Y);
-      int warm = 0;
-      if (!_swellStarted || Math.Abs(x0 - _swellX0) > 200 || Math.Abs(y0 - _swellY0) > 200)
+      int m = (int)Math.Floor(Math.Max(seconds, 0) / SwellStepSeconds + 1e-6), s = Math.Max(0, m - SwellCap);
+      bool moved = _swellStarted && (x0 != _swellX0 || y0 != _swellY0);
+      bool jumped = !_swellStarted || Math.Abs(x0 - _swellX0) > 200 || Math.Abs(y0 - _swellY0) > 200;
+      if (_swellM == m && !moved && !jumped)
       {
-        Array.Clear(_height);
-        Array.Clear(_speed);
-        warm = (int)Math.Round(Math.Clamp(seconds, 0, 30) / 0.02);
-        _swellStarted = true;
+        return;
       }
-      else
-      {
-        for (int i = 0; i < SwellSize; i++)
-        {
-          int x = x0 + i * 2;
-          if (x < _swellX0 || x >= _swellX0 + 200)
-          {
-            ClearColumn(Ring(x));
-          }
-          int y = y0 + i * 2;
-          if (y < _swellY0 || y >= _swellY0 + 200)
-          {
-            ClearRow(Ring(y));
-          }
-        }
-      }
-      _swellX0 = x0;
-      _swellY0 = y0;
       // The kicks and the swell of the wind.
       float kick = (p.SwellWind * 0.7f + 0.23f) * 10;
       float swell = p.SwellWind * 0.55f + 0.18f;
-      for (int k = 0; k < warm; k++)
+      bool cont = _swellM >= 0 && !jumped && !moved && m >= _swellM && s == _swellStart;
+      if (!cont && (exact || jumped || _swellM < 0 || m < _swellM))
       {
-        Advance(0.02f, (seconds - (warm - k) * 0.02) * 1000, kick, swell);
+        Array.Clear(_height);
+        Array.Clear(_speed);
+        _swellStarted = true;
+        _swellX0 = x0;
+        _swellY0 = y0;
+        for (int j = s; j < m; j++)
+        {
+          Advance((float)SwellStepSeconds, (j + 1) * 20.0, kick, swell, j);
+        }
+        _swellStart = s;
       }
-      float dt = _swellLast is double last ? (float)Math.Min(seconds - last, 0.13) : 1 / 30f;
-      if (dt > 0)
+      else
       {
-        Advance(dt, seconds * 1000, kick, swell);
+        if (moved)
+        {
+          for (int i = 0; i < SwellSize; i++)
+          {
+            int x = x0 + i * 2;
+            if (x < _swellX0 || x >= _swellX0 + 200)
+            {
+              ClearColumn(Ring(x));
+            }
+            int y = y0 + i * 2;
+            if (y < _swellY0 || y >= _swellY0 + 200)
+            {
+              ClearRow(Ring(y));
+            }
+          }
+        }
+        int from = cont ? _swellM : Math.Max(_swellM, m - 7);
+        _swellX0 = x0;
+        _swellY0 = y0;
+        for (int j = from; j < m; j++)
+        {
+          Advance((float)SwellStepSeconds, (j + 1) * 20.0, kick, swell, j);
+        }
+        if (!cont)
+        {
+          _swellStart = s;
+        }
       }
-      _swellLast = seconds;
+      _swellM = m;
     }
 
     // The page's advance (PC 842-865): random kicks, the rows' sine push, then the springs (the window's edges held to
-    // themselves, not wrapped).
-    private void Advance(float dt, double ms, float kick, float swell)
+    // themselves, not wrapped). The kicks' numbers from step <j>'s own generator.
+    private void Advance(float dt, double ms, float kick, float swell, int j)
     {
+      var rng = new Random(unchecked((int)Mix(SwellSeed, j)));
       for (int k = 0; k < 2000; k++)
       {
-        int at = _swellRandom.Next(SwellCells);
-        _speed[at] += (float)(_swellRandom.NextDouble() * 2 - 1) * kick * 0.5f * dt;
+        int at = rng.Next(SwellCells);
+        _speed[at] += (float)(rng.NextDouble() * 2 - 1) * kick * 0.5f * dt;
       }
       float phase = (float)(ms % 4000 * 2 * Math.PI / 4000);
       int ci = Ring(_swellX0), cj = Ring(_swellY0);
@@ -1025,14 +1176,17 @@ float4 PSWater(VsOut i) : SV_Target
 
     /// <summary>
     /// The water into the light target (in RENDER_TARGET state) with the scene's depth (the solid meshes drawn), after
-    /// the solid meshes and before the see-through ones; <paramref name="seconds"/>: the time the simulations run by
-    /// (the cutscene's; standing still while paused). First the wave texture's step(s) and the swell's, then the flat
-    /// quads and (outside, with a water level) the sea grid. Nothing without water. Leaves the light target and the
-    /// depth bound, and this class's root signature and descriptor heap set (the see-through pass sets its own again).
+    /// the solid meshes and before the see-through ones; <paramref name="seconds"/>: the section's time the simulations
+    /// show (their state a pure function of it: a frame drawn alone holds the same water as one drawn after others;
+    /// the wave texture may need several Draws to get there, see <see cref="StepsLeft"/>). <paramref name="exact"/>
+    /// false while playing: small steps back held, a moving swell window carried on. First the wave texture's steps and
+    /// the swell's, then the flat quads and (outside, with a water level) the sea grid. Nothing without water. Leaves
+    /// the light target and the depth bound, and this class's root signature and descriptor heap set (the see-through
+    /// pass sets its own again).
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle lightTarget, CpuDescriptorHandle depth,
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light, WaterParams p,
-                            double seconds, ID3D12Resource? sunShadowMap = null)
+                            double seconds, ID3D12Resource? sunShadowMap = null, bool exact = true)
     {
       if (_quadIndexCount == 0 || _quadVertices == null)
       {
@@ -1043,9 +1197,9 @@ float4 PSWater(VsOut i) : SV_Target
       list.SetGraphicsRootSignature(_rootSignature);
       list.SetDescriptorHeaps(_srvHeap);
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-      if (seaOn && _waves && _noise != null)
+      if (SimActive)
       {
-        Simulate(list, p, seconds);
+        Simulate(list, p, seconds, exact);
       }
       bool waves = _waves && _simCleared;
 
@@ -1056,7 +1210,7 @@ float4 PSWater(VsOut i) : SV_Target
       float level = _level ?? 0;
       if (seaOn)
       {
-        Swell(p, eye, seconds);
+        Swell(p, eye, seconds, exact);
         if (_swellX0 != _maskX0 || _swellY0 != _maskY0)
         {
           MakeMask(_swellX0, _swellY0);
@@ -1183,6 +1337,7 @@ float4 PSWater(VsOut i) : SV_Target
       _noise?.Dispose();
       _sim[0].Dispose();
       _sim[1].Dispose();
+      _simBase.Dispose();
       _gridIndices.Dispose();
       _ring.Unmap(0);
       _ring.Dispose();
