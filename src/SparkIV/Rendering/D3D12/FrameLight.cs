@@ -93,8 +93,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public DeferredLightMask Mask;
     /// <summary>A lamp in an interior's room: no AO factor (GTA IV's ps07); outside saturate(AO² + 0.5) (ps06/ps08).</summary>
     public bool InRoom;
-    /// <summary>Drawn by the shadow programs (GTA IV's ps14/ps15; the shadow map itself not yet: fully lit).</summary>
+    /// <summary>Drawn by the shadow programs (GTA IV's ps14/ps15): fully lit unless it has a <see cref="ShadowSlot"/>.</summary>
     public bool Shadowed;
+    /// <summary>
+    /// A shadowed light's slot in the shadow atlas (0 to <see cref="MeshRenderer.ShadowSlots"/> - 1): its map drawn this
+    /// frame from the instances that cast (see <see cref="MeshRenderer.AddInstance"/>); null: none (fully lit).
+    /// </summary>
+    public int? ShadowSlot;
   }
 
   /// <summary>

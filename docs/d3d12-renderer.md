@@ -170,8 +170,12 @@ page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `
 per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; env*/shd* only on baked
 surfaces, the others only on peds and vehicles), the tail lamps of vehicles whose lamps the script turns on, the
 location's lamps on at the hour, of the rooms seen, in view, faded by FadeDistance - with the page's formulas (light
-and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Not yet: the lamps'
-shine, the lamp shadow maps (shadow lamps fully lit), light volumes' visible cones and coronas.
+and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Lamp shadows as the
+page's: the 4 shadow lamps nearest to the camera (distance less radius; `CutsceneLights.LampShadowSlots`) get a slot in
+an R32F atlas (2048 x 4096: a row of two 1024² halves per lamp), drawn each frame before the G-buffer from the cast's
+solid parts (instances added with `castsShadow`; the location casts none), sampled in the light pass with the page's
+four rotated taps (its GL rows and pixel y turned over, so the reads are the page's). Other shadow lamps stay fully
+lit. Not yet: the lamps' shine, light volumes' visible cones and coronas.
 
 ## Next steps (#112)
 

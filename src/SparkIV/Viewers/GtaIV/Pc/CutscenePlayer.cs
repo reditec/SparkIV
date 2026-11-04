@@ -201,7 +201,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             var mine = numbers.Skip(at).Take(sources[a].Count).ToArray();
             at += sources[a].Count;
-            _castInstances[list[a]] = mine.Select(n => renderer.AddInstance(n, Matrix4x4.Identity)).ToArray();
+            // The cast (peds, vehicles, props) casts into the lamps' shadow maps, the location does not (as the page's;
+            // the game's atlas held only peds in the traced frame).
+            _castInstances[list[a]] = mine.Select(n => renderer.AddInstance(n, Matrix4x4.Identity, castsShadow: true)).ToArray();
             foreach (int n in mine)
             {
               if (renderer.Bounds(n) is var (lo, hi))

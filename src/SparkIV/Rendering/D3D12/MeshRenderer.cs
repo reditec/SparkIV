@@ -92,6 +92,7 @@ struct Frame
   float4 AmbientAbove;
   float4 AmbientBelow;
   float4 Params;   // x: day/night, y: exposure, z: PedAoMultiplier, w: AoMultiplier
+  float4 Screen;   // xy: the target's size in pixels
 };
 ConstantBuffer<Frame> f : register(b1);
 Texture2D Albedo : register(t0);
@@ -125,10 +126,10 @@ VsOut VSMain(VsIn input)
 
 // A vertex moved by up to four bones (rest to now); one with no weights, or an instance without its bones, stays as
 // it is. Bone numbers are kept within the instance's palette (root descriptors have no bounds check).
-VsOut VSSkinned(VsSkinIn input)
+void Skin(VsSkinIn input, out float4 p, out float3 n)
 {
-  float4 p = float4(input.position, 1);
-  float3 n = input.normal;
+  p = float4(input.position, 1);
+  n = input.normal;
   uint count = (uint)d.Instance.z;
   if (count > 0 && dot(input.weights, 1) > 0)
   {
@@ -138,7 +139,55 @@ VsOut VSSkinned(VsSkinIn input)
     p = mul(p, m);
     n = mul(n, (float3x3)m);
   }
+}
+
+VsOut VSSkinned(VsSkinIn input)
+{
+  float4 p;
+  float3 n;
+  Skin(input, p, n);
   return Finish(p, n, input.uv, input.alpha, input.color);
+}
+
+// A lamp's shadow map (#112 step 5), as GTA IV draws one (the page's lampShadowVertex/lampShadowFragment, gtaiv-pc.js;
+// the TLAD trace GTAIV.3: VS 0x25afd220, PS 0x25d42d60): of a point's offset L from the lamp in the lamp's frame (the
+// world's x the axis, y and -z across) and s = -side x L.z, the place L.xy / (|L| - s), the depth |L| / radius; the
+// pixel keeps only what is on its half (s / radius at most 0.01) and stores |L| / radius as it came from the vertices.
+// Here d.Tint holds the lamp (xyz) and its radius (w), d.Material.x the half (-1 or 1).
+struct ShOut { float4 position : SV_Position; float2 lamp : LAMP; };
+
+ShOut ShadowFinish(float4 local)
+{
+  float3 off = mul(local, d.World).xyz - d.Tint.xyz;
+  float3 l = float3(off.y, -off.z, off.x);
+  float len = length(l);
+  float s = -d.Material.x * l.z;
+  ShOut o;
+  o.position = float4(l.xy / max(len - s, 1e-6), len / d.Tint.w, 1);
+  o.lamp = float2(s, len) / d.Tint.w;
+  return o;
+}
+
+ShOut VSShadow(VsIn input)
+{
+  return ShadowFinish(float4(input.position, 1));
+}
+
+ShOut VSShadowSkinned(VsSkinIn input)
+{
+  float4 p;
+  float3 n;
+  Skin(input, p, n);
+  return ShadowFinish(p);
+}
+
+float PSShadow(ShOut input) : SV_Target
+{
+  if (input.lamp.x > 0.01)
+  {
+    discard;
+  }
+  return input.lamp.y;
 }
 
 // The light target and the G-buffer the lamps are added over (#112 step 5): what the lamps' light is multiplied by
@@ -238,12 +287,45 @@ float4 PSBlend(VsOut input) : SV_Target
 //  light family (ps06-ps09): (a⁴ - 0.1) / 0.9 x spot x saturate(n.l), a lamp outside x saturate(AO² + 0.5), past a
 //    shadow (ps14) x saturate(0.5 AO⁴ + AO²), in a room no AO; a cutscene's light no AO, max(n.l, 0);
 //  filler (ps10-ps12): 1.5 (a² - 1/3) x spot x saturate((n.l - 0.2) x 1.25), past a shadow (ps15) saturate(1.5 (n.l - 1/3)).
-// Not yet: the lamps' shine (no specular maps here yet), the lamp shadow maps (shadow lamps fully lit).
+// A shadowed light with a map in the atlas: x what of it gets past (LampShadow). Not yet: the lamps' shine (no
+// specular maps here yet).
 struct Light { float4 At; float4 Dir; float4 Color; float4 Kind; };
 StructuredBuffer<Light> Lights : register(t3);
 Texture2D<float4> GAlbedo : register(t4);
 Texture2D<float4> GNormal : register(t5);
 Texture2D<float4> GPlace : register(t6);
+// The shadow atlas: a row of 1024 x 1024 a slot (4), each light's halves side by side (the axis's negative side left).
+Texture2D<float> LampShadows : register(t7);
+static const int ShadowSize = 1024;
+
+// How much of a lamp gets past its shadow at a point (the page's lampShadow, gtaiv-pc.js; deferred_lighting.fxc program
+// 35): the point 0.1 m off along its normal in the lamp's frame, its place in its half's map, four reads round it turned
+// by the pixel's own angle (frac(pixel . (3, 4.272)) of a turn) at 0.75, 0.25, 0.5 and 1 x 0.0029, each kept in the
+// half; lit where the stored distance is at least the point's; their mean. The page's coordinates are GL's (its
+// pixels' y and its maps' rows from the bottom): the same reads here, rows and the pixel's y turned over.
+float LampShadow(int slot, float3 at, float range, float3 p, float3 n, float2 pixel)
+{
+  float3 off = p + n * 0.1 - at;
+  float3 l = float3(off.y, -off.z, off.x);
+  float len = length(l);
+  float2 uv = l.xy / max(abs(l.z) + len, 1e-4) * 0.5 + 0.5;
+  int side = l.z <= 0 ? 0 : 1;
+  float2 g = float2(pixel.x, f.Screen.y - 1 - pixel.y);
+  float turn = frac(dot(g, float2(3, 4.272)) * 0.159154937 + 0.5) * 6.28318548 - 3.14159274;
+  float2 cs = float2(cos(turn), sin(turn)) * 0.0029296875;
+  float2 taps[4] = { cs.yx * 0.75, -cs.yx * 0.25, float2(-cs.x, cs.y) * 0.5, float2(cs.x, -cs.y) };
+  float past = 0;
+  [unroll] for (int k = 0; k < 4; k++)
+  {
+    int2 texel = (int2)(clamp(uv + taps[k], 0, 0.999) * ShadowSize);
+    float stored = LampShadows.Load(int3(side * ShadowSize + texel.x, slot * ShadowSize + ShadowSize - 1 - texel.y, 0));
+    if (stored - len / range >= 0)
+    {
+      past += 0.25;
+    }
+  }
+  return past;
+}
 
 struct LvOut { float4 position : SV_Position; nointerpolation uint light : LIGHT; };
 
@@ -303,17 +385,20 @@ float4 PSLight(LvOut input) : SV_Target
   }
   uint model = (uint)(l.Kind.x + 0.5);
   bool inRoom = l.Kind.y > 0.5, shadowed = l.Kind.z > 0.5;
+  // (Kind.z: 0 no shadow, 1 shadowed without a map, 2 + its slot in the atlas.)
+  int slot = (int)(l.Kind.z + 0.5) - 2;
+  float past = slot >= 0 ? LampShadow(slot, l.At.xyz, range, place.xyz, n, floor(input.position.xy)) : 1;
   float nl = dot(n, L);
   float3 lit;
   if (model == 1)
   {
     float nearBy = max(1.5 * (a * a - 1.0 / 3.0), 0);
-    lit = l.Color.rgb * nearBy * spot * (shadowed ? saturate(1.5 * (nl - 1.0 / 3.0)) : saturate((nl - 0.2) * 1.25));
+    lit = l.Color.rgb * nearBy * spot * (shadowed ? saturate(1.5 * (nl - 1.0 / 3.0)) * past : saturate((nl - 0.2) * 1.25));
   }
   else
   {
     float reach = max((a * a * a * a - 0.1) / 0.9, 0);
-    float3 lampLight = l.Color.rgb * reach * spot;
+    float3 lampLight = l.Color.rgb * reach * spot * past;
     if (model == 0 && !inRoom)
     {
       lampLight *= shadowed ? saturate(0.5 * ao * ao * ao * ao + ao * ao) : saturate(ao * ao + 0.5);
@@ -325,7 +410,14 @@ float4 PSLight(LvOut input) : SV_Target
 ";
 
     private const int DrawConstants = 16 + 4 + 4 + 4 + 4;
-    private const int FrameFloats = 16 + 4 * 6;
+    private const int FrameFloats = 16 + 4 * 7;
+
+    /// <summary>
+    /// How many lights' shadow maps a frame can draw (the atlas's rows; see <see cref="DeferredLight.ShadowSlot"/>): each
+    /// light two halves of 1024 x 1024, R32F (the shader's ShadowSize).
+    /// </summary>
+    public const int ShadowSlots = 4;
+    private const int ShadowSize = 1024;
     private const int FrameSlotBytes = 256;
     private const int VertexFloats = 12;
     private const int SkinFloats = 8;
@@ -410,6 +502,7 @@ float4 PSLight(LvOut input) : SV_Target
       public bool Visible = true;
       public float ActorAmbient = 1;
       public bool InRoom;
+      public bool CastsShadow;
     }
 
     /// <summary>An actor's share of the light from around (its room's AmbientDownMult; 1 outside).</summary>
@@ -456,6 +549,18 @@ float4 PSLight(LvOut input) : SV_Target
     private readonly ID3D12DescriptorHeap _gBufferSrvs;
     private readonly ID3D12Resource?[] _gBuffer = new ID3D12Resource?[3];
     private int _gWidth, _gHeight;
+
+    // The lights' shadow maps (step 5): the atlas (kept readable by the light pass between frames), its depth, their
+    // views, the pipelines (skinned or not x the half: -1 its front faces culled, +1 its back faces).
+    private readonly ID3D12Resource _shadowAtlas;
+    private readonly ID3D12Resource _shadowDepth;
+    private readonly ID3D12DescriptorHeap _shadowRtv;
+    private readonly ID3D12DescriptorHeap _shadowDsv;
+    private readonly ID3D12PipelineState[] _shadowPipelines = new ID3D12PipelineState[4];
+    private readonly int[] _slotOf = new int[ShadowSlots];
+
+    /// <summary>The shadow maps drawn last frame (lights).</summary>
+    public int ShadowMapsDrawn { get; private set; }
 
     /// <summary>The lights added last frame.</summary>
     public int LightsDrawn { get; private set; }
@@ -550,7 +655,7 @@ float4 PSLight(LvOut input) : SV_Target
       {
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(3, 0), ShaderVisibility.All),
-        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 4, 0, 0)), ShaderVisibility.Pixel),
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 4, 4, 0, 0)), ShaderVisibility.Pixel),
       }));
       _lightPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
       {
@@ -573,7 +678,47 @@ float4 PSLight(LvOut input) : SV_Target
       _lights.Map(0, null, &lightsMapped).CheckError();
       _lightsMapped = (byte*)lightsMapped;
       _gBufferRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
-      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
+      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 4, DescriptorHeapFlags.ShaderVisible));
+
+      // The shadow atlas (t7, after the G-buffer's three) and its depth; the pipelines drawing into it.
+      _shadowAtlas = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.R32_Float, ShadowSize * 2, ShadowSize * ShadowSlots, 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+        ResourceStates.PixelShaderResource, new ClearValue(Format.R32_Float, new Vortice.Mathematics.Color4(1, 1, 1, 1)));
+      _shadowDepth = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.D32_Float, ShadowSize * 2, ShadowSize * ShadowSlots, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+        ResourceStates.DepthWrite, new ClearValue(Format.D32_Float, 1.0f, 0));
+      _shadowRtv = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 1));
+      _shadowDsv = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.DepthStencilView, 1));
+      d3d.CreateRenderTargetView(_shadowAtlas, null, _shadowRtv.GetCPUDescriptorHandleForHeapStart());
+      d3d.CreateDepthStencilView(_shadowDepth, null, _shadowDsv.GetCPUDescriptorHandleForHeapStart());
+      d3d.CreateShaderResourceView(_shadowAtlas, null, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() +
+        3 * (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
+      var shadowVertex = Compile(DxcShaderStage.Vertex, "VSShadow");
+      var shadowSkinned = Compile(DxcShaderStage.Vertex, "VSShadowSkinned");
+      var shadowPixel = Compile(DxcShaderStage.Pixel, "PSShadow");
+      for (int s = 0; s < 2; s++)
+      {
+        for (int half = 0; half < 2; half++)
+        {
+          // Only the faces towards the lamp, as the page measured against the game's atlas (the GL front faces, wound
+          // counter-clockwise as here, culled for the half -1, the back ones for +1).
+          _shadowPipelines[s * 2 + half] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+          {
+            RootSignature = _rootSignature,
+            VertexShader = s == 1 ? shadowSkinned : shadowVertex,
+            PixelShader = shadowPixel,
+            InputLayout = new InputLayoutDescription(s == 1 ? skinnedInput : input),
+            SampleMask = uint.MaxValue,
+            PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+            RasterizerState = new RasterizerDescription(half == 0 ? CullMode.Front : CullMode.Back, FillMode.Solid) { FrontCounterClockwise = true },
+            BlendState = BlendDescription.Opaque,
+            DepthStencilState = DepthStencilDescription.Default,
+            RenderTargetFormats = new[] { Format.R32_Float },
+            DepthStencilFormat = Format.D32_Float,
+            SampleDescription = new SampleDescription(1, 0),
+          });
+        }
+      }
       // The frame's constants (camera, light), a slot per frame in flight.
       _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
                                            ResourceDescription.Buffer((ulong)PaletteSlots * FrameSlotBytes), ResourceStates.GenericRead);
@@ -904,10 +1049,13 @@ float4 PSLight(LvOut input) : SV_Target
       return buffer;
     }
 
-    /// <summary>A model drawn with a model-to-scene matrix (and, skinned, its bones' matrices); its instance's number.</summary>
-    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false)
+    /// <summary>
+    /// A model drawn with a model-to-scene matrix (and, skinned, its bones' matrices); its instance's number.
+    /// <paramref name="castsShadow"/>: its solid parts drawn into the lights' shadow maps (while visible).
+    /// </summary>
+    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false, bool castsShadow = false)
     {
-      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom });
+      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom, CastsShadow = castsShadow });
       return _instances.Count - 1;
     }
 
@@ -1007,6 +1155,17 @@ float4 PSLight(LvOut input) : SV_Target
       frame[37] = light.Exposure;
       frame[38] = light.PedAoScale;
       frame[39] = light.AoScale;
+      frame[40] = width;
+      frame[41] = height;
+      frame[42] = 0;
+      frame[43] = 0;
+
+      // The shadowed lights' maps (step 5), before anything else is drawn.
+      ShadowMapsDrawn = 0;
+      if (lights != null)
+      {
+        DrawShadowMaps(list, lights);
+      }
 
       ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
       void Bind(bool gBuffer)
@@ -1041,14 +1200,100 @@ float4 PSLight(LvOut input) : SV_Target
       DrawPass(list, Pass.Blend);
     }
 
+    // The shadow maps of the lights that have a slot (each slot's first; see DeferredLight.ShadowSlot): the atlas cleared
+    // to 1 (nothing there), then per light both halves drawn from the visible instances that cast, their solid parts
+    // (nothing cut out, as the page's), each into its tile. _slotOf: the light (its index) each slot was drawn for.
+    private unsafe void DrawShadowMaps(ID3D12GraphicsCommandList list, IReadOnlyList<DeferredLight> lights)
+    {
+      Array.Fill(_slotOf, -1);
+      bool any = false;
+      for (int i = 0; i < lights.Count; i++)
+      {
+        if (lights[i].Shadowed && lights[i].ShadowSlot is int s && s >= 0 && s < ShadowSlots && _slotOf[s] < 0 && lights[i].Range > 0)
+        {
+          _slotOf[s] = i;
+          any = true;
+        }
+      }
+      if (!any)
+      {
+        return;
+      }
+      list.ResourceBarrierTransition(_shadowAtlas, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      var rtv = _shadowRtv.GetCPUDescriptorHandleForHeapStart();
+      var dsv = _shadowDsv.GetCPUDescriptorHandleForHeapStart();
+      list.OMSetRenderTargets(rtv, dsv);
+      list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(1, 1, 1, 1));
+      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+      list.SetGraphicsRootSignature(_rootSignature);
+      list.SetDescriptorHeaps(_textures.Heap);
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      var draw = stackalloc float[DrawConstants];
+      for (int slot = 0; slot < ShadowSlots; slot++)
+      {
+        if (_slotOf[slot] < 0)
+        {
+          continue;
+        }
+        var l = lights[_slotOf[slot]];
+        ShadowMapsDrawn++;
+        for (int half = 0; half < 2; half++)
+        {
+          list.RSSetViewport(new Vortice.Mathematics.Viewport(half * ShadowSize, slot * ShadowSize, ShadowSize, ShadowSize));
+          list.RSSetScissorRect(new Vortice.Mathematics.RectI(half * ShadowSize, slot * ShadowSize, ShadowSize, ShadowSize));
+          int lastPipeline = -1;
+          foreach (var instance in _instances)
+          {
+            if (instance == null || !instance.Visible || !instance.CastsShadow || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == Pass.Solid))
+            {
+              continue;
+            }
+            bool skinned = model.Skin != null;
+            int pipeline = (skinned ? 2 : 0) + half;
+            if (pipeline != lastPipeline)
+            {
+              list.SetPipelineState(_shadowPipelines[pipeline]);
+              lastPipeline = pipeline;
+            }
+            list.IASetVertexBuffers(0, model.VertexView);
+            if (skinned)
+            {
+              list.IASetVertexBuffers(1, model.SkinView);
+              list.SetGraphicsRootShaderResourceView(2, instance.PaletteAddress != 0 ? instance.PaletteAddress : _palette.GPUVirtualAddress);
+            }
+            list.IASetIndexBuffer(model.IndexView);
+            new Span<float>(draw, DrawConstants).Clear();
+            *(Matrix4x4*)draw = instance.World;
+            draw[18] = instance.PaletteAddress != 0 ? instance.Palette!.Length : 0;
+            draw[20] = half == 0 ? -1 : 1;
+            draw[28] = l.Position.X;
+            draw[29] = l.Position.Y;
+            draw[30] = l.Position.Z;
+            draw[31] = l.Range;
+            list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+            foreach (var part in model.Parts)
+            {
+              if (part.Pass == Pass.Solid)
+              {
+                list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+                DrawCalls++;
+              }
+            }
+          }
+        }
+      }
+      list.ResourceBarrierTransition(_shadowAtlas, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+    }
+
     // The lights into this frame's slot of the light buffer, then a box each (instanced) over the G-buffer.
     private unsafe void DrawLights(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
                                    int width, int height, IReadOnlyList<DeferredLight> lights, ulong frameAddress)
     {
       int count = 0;
       var into = (float*)(_lightsMapped + (long)_paletteSlot * LightCapacity * LightBytes);
-      foreach (var l in lights)
+      for (int index = 0; index < lights.Count; index++)
       {
+        var l = lights[index];
         if (count >= LightCapacity)
         {
           break;
@@ -1072,7 +1317,8 @@ float4 PSLight(LvOut input) : SV_Target
         p[11] = l.ConeScale;
         p[12] = (float)l.Model;
         p[13] = l.InRoom ? 1 : 0;
-        p[14] = l.Shadowed ? 1 : 0;
+        // 0 no shadow, 1 shadowed without a map (fully lit), 2 + its slot when its map was drawn this frame.
+        p[14] = !l.Shadowed ? 0 : l.ShadowSlot is int s && s >= 0 && s < ShadowSlots && _slotOf[s] == index ? 2 + s : 1;
         p[15] = (float)l.Mask;
         count++;
       }
@@ -1181,6 +1427,14 @@ float4 PSLight(LvOut input) : SV_Target
       }
       _gBufferRtvs.Dispose();
       _gBufferSrvs.Dispose();
+      _shadowAtlas.Dispose();
+      _shadowDepth.Dispose();
+      _shadowRtv.Dispose();
+      _shadowDsv.Dispose();
+      foreach (var pipeline in _shadowPipelines)
+      {
+        pipeline.Dispose();
+      }
       _lightPipeline.Dispose();
       _lightSignature.Dispose();
       foreach (var pipeline in _pipelines)

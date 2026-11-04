@@ -34,9 +34,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// its G-buffer): the section's own lights (cutLightsNow: the 8 strongest), the tail lamps of the vehicles whose lamps
   /// the mission's script turns on (vehicleLightsNow), and the location's lamps (its objects' 2dfx lights) that are on at
   /// the hour (gtaiv-pc.js lampOn / outdoorLamp), seen (the camera's interior and the rooms seen through its portals on
-  /// screen: seenRooms), whose sphere reaches into the view, faded by their FadeDistance. Not yet: the lamps' shadow
-  /// maps (shadow lamps take their formulas, fully lit), light volumes and coronas, the !outside fallback of the page
-  /// (MapLightScale: irrelevant with a time cycle).
+  /// screen: seenRooms), whose sphere reaches into the view, faded by their FadeDistance; the shadow lamps nearest to
+  /// the camera get a shadow map (LampShadowSlots, the page's choice; drawn from the cast). Not yet: light volumes and
+  /// coronas, the !outside fallback of the page (MapLightScale: irrelevant with a time cycle).
   /// </summary>
   public sealed class CutsceneLights
   {
@@ -217,7 +217,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       TailLampsNow(now, cast, exposure);
       if (_lamps.Count == 0)
       {
-        return Capped(now, cap);
+        return Capped(now, cap, eye);
       }
 
       // With the camera in an interior, not the lamps of another interior; inside only those of the rooms seen from
@@ -288,11 +288,31 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       near.Sort((a, b) => a.D.CompareTo(b.D));
       now.AddRange(near.Select(n => n.Light));
-      return Capped(now, cap);
+      return Capped(now, cap, eye);
     }
 
-    private static List<DeferredLight> Capped(List<DeferredLight> list, int? cap) =>
-      cap is int c && list.Count > c ? list.GetRange(0, c) : list;
+    /// <summary>How many lamps' shadow maps a frame draws (the page's LampShadowSlots; the game's atlas holds 16 tiles).</summary>
+    public const int LampShadowSlots = 4;
+
+    // At most the cap, then the shadow lamps' maps given out (the page's choice, an estimate: the game's is not known):
+    // the lamps with a shadow nearest to the camera by their distance less their radius, as many as there are slots;
+    // the others keep the shadow programs' formulas, fully lit.
+    private static List<DeferredLight> Capped(List<DeferredLight> list, int? cap, Vector3 eye)
+    {
+      var now = cap is int c && list.Count > c ? list.GetRange(0, c) : list;
+      var chosen = Enumerable.Range(0, now.Count)
+        .Where(i => now[i].Shadowed && now[i].Model != DeferredLightModel.Cut)
+        .OrderBy(i => Vector3.Distance(now[i].Position, eye) - now[i].Range)
+        .Take(Math.Min(LampShadowSlots, MeshRenderer.ShadowSlots))
+        .ToList();
+      for (int slot = 0; slot < chosen.Count; slot++)
+      {
+        var l = now[chosen[slot]];
+        l.ShadowSlot = slot;
+        now[chosen[slot]] = l;
+      }
+      return now;
+    }
 
     // cutLightsNow: each light's tracks at the frame (whole frames of its clip, no easing between them), its strength
     // over 0.15; colour x strength x exposure; a spot from its outer angle (1° to 89°) to half its track's angle; the 8
