@@ -452,7 +452,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     // How much of the screen a portal covers (the page's portalShare): its corners (the interior's) into the scene,
     // clipped to the view (|x|, |y| <= w, z >= 0), the area of what is left in normalised coordinates / 2 / 4.
-    private static float PortalShare(LocationRoom r, Vector3[]? corners, Matrix4x4 viewProjection)
+    internal static float PortalShare(LocationRoom r, Vector3[]? corners, Matrix4x4 viewProjection)
     {
       if (corners == null || corners.Length < 4)
       {

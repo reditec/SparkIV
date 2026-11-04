@@ -44,6 +44,20 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// </summary>
     public float ShineScale;
 
+    /// <summary>
+    /// The fog laid over the light of everything drawn but the sky, before the tone mapping (GTA IV's rage_postfx
+    /// program 21, the page's gameFog): its amount at a distance d lerp(far, near, <see cref="FogNearAmount"/>) (+
+    /// <see cref="FogNearAmount"/> where <see cref="FogStart"/> is 0 or less), near = saturate(d / FogStart), far =
+    /// saturate((d - FogStart) / (FogEnd - FogStart)); its colour from <see cref="FogNear"/> to <see cref="FogFar"/> by
+    /// far (both in the light's units, x the exposure). None when <see cref="Fog"/> is false.
+    /// </summary>
+    public bool Fog;
+    public Vector3 FogNear;
+    public Vector3 FogFar;
+    public float FogStart;
+    public float FogEnd;
+    public float FogNearAmount;
+
     /// <summary>A plain light for views without a game's light (the camera's side, a little ambient).</summary>
     public static FrameLight Plain(Vector3 toLight) => new FrameLight
     {

@@ -510,6 +510,49 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>
+    /// This time cycle part way (<paramref name="t"/>) towards a room's (<paramref name="room"/>), as the page's mixSky
+    /// eases the outside's message towards the room's by the room's strength (CutsceneLighting.RoomStrength): every
+    /// number eased by t (a colour without a value on either side, and the like, taken from the nearer one); the sun
+    /// and the light from around from the parts apart, colour and multiplier eased each (this one's own, the room's
+    /// from <paramref name="roomParts"/>: its modifier blended in whole, <see cref="Blended"/>), so the frame's sun
+    /// is eased colour x eased multiplier x eased exposure.
+    /// </summary>
+    public TimeCycle Mixed(TimeCycle room, TimeCycle roomParts, float t)
+    {
+      if (t <= 0)
+      {
+        return this;
+      }
+      var mixed = this with { };
+      foreach (var p in typeof(TimeCycle).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+      {
+        if (!p.CanWrite || p.GetIndexParameters().Length > 0)
+        {
+          continue;
+        }
+        object? a = p.GetValue(this), b = p.GetValue(room);
+        object? value = (a, b) switch
+        {
+          (float x, float y) => x + (y - x) * t,
+          (int x, int y) => (int)MathF.Round(x + (y - x) * t),
+          (Vector3 x, Vector3 y) => Vector3.Lerp(x, y, t),
+          (Vector4 x, Vector4 y) => Vector4.Lerp(x, y, t),
+          _ => t < 0.5f ? a : b,
+        };
+        p.SetValue(mixed, value);
+      }
+      return mixed with
+      {
+        Sun = Vector3.Lerp(Sun, roomParts.Sun, t),
+        SunMultiplier = SunMultiplier + (roomParts.SunMultiplier - SunMultiplier) * t,
+        AmbientAbove = Vector3.Lerp(AmbientAbove, roomParts.AmbientAbove, t),
+        AmbientMultiplierAbove = AmbientMultiplierAbove + (roomParts.AmbientMultiplierAbove - AmbientMultiplierAbove) * t,
+        AmbientBelow = Vector3.Lerp(AmbientBelow, roomParts.AmbientBelow, t),
+        AmbientMultiplierBelow = AmbientMultiplierBelow + (roomParts.AmbientMultiplierBelow - AmbientMultiplierBelow) * t,
+      };
+    }
+
+    /// <summary>
     /// The "sky" message for the page: the sun (where it is at the hour: rising in the east, at noon high in
     /// the south, setting in the west; the game's exact path isn't known), the light from around above and
     /// below, the sky's colours, the haze (from where the fog starts to how far is drawn) and the water's colour;

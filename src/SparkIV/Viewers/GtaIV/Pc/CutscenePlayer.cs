@@ -68,7 +68,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           u.Dispose();
         }
       }
-      var cycle = _lighting.CycleAt(view.Eye);
+      var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       // The clouds' Phase on from the page's start value by the section's time (the trace's per cutscene: not known here).
       float phase = CutsceneSky.CloudPhase(cycle, _time, false);
       _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, SkyParams.From(cycle, _lighting.Hour, phase));
@@ -102,7 +102,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           u.Dispose();
         }
       }
-      var cycle = _lighting.CycleAt(view.Eye);
+      var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
       // (Its simulation warms up over the first frames by itself.)
       _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky), _time);
@@ -541,7 +541,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         viewProjection = Matrix4x4.CreateLookAt(eyeAt, _center, Vector3.UnitZ) * Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, aspect, 0.05f, _far);
         toLight = new Vector3(0.4f, -0.5f, 0.8f);
       }
-      var (light, tone) = _lighting?.At(eyeAt) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
+      var (light, tone) = _lighting?.At(eyeAt, viewProjection) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
       // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
       List<DeferredLight>? lights = null;
       if (_showLights && _lighting != null)

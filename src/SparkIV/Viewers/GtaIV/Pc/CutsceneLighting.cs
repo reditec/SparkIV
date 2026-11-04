@@ -30,9 +30,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// A GTA IV (PC) cutscene's light for the native renderer (#112 step 4c), as CutsceneView.PostSky and the page give it:
   /// the time cycle of the weather and hour under the map's modifier boxes where the camera is (TimeCycle.WithBoxes), and
   /// in a room of the location's interiors that room's modifier (TimeCycle.With). The room the camera is in by the
-  /// page's roomOf; an actor's share of the light from around (AmbientDownMult) by the page's actorAmbientAt. Not yet:
-  /// the page's easing between the outside and a room by how much of the screen its portals cover (roomStrength /
-  /// mixSky): the room is taken whole.
+  /// page's roomOf; an actor's share of the light from around (AmbientDownMult) by the page's actorAmbientAt. Given the
+  /// view, the outside's eased towards the room's by how much of the screen the room's portals cover (the page's
+  /// roomStrength / mixSky, <see cref="RoomStrength"/>; checked: intro s3 f569.75, strength 0.94, the same tone and
+  /// light as the page's). The fog of the time cycle goes with the frame's light (FrameLight.Fog).
   /// </summary>
   public sealed class CutsceneLighting
   {
@@ -74,7 +75,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       var rooms = _location?.Rooms ?? new List<LocationRoom>();
       _rooms = rooms.Select(r => _modifiers != null && _modifiers.TryGetValue(r.Modifier, out var modifier) ? _boxed.With(modifier) : null).ToArray();
+      // (Their sun and light from around apart, for the easing: the modifier blended in whole, as the page's parts.)
+      _roomParts = rooms.Select(r => _modifiers != null && _modifiers.TryGetValue(r.Modifier, out var modifier) ? _boxed.Blended(modifier, 1) : null).ToArray();
+      _mixed = null;
     }
+
+    private TimeCycle?[] _roomParts = Array.Empty<TimeCycle?>();
+    private (int Room, float Strength, TimeCycle Cycle)? _mixed;
 
     private void UnderBoxes(Vector3 eyeScene)
     {
@@ -93,19 +100,138 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       MakeRooms();
     }
 
-    /// <summary>The light and tone of a frame seen from <paramref name="eyeScene"/> (in the scene's places).</summary>
-    public (FrameLight Light, ToneParams Tone) At(Vector3 eyeScene)
+    /// <summary>
+    /// The light and tone of a frame seen from <paramref name="eyeScene"/> (in the scene's places) through
+    /// <paramref name="viewProjection"/> (Direct3D's; null: the camera's room taken whole).
+    /// </summary>
+    public (FrameLight Light, ToneParams Tone) At(Vector3 eyeScene, Matrix4x4? viewProjection = null)
     {
-      var c = CycleAt(eyeScene);
+      var c = CycleAt(eyeScene, viewProjection);
       return (LightOf(c), ToneOf(c));
     }
 
-    /// <summary>The time cycle a frame seen from <paramref name="eyeScene"/> takes (for the sky: CutsceneSky).</summary>
-    public TimeCycle CycleAt(Vector3 eyeScene)
+    /// <summary>
+    /// The time cycle a frame seen from <paramref name="eyeScene"/> through <paramref name="viewProjection"/> takes
+    /// (for the sky: CutsceneSky): in a room with a modifier the outside's eased towards the room's by the room's
+    /// strength (<see cref="RoomStrength"/>, rounded to hundredths as the page's skyAtCamera); without a view the
+    /// room's whole.
+    /// </summary>
+    public TimeCycle CycleAt(Vector3 eyeScene, Matrix4x4? viewProjection = null)
     {
       UnderBoxes(eyeScene);
       int room = RoomOf(eyeScene);
-      return room >= 0 && room < _rooms.Length && _rooms[room] is TimeCycle inRoom ? inRoom : _boxed;
+      if (room < 0 || room >= _rooms.Length || _rooms[room] is not TimeCycle inRoom)
+      {
+        return _boxed;
+      }
+      if (viewProjection is not Matrix4x4 vp)
+      {
+        return inRoom;
+      }
+      float strength = MathF.Round(RoomStrength(room, vp) * 100) / 100;
+      if (strength >= 1)
+      {
+        return inRoom;
+      }
+      if (_mixed is not { } m || m.Room != room || m.Strength != strength)
+      {
+        _mixed = m = (room, strength, _boxed.Mixed(inRoom, _roomParts[room] ?? inRoom, strength));
+      }
+      return m.Cycle;
+    }
+
+    /// <summary>
+    /// How much of a room's modifier the game takes seen through a view (the page's roomStrength; GTAIV.exe 0xAEE7E0
+    /// with 0xA0E3C0 and 0xA0E490): a list of the room itself (strength 1) and of each of its portals on screen by its
+    /// share of the screen (CutsceneLights.PortalShare), one through to another room with that room's blend, then that
+    /// room's portals once more (their share x the first's, not the way back); a portal outside, or to a room without a
+    /// modifier, as the outside. In the list's order the rooms ease R = s x blend + (1 - s) x R, the outside O = s x
+    /// blend + (1 - s) x O; the room's strength (1 - O) x R. A portal linking to another interior (flag 0x2) leads to
+    /// the room with a linking portal in the same place (the page's linkedRoom); none there: left out.
+    /// </summary>
+    public float RoomStrength(int room, Matrix4x4 viewProjection)
+    {
+      var rooms = _location?.Rooms;
+      if (rooms == null || room < 0 || room >= rooms.Count)
+      {
+        return 1;
+      }
+      bool NoModifier(int i) => i >= _rooms.Length || _rooms[i] == null;
+      var entries = new List<(bool Outside, float Blend, float S)> { (NoModifier(room), rooms[room].Blend, 1) };
+      void Walk(LocationRoom r, float parent, Vector3? from, bool deep)
+      {
+        foreach (var q in r.Portals)
+        {
+          if (q.Corners == null || q.Corners.Length < 4)
+          {
+            continue;
+          }
+          var centre = PortalCentre(r, q.Corners);
+          if (from is Vector3 f && Vector3.Distance(centre, f) < 0.01f)
+          {
+            continue;
+          }
+          int to = q.Link ? LinkedRoom(rooms, r, centre) : q.To;
+          if (q.Link && to < 0)
+          {
+            continue;
+          }
+          float s = CutsceneLights.PortalShare(r, q.Corners, viewProjection) * parent;
+          if (s <= 0.001f)
+          {
+            continue;
+          }
+          bool toRoom = to >= 0 && to < rooms.Count;
+          entries.Add(toRoom ? (NoModifier(to), rooms[to].Blend, s) : (true, 1, s));
+          if (!deep && toRoom)
+          {
+            Walk(rooms[to], s, centre, true);
+          }
+        }
+      }
+      Walk(rooms[room], 1, null, false);
+      float outside = 0, inside = 0;
+      foreach (var (isOutside, blend, s) in entries)
+      {
+        if (isOutside)
+        {
+          outside = outside * (1 - s) + blend * s;
+        }
+        else
+        {
+          inside = s * blend + (1 - s) * inside;
+        }
+      }
+      return Math.Clamp((1 - outside) * inside, 0, 1);
+    }
+
+    // A portal's middle in the scene (half way between its corners 0 and 2, the interior's, turned and moved).
+    private static Vector3 PortalCentre(LocationRoom r, Vector3[] corners)
+    {
+      var back = Quaternion.Conjugate(r.Turn);
+      return (Vector3.Transform(corners[0], back) + Vector3.Transform(corners[2], back)) / 2 + r.At;
+    }
+
+    // The room of another interior with a linking portal in the same place (within 0.1 m); -1 for none.
+    private static int LinkedRoom(IReadOnlyList<LocationRoom> rooms, LocationRoom r, Vector3 centre)
+    {
+      int linked = -1;
+      for (int i = 0; i < rooms.Count; i++)
+      {
+        var other = rooms[i];
+        if (other.At == r.At && other.Turn == r.Turn)
+        {
+          continue;
+        }
+        foreach (var q in other.Portals)
+        {
+          if (q.Link && q.Corners != null && q.Corners.Length >= 4 && Vector3.Distance(PortalCentre(other, q.Corners), centre) < 0.1f)
+          {
+            linked = i;
+          }
+        }
+      }
+      return linked;
     }
 
     /// <summary>Whether a place is outside every room (the sky shows there; inside, the game's world beyond is dark).</summary>
@@ -124,6 +250,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       AoScale = c.AoMultiplier,
       // gDirectionalLight.w (the page's pedShineScale.x).
       ShineScale = c.DirectionalLightW,
+      // The fog (#112, the page's gameFog with TimeCycle.Message's fog): globalFogColorN = the modifier's near fog colour
+      // or the sky bottom x SkyLightMult; globalFogColor = (SkyColor + AzimuthStrength x AzimuthColor) x SkyLightMult
+      // (the page's farFogLight; without the sky's columns its haze's colour, here the near colour); FogStart; FarClip;
+      // NearFogAmount - all in the light's units (x Exposure). Not yet: the same pass's depth effect (gDepthFxParams,
+      // the page's depthFx: from 16 m on outside).
+      Fog = true,
+      FogNear = (c.NearFogColor ?? c.SkyBottom * c.SkyLightMultiplier) * c.Exposure,
+      FogFar = (c.SkyColor == Vector3.Zero ? c.NearFogColor ?? c.SkyBottom * c.SkyLightMultiplier
+                                           : (c.SkyColor + c.AzimuthStrength * c.AzimuthColor) * c.SkyLightMultiplier) * c.Exposure,
+      FogStart = c.FogStart,
+      FogEnd = Math.Max(c.FarClip, c.FogStart + 1),
+      FogNearAmount = c.NearFogAmount,
     };
 
     private static ToneParams ToneOf(TimeCycle c) => new ToneParams

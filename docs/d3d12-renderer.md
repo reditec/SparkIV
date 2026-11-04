@@ -127,9 +127,14 @@ picture from it:
   the camera; the back faces of map objects' and props' solids culled (counter-clockwise front, as in GL). Sun and
   light from around already include the exposure (`FrameLight`).
 - **Where the light comes from** (`CutsceneLighting`, GTA IV PC): the time cycle of the weather and hour under the
-  map's modifier boxes at the camera, inside a room the room's modifier (the room taken whole: the page's easing by
-  how much of the screen the room's portals cover is not ported yet); an actor's AmbientDownMult as the page's
-  `actorAmbientAt`, by where its pose puts it.
+  map's modifier boxes at the camera, inside a room the room's modifier, eased from the outside's by how much of the
+  screen the room's portals cover (the page's `roomStrength` / `mixSky`: `CutsceneLighting.RoomStrength`,
+  `TimeCycle.Mixed`); an actor's AmbientDownMult as the page's `actorAmbientAt`, by where its pose puts it.
+- **Fog** (`FrameLight.Fog`, the page's `gameFog`, rage_postfx program 21): after the lamps a triangle over the screen
+  blends the fog's colour over the solid scene by its amount at the G-buffer's place (not the sky); the see-through
+  materials take it each in their pixel shader, the water its own. In a room with a near fog this is most of the look:
+  em_4 in Elizabeta's flat (et01_aa) fogs 78 % towards a warm grey from 3 m on. Not yet: the same pass's depth effect
+  (gDepthFxParams).
 - **The picture** (`ToneMapper`): a quarter-size copy of the light (each texel the mean of its 4 x 4 block) is read
   back for the mean luminance; the eye adapts to it (kept within AdaptedLumMin and AdaptedLumMax, eased over
   AdaptTime while playing, at once when stopped; in the app measured every 200 ms); the composite scales the light by

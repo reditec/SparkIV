@@ -120,8 +120,31 @@ struct Frame
   float4 Params;   // x: day/night, y: exposure, z: PedAoMultiplier, w: AoMultiplier
   float4 Screen;   // xy: the target's size in pixels, z: the texture number of the surface below the decals (0: none)
   float4 Params2;  // x: the sun's share in the shine (gDirectionalLight.w)
+  float4 FogNear;  // rgb: the near fog's colour (light), w: FogStart
+  float4 FogFar;   // rgb: the far fog's colour (light), w: where it ends (FarClip)
+  float4 FogParams;// x: NearFogAmount, y: fog on (1)
 };
 ConstantBuffer<Frame> f : register(b1);
+
+// The fog (the page's gameFogAmount / gameFog, GTA IV's rage_postfx program 21): how much of its colour at a distance,
+// and the light under it.
+float FogAmount(float distance)
+{
+  if (f.FogParams.y < 0.5)
+  {
+    return 0;
+  }
+  float start = f.FogNear.w;
+  float nearRamp = saturate(distance / max(start, 1e-4));
+  float farRamp = saturate((distance - start) / max(f.FogFar.w - start, 1));
+  return lerp(farRamp, nearRamp, f.FogParams.x) + (start > 0 ? 0 : f.FogParams.x);
+}
+
+float3 FogColour(float distance)
+{
+  float start = f.FogNear.w;
+  return lerp(f.FogNear.rgb, f.FogFar.rgb, saturate((distance - start) / max(f.FogFar.w - start, 1)));
+}
 // All textures (TextureCache's heap), by number (0 white); a part's numbers in its PartData.
 Texture2D Tex[] : register(t0, space1);
 SamplerState Linear : register(s0);
@@ -577,7 +600,11 @@ PsOut PSMain(VsOut input)
 // its lamps over 4 m only; not ported).
 float4 PSBlend(VsOut input) : SV_Target
 {
-  return Shade(input, false).light;
+  float4 light = Shade(input, false).light;
+  // The fog on each (the page's gameFog per fragment; the solid scene's comes after the lamps, DrawFog).
+  float distance = length(f.Eye.xyz - input.world);
+  light.rgb += FogAmount(distance) * (FogColour(distance) - light.rgb);
+  return light;
 }
 
 // The lamps (#112 step 5): one light volume per light, a box round its sphere drawn over the solid scene (its faces
@@ -708,10 +735,36 @@ float4 PSLight(LvOut input) : SV_Target
   }
   return float4(GAlbedo.Load(px).rgb * lit, 0);
 }
+
+// The fog over the solid scene (#112; the page's gameFog, GTA IV's rage_postfx program 21, which the game draws after
+// the lights and the glows, before the see-through materials): a triangle over the screen; where the G-buffer has a
+// surface (not the sky) the fog's colour blended over the light by its amount at the surface's distance (SRCALPHA /
+// INVSRCALPHA: light + amount x (colour - light)). The see-through materials take it each in PSBlend.
+float4 VSFog(uint id : SV_VertexID) : SV_Position
+{
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+float4 PSFog(float4 position : SV_Position) : SV_Target
+{
+  float4 place = GPlace.Load(int3(position.xy, 0));
+  if (place.w < 0.5)
+  {
+    discard;
+  }
+  float distance = length(f.Eye.xyz - place.xyz);
+  float amount = FogAmount(distance);
+  if (amount <= 0)
+  {
+    discard;
+  }
+  return float4(FogColour(distance), amount);
+}
 ";
 
     private const int DrawConstants = 16 + 4 + 4 + 4 + 4 + 4;
-    private const int FrameFloats = 16 + 4 * 8;
+    private const int FrameFloats = 16 + 4 * 11;
     // A part's material for the shader (PartData: 11 x 4 numbers), and the per-vertex extras (tangent, layer texture
     // coordinates, layer weights: 14 floats) of models that have any.
     private const int PartWords = 44;
@@ -873,6 +926,7 @@ float4 PSLight(LvOut input) : SV_Target
     // The lamps' pass: its root signature (frame b1, lights t3, the G-buffer t4-t6), pipeline, light buffer, G-buffer.
     private readonly ID3D12RootSignature _lightSignature;
     private readonly ID3D12PipelineState _lightPipeline;
+    private readonly ID3D12PipelineState _fogPipeline;
     private readonly ID3D12Resource _lights;
     private readonly unsafe byte* _lightsMapped;
     private readonly ID3D12DescriptorHeap _gBufferRtvs;
@@ -1015,6 +1069,23 @@ float4 PSLight(LvOut input) : SV_Target
         RasterizerState = RasterizerDescription.CullNone with { DepthClipEnable = false },
         BlendState = AddedLight(),
         DepthStencilState = new DepthStencilDescription(true, DepthWriteMask.Zero, ComparisonFunction.GreaterEqual),
+        RenderTargetFormats = new[] { targetFormat },
+        DepthStencilFormat = PanelSwapChainFormats.Depth,
+        SampleDescription = new SampleDescription(1, 0),
+      });
+      // The fog over the solid scene (after the lamps): blended over the light by its amount, no depth.
+      var fogBlend = BlendDescription.NonPremultiplied;
+      fogBlend.RenderTarget[0] = fogBlend.RenderTarget[0] with { RenderTargetWriteMask = ColorWriteEnable.Red | ColorWriteEnable.Green | ColorWriteEnable.Blue };
+      _fogPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _lightSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSFog"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSFog"),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        RasterizerState = RasterizerDescription.CullNone,
+        BlendState = fogBlend,
+        DepthStencilState = DepthStencilDescription.None,
         RenderTargetFormats = new[] { targetFormat },
         DepthStencilFormat = PanelSwapChainFormats.Depth,
         SampleDescription = new SampleDescription(1, 0),
@@ -1689,6 +1760,13 @@ float4 PSLight(LvOut input) : SV_Target
       frame[45] = 0;
       frame[46] = 0;
       frame[47] = 0;
+      // The fog (FrameLight.Fog).
+      Put(48, light.FogNear, light.FogStart);
+      Put(52, light.FogFar, light.FogEnd);
+      frame[56] = light.FogNearAmount;
+      frame[57] = light.Fog && !NoFog ? 1 : 0;
+      frame[58] = 0;
+      frame[59] = 0;
 
       // The shadowed lights' maps (step 5), before anything else is drawn.
       ShadowMapsDrawn = 0;
@@ -1733,6 +1811,11 @@ float4 PSLight(LvOut input) : SV_Target
       if (lights != null && lights.Count > 0)
       {
         DrawLights(list, renderTarget, depth, width, height, lights, frameAddress);
+      }
+      // The fog over all of it (the see-through materials and the water take theirs as they are drawn).
+      if (light.Fog && !NoFog)
+      {
+        DrawFog(list, renderTarget, depth, width, height, frameAddress);
       }
       // What goes between the solid scene and the see-through materials (the water), with its own states.
       afterSolid?.Invoke(list);
@@ -1889,6 +1972,35 @@ float4 PSLight(LvOut input) : SV_Target
       }
     }
 
+    /// <summary>The fog left out (FrameLight.Fog ignored; for comparisons).</summary>
+    public bool NoFog { get; set; }
+
+    // The fog over the solid scene: a triangle over the screen reading the G-buffer's places (see PSFog).
+    private void DrawFog(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
+                         int width, int height, ulong frameAddress)
+    {
+      foreach (var g in _gBuffer)
+      {
+        list.ResourceBarrierTransition(g!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+      }
+      list.OMSetRenderTargets(renderTarget, depth);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
+      list.RSSetScissorRect(width, height);
+      list.SetGraphicsRootSignature(_lightSignature);
+      list.SetPipelineState(_fogPipeline);
+      list.SetDescriptorHeaps(_gBufferSrvs);
+      list.SetGraphicsRootConstantBufferView(0, frameAddress);
+      list.SetGraphicsRootShaderResourceView(1, _lights.GPUVirtualAddress);
+      list.SetGraphicsRootDescriptorTable(2, _gBufferSrvs.GetGPUDescriptorHandleForHeapStart());
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      list.DrawInstanced(3, 1, 0, 0);
+      DrawCalls++;
+      foreach (var g in _gBuffer)
+      {
+        list.ResourceBarrierTransition(g!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      }
+    }
+
     private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
     {
       int lastPipeline = -1;
@@ -1979,6 +2091,7 @@ float4 PSLight(LvOut input) : SV_Target
         pipeline.Dispose();
       }
       _lightPipeline.Dispose();
+      _fogPipeline.Dispose();
       _lightSignature.Dispose();
       foreach (var pipeline in _pipelines)
       {
