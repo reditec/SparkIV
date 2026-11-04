@@ -362,6 +362,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float Dirt { get; set; }
 
     /// <summary>
+    /// Whether a vehicle has its lamps on: where the mission script playing the cutscene makes a vehicle of its model
+    /// and turns them on (FORCE_CAR_LIGHTS(car, 2): roman1's cab in the intro, its tail lamps lit and lighting red
+    /// in GTAIV.3.trace). Any other vehicle of a cutscene has them off (the intro's car hanging from the crane: its
+    /// lamps' dimmers all 0 in the trace).
+    /// </summary>
+    public bool LightsOn { get; set; }
+
+    /// <summary>
     /// A vehicle's shine as the game sets it on its shaders when it makes the vehicle (GTAIV.exe 0xD25040,
     /// not the model's values): specularFactorED, specularColorFactorED, specular2FactorED,
     /// specular2ColorIntensityED, reflectivePowerED; or null.
@@ -446,6 +454,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           if (material.Vehicle)
           {
             node["dirtLevel"] = actor.Dirt;
+            node["lightsOn"] = actor.LightsOn;
             if (actor.Shine is float[] shine)
             {
               node["reflectivePower"] = shine[4];
@@ -576,10 +585,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>A track's values at every frame (3 or 4 a frame).</summary>
     /// <summary>
-    /// Where a section's camera is (relative to its origin), every tenth frame: whether the scene is seen from outside
-    /// (see CutsceneLocation.Load). None without its camera's clip.
+    /// Where a section's camera is (relative to its origin), every tenth frame (or every <paramref name="step"/>th):
+    /// whether the scene is seen from outside (see CutsceneLocation.Load). None without its camera's clip.
     /// </summary>
-    public static List<System.Numerics.Vector3> CameraPlaces(CutSection section, AnimationFile? wad)
+    public static List<System.Numerics.Vector3> CameraPlaces(CutSection section, AnimationFile? wad, int step = 10)
     {
       var places = new List<System.Numerics.Vector3>();
       if (section.Camera == null || wad == null || wad.Animations.FirstOrDefault(a => string.Equals(a.ShortName, section.Camera, StringComparison.OrdinalIgnoreCase)) is not Animation clip ||
@@ -588,7 +597,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return places;
       }
       var values = SampledValues(clip, track, 3);
-      for (int i = 0; i + 2 < values.Length; i += 30)
+      for (int i = 0; i + 2 < values.Length; i += step * 3)
       {
         places.Add(new System.Numerics.Vector3(values[i], values[i + 1], values[i + 2]));
       }
@@ -903,6 +912,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           root,
           removedBones = removed,
           face = faceWeights.Count == 0 ? null : faceWeights,
+          lightsOn = actor.LightsOn,
+          // A vehicle's model box (its body's least corner, for the tail lamp light; see ModelScene.BodyBoundsMin).
+          boundsMin = actor.Scene?.BodyBoundsMin,
         });
       }
 
@@ -1314,8 +1326,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <param name="scriptColours">The colours the mission script playing the cutscene gives a vehicle of a model
     /// (by the model's hash), or null: the game gives the cutscene's vehicle those of the vehicle of that model
     /// in the world (GTAIV.exe 0xC67450), only without one the .cut's (see <see cref="CutsceneScriptIndex"/>).</param>
-    public static void ApplyPaint(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV, Func<uint, int[]?>? scriptColours = null)
+    /// <param name="scriptLights">Whether that script turns a vehicle of a model's lamps on (see <see cref="CutActor.LightsOn"/>).</param>
+    public static void ApplyPaint(CutFile cut, IEnumerable<CutActor> actors, string folder, string? gtaIV, Func<uint, int[]?>? scriptColours = null,
+                                  Func<uint, bool>? scriptLights = null)
     {
+      foreach (var actor in actors)
+      {
+        actor.LightsOn = scriptLights?.Invoke(RageLib.GtaIV.Pc.Text.GxtFile.Hash(actor.Model)) == true;
+      }
       // An episode's carcols.dat only adds its own vehicles' sets (TLAD's: car3, no colour table): the game reads
       // GTA IV's too, so both are read, the episode's first (its sets win), the colours from the first that has
       // them (et01_ba's Presidente came out white instead of black). For GTA IV itself the one file.

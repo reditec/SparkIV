@@ -24,6 +24,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Vector3 = System.Numerics.Vector3;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -644,6 +645,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     // The game minute whose sky the page has (it follows the clock, by the minute).
     private int _clockMinute = -1;
     private Dictionary<uint, float[]>? _skyModifiers;
+    // The modifier boxes the page's sky was made under, and each section's camera places.
+    private string _skyBoxes = "";
+    private readonly Dictionary<int, List<Vector3>> _cameraPlaces = new Dictionary<int, List<Vector3>>();
     // Whether the location's light from the time cycle was sent (the page then lights and shows it as the game).
     private bool _lit;
     // How far the location's far models were loaded (the [DRAW_DISTANCE] as the game limits it by the time cycle).
@@ -731,15 +735,40 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return false;
       }
-      _skyModifiers ??= location.Rooms.Any(r => r.Modifier != 0) ? TimeCycle.LoadModifiers(folder) : null;
+      _skyModifiers ??= TimeCycle.LoadModifiers(folder);
+      // As the game, under the map's modifier boxes where the camera is (the intro's harbour at 05:15, GTAIV.3.trace:
+      // gDirectionalColour 1/7 in colour and strength, KsS1nomoon's boxes).
+      if (CameraNow() is Vector3 camera)
+      {
+        cycle = cycle.WithBoxes(location.ModifierBoxes, _skyModifiers, camera, hour);
+        _skyBoxes = BoxesAt(location, camera, hour);
+      }
       var rooms = location.Rooms.Select(r =>
-        _skyModifiers != null && _skyModifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(hour) : null).ToArray();
+        _skyModifiers != null && _skyModifiers.TryGetValue(r.Modifier, out var modifier) ? cycle.With(modifier).Message(hour, parts: cycle.Blended(modifier, 1)) : null).ToArray();
       Post(cycle.Message(hour, location.Clouds != null ? LocationUrl(CutsceneLocation.CloudKey) : null,
                          location.CloudDetail != null ? LocationUrl(CutsceneLocation.CloudDetailKey) : null, rooms));
       Post(new { type = "lockTime", on = _document.ClockLocked });
       _clockMinute = (int)(hour * 60);
       return true;
     }
+
+    /// <summary>Where the section's camera is in the world now, by the frame (see CutsceneMessages.CameraPlaces).</summary>
+    private Vector3? CameraNow()
+    {
+      if (_section < 0 || OriginOf(_section) is not float[] origin)
+      {
+        return null;
+      }
+      if (!_cameraPlaces.TryGetValue(_section, out var places))
+      {
+        _cameraPlaces[_section] = places = CutsceneMessages.CameraPlaces(_document.Cut.Sections[_section], _document.Sections[_section], 1);
+      }
+      return places.Count == 0 ? null : places[Math.Clamp(_frame, 0, places.Count - 1)] + new Vector3(origin[0], origin[1], origin[2]);
+    }
+
+    /// <summary>The boxes' strengths at a place, in steps: when they change the sky is sent anew.</summary>
+    private static string BoxesAt(CutsceneLocation location, Vector3 camera, float hour) =>
+      string.Join(",", TimeCycle.StrengthsAt(location.ModifierBoxes, camera, hour).OrderBy(b => b.Key).Select(b => b.Key + ":" + (int)(b.Value * 50)));
 
     /// <summary>
     /// The view's background: with the location shown the scene's own (outside the time cycle's sky, inside
@@ -1104,7 +1133,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       int minute = (int)(HourNow * 60);
       ClockText.Text = (minute / 60).ToString("00") + ":" + (minute % 60).ToString("00");
-      if (_lit && minute != _clockMinute)
+      if (_lit && (minute != _clockMinute ||
+                   (_document.Location is CutsceneLocation location && CameraNow() is Vector3 camera && BoxesAt(location, camera, HourNow) != _skyBoxes)))
       {
         PostSky();
       }

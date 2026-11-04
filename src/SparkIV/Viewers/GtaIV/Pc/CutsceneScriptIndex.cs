@@ -45,10 +45,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   public sealed class CutsceneScriptIndex
   {
     // Raised when what is read from the scripts changes, so older indexes are built again.
-    private const int Format = 3;
+    private const int Format = 4;
 
-    /// <summary>A vehicle a script makes: its model's hash and the four colours it gives it (-1: not set).</summary>
-    public sealed record ScriptVehicle(uint Model, int[] Colours);
+    /// <summary>
+    /// A vehicle a script makes: its model's hash, the four colours it gives it (-1: not set) and how it forces its
+    /// lamps (FORCE_CAR_LIGHTS: 2 on; 0 not forced).
+    /// </summary>
+    public sealed record ScriptVehicle(uint Model, int[] Colours, int Lights = 0);
 
     /// <summary>
     /// Per cutscene (upper case): the script that starts it and the vehicles that script makes; what it sets
@@ -72,6 +75,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public int[]? ColoursFor(string cutscene, uint model) =>
       Cutscenes.TryGetValue(cutscene, out var entry) ? entry.Vehicles.FirstOrDefault(v => v.Model == model && v.Colours.Any(c => c >= 0))?.Colours : null;
+
+    /// <summary>Whether the script playing this cutscene turns the lamps of a vehicle of this model on.</summary>
+    public bool LightsOnFor(string cutscene, uint model) =>
+      Cutscenes.TryGetValue(cutscene, out var entry) && entry.Vehicles.Any(v => v.Model == model && v.Lights == 2);
 
     private static readonly object Gate = new();
     private static readonly Dictionary<string, CutsceneScriptIndex> s_loaded = new(StringComparer.OrdinalIgnoreCase);
@@ -359,7 +366,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             colours[3] = int.Parse(extra.Groups[2].Value, CultureInfo.InvariantCulture);
           }
         }
-        list.Add(new ScriptVehicle(model, colours));
+        // Its lamps as the script forces them (FORCE_CAR_LIGHTS(L[525], 2): on; roman1 a dozen lines on), up to
+        // the next vehicle it makes.
+        int lights = 0;
+        for (int k = i + 1; k < Math.Min(lines.Length, i + 30) && !lines[k].Contains("CREATE_CAR(", StringComparison.Ordinal); k++)
+        {
+          var force = Regex.Match(lines[k], @"FORCE_CAR_LIGHTS\(" + handle + @",\s*(-?\d+)\)");
+          if (force.Success)
+          {
+            lights = int.Parse(force.Groups[1].Value, CultureInfo.InvariantCulture);
+          }
+        }
+        list.Add(new ScriptVehicle(model, colours, lights));
       }
       return list;
     }

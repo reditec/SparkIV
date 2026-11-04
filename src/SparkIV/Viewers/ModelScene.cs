@@ -129,6 +129,13 @@ namespace SparkIV.WinUI.Viewers
     // At most this many other dictionaries of the folder are searched for a texture that is still missing.
     private const int MaxDictionariesSearched = 300;
 
+    /// <summary>
+    /// A fragment's (a vehicle's) collision bound: its box's corner of least x, y, z (null for others). GTAIV.exe puts
+    /// a car's tail lamp light at that box's rear (0xA42B10 through CAutomobile's virtual +0x60, 0xB11830: the bound's
+    /// +0x20). Roman's cab (rom.wft): -2.586, its meshes' rear -2.543.
+    /// </summary>
+    public float[]? BodyBoundsMin { get; private set; }
+
     /// <summary>A scene without models or textures, for shapes built elsewhere (collision).</summary>
     internal static ModelScene Empty(string name) => new ModelScene(name, new List<TextureFile>());
 
@@ -541,6 +548,7 @@ namespace SparkIV.WinUI.Viewers
             fragment.Open(new MemoryStream(data));
             var body = fragment.GetDataModel();
             scene.AddDrawable(scene.Root, "Body", body, true);
+            scene.BodyBoundsMin = fragment.GetBoundBoxMin();
             scene.AddFragmentChildren(body, fragment.GetChildren());
             break;
           }
@@ -831,6 +839,7 @@ namespace SparkIV.WinUI.Viewers
                                     light.IsSpot, light.Range, light.Falloff, meshIds, light.Distance, light.HotSpot, light.Intensity)
                      {
                        Flags = light.Flags, CoronaSize = light.CoronaSize, VolumeIntensity = light.VolumeIntensity, VolumeSize = light.VolumeSize,
+                       FadeDistance = light.FadeDistance,
                        Tangent = System.Numerics.Vector3.TransformNormal(new System.Numerics.Vector3(light.Tangent.X, light.Tangent.Y, light.Tangent.Z), at),
                      });
         }
@@ -1207,10 +1216,19 @@ namespace SparkIV.WinUI.Viewers
       {
         LayerKeys = layerKeys,
         DrawBucket = material.DrawBucket,
+        Ped = material.ShaderName.StartsWith("gta_ped", StringComparison.OrdinalIgnoreCase),
+        VehicleLights = material.ShaderName.Equals("gta_vehicle_lightsemissive", StringComparison.OrdinalIgnoreCase),
         Cutout = drawing.Cutout,
         Blend = drawing.Blend,
         Stipple = drawing.Stipple,
         Decal = drawing.Decal,
+        // gta_decal_glue writes the normal and the AO too (COLORWRITEENABLE1 and 2: 0x7), the other decals keep the
+        // surface's (see the page's decalBelow).
+        OwnLight = material.ShaderName.Equals("gta_decal_glue", StringComparison.OrdinalIgnoreCase),
+        // gta_normal_decal, _reflect_decal, _spec_decal, _spec_reflect_decal and gta_projtex write their normal but
+        // keep the AO (COLORWRITEENABLE1 0x7, 2 0x3).
+        DecalNormal = material.ShaderName.StartsWith("gta_projtex", StringComparison.OrdinalIgnoreCase) ||
+                      (material.ShaderName.StartsWith("gta_normal", StringComparison.OrdinalIgnoreCase) && material.ShaderName.EndsWith("_decal", StringComparison.OrdinalIgnoreCase)),
         Hidden = drawing.Hidden,
         NoWater = drawing.NoWater,
         Emissive = drawing.Emissive,
@@ -1371,6 +1389,9 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Its light volume's strength (times Range in the game) and size (times its radius); see RageLib's Light.</summary>
     public float VolumeIntensity { get; init; }
     public float VolumeSize { get; init; }
+
+    /// <summary>From how far from the camera it fades out over its radius; -1 never (see RageLib's Light).</summary>
+    public float FadeDistance { get; init; } = -1;
 
     /// <summary>Its second axis (a spot's "up"; the light volume's mesh is turned by it).</summary>
     public System.Numerics.Vector3 Tangent { get; init; }
@@ -1559,10 +1580,14 @@ namespace SparkIV.WinUI.Viewers
     {
       id = Id,
       glass = Glass,
+      ped = Ped,
+      vehicleLights = VehicleLights,
       cutout = Cutout,
       stipple = Stipple,
       blend = Blend,
       decal = Decal,
+      ownLight = OwnLight,
+      decalNormal = DecalNormal,
       hidden = Hidden,
       noWater = NoWater,
       emissive = Emissive,
@@ -1603,6 +1628,12 @@ namespace SparkIV.WinUI.Viewers
     /// <summary>Whether see-through texels are cut out (leaves, fences, hair).</summary>
     public bool Cutout { get; init; }
 
+    /// <summary>A person's shader (gta_ped...): PedAmbOccHack counts for it too (see TimeCycle.PedAoMultiplier).</summary>
+    public bool Ped { get; init; }
+
+    /// <summary>A vehicle's lamp glass (gta_vehicle_lightsemissive): it glows when the lamps are on.</summary>
+    public bool VehicleLights { get; init; }
+
     /// <summary>Whether it is drawn over what is behind it by its texture's alpha (see-through, decals); glass has its own way.</summary>
     public bool Blend { get; init; }
 
@@ -1611,6 +1642,12 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>Whether it lies on another surface (a puddle, dirt, a poster): drawn a little in front of it.</summary>
     public bool Decal { get; init; }
+
+    /// <summary>A decal that writes its own normal and AO into the game's G-buffer (gta_decal_glue): lit by its own.</summary>
+    public bool OwnLight { get; init; }
+
+    /// <summary>A decal that writes its own normal but keeps the AO of the surface under it (gta_normal_*_decal, gta_projtex).</summary>
+    public bool DecalNormal { get; init; }
 
     /// <summary>
     /// A layer showing a render target (script_rt: a TV's picture), which no file holds: black, as the game's

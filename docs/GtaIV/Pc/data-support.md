@@ -92,9 +92,21 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 |---|---|---|
 | `gta_emissive`, `gta_emissivestrong`, `gta_emissivenight` | used (as in the game since 2026-10-12) | Program 14: a normally lit surface, the texture as albedo. Program 12: in addition texture × vertex colour × `emissiveMultiplier`, for `emissivenight` × `gDayNightEffects.w` = 1 − day factor. Outdoors additionally × exposure, like all lights.
 - **Inside an interior room** (since 2026-10-23, from trace and videos):
-  - Solid emissives in the G-buffer do **not** glow, they are only lit (et01_aa trace, program 14).
+  - A solid `gta_emissive` (bucket 4) keeps its glow pass (`unlit_draw`, SRCALPHA / INVSRCALPHA): the intro's ship corridor lamps (`GTAIV.3.trace`, s3 f470.25), multiplier 25, are drawn into the G-buffer (50837756) and once more forward (50839436, PS 0x2c471ea0: texture × vertex colour × `emissiveMultiplier` × `colorize`, unlit).
+  - Bernie's flat by day (`GTAIV.trace`, bc_1 s3 f994.5, 150200042 to 150200080) shows the same pass for its lamps: `gta_emissive` 5 (the fabric shade), `gta_emissivestrong` 12, the globe 9. The shade still looks only lit, because `gta_emissive`'s glow is blended over by texture alpha × vertex alpha (PS 0x2c471ea0: alpha = texture.a × colour.a with `globalScalars` 1), not added. SparkIV blends it the same way since 2026-11-03 (bc_1 s3 f994.5 1.84 → 1.73).
+  - A solid `gta_emissivenight` beside the ship's lamps (multiplier 30) is only drawn into the G-buffer, lit, not glowing; SparkIV keeps that one without glow in a room.
+  - An older trace at low graphics settings showed et01_aa's solid `gta_emissive` lit only. The intro's trace was made at the video settings.
   - Transparent or glass emissives (forward-drawn, PS 0x24B6EE60) glow **without** the day/night factor (bc_1 by day: glass bowl glows, fabric shade does not).
-  - What exactly the game bases this on (bucket, pass) is not confirmed in the exe.
+  - What exactly the game bases this on (shader, pass) is not confirmed in the exe.
+- **Decals** (since 2026-11-03): each decal shader writes only some G-buffer channels (`tools/fxc-dump.py --states`), and keeps the rest from the surface under it.
+  - `gta_decal`, `gta_default` and the like in bucket 2 (engine default, measured): colour and shine only. The posters in the intro's bunk room (`GTAIV.3.trace` 3679648) use this.
+  - `gta_decal_dirt`: COLORWRITEENABLE 7 / 0 / 3.
+  - `gta_normal_decal`, `_reflect_decal`, `_spec_decal`, `_spec_reflect_decal` and `gta_projtex`: 7 / 7 / 3, so their normal is their own but not the AO.
+  - `gta_decal_glue`: 7 / 7 / 7, all its own.
+  - SparkIV's solid pass also writes its light without colour, and its AO in the alpha, to a third target (`outBelow`). Decals take from there what the game keeps of the surface (the page's `decalBelow` and `decalAoBelow`).
+- **Decal order:** the game draws object by object, an object's materials in their order. SparkIV draws the decals of models that have dirt decals first, each in its own order.
+  - The intro's wall dirt, `a1cargoshad`, is drawn before the posters of `ruskgallposts`.
+  - Bernie's `PUB_3BShdows1` draws the pony skin rug first, then its shadow dirt over it.
 - **Outdoors, see-through** (since 2026-10-31): a transparent `gta_emissivestrong` and a `gta_glass_emissive` are only their glow, never lit: texture × vertex colour × `emissiveMultiplier` × `colorize`, alpha × `globalScalars.x`, blended SRCALPHA / ONE (bc_3's pier wall lamps, `GTAIV.1.trace` from 88298834, PS 0x2d0200e0; Bernie's globe lamp, `GTAIV.trace` 103012513, PS 0x2c6a3340). A transparent `gta_emissive` stays lit plus glow (et01_ba's price sign, `GTAIV.4.trace`).
 - **The glow's blend** (since 2026-10-31, from the shader files, [formats/fxc.md](formats/fxc.md)): `gta_emissive`'s glow pass (`unlit_draw`) is blended over what is behind it (SRCALPHA / INVSRCALPHA), every other emissive's added (SRCALPHA / ONE). Bernie's ceiling spot (`GTAIV.trace` 129309611, PS 0x2d0b1c40) keeps its bluish inside that way. |
 | `gta_glass`: `EnvironmentSampler` | used (since 2026-10-30) | Bernie's bedroom pane (`GTAIV.trace`, draw 114115710, PS 0x2cc5d340): the environment texture × `specularColorFactor` × `reflectivePower` ÷ alpha is added to the albedo and lit with it, read by the normal-mapped normal. Without it the pane was up to 6 levels too dark, while what lies behind it matched to the pixel. Its shader also takes lamps (4 spots and 2 point lights there); lit by them in SparkIV, the pane didn't change, so they aren't used. `gta_glass_emissive` has the sampler too, but the game draws it only as its glow (draw 114115061), so it isn't used there. `gta_glass_spec` has none. |
@@ -118,7 +130,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
   - c37 + c38 = Amb1 × 4.5, exact.
   - c40.w = 0.6 (outdoors 0.725).
   - c45 ≈ 0.78.
-- **Supported:** `TimeCycle.LoadModifiers` and `TimeCycle.With` apply light, exposure, tone mapping values, fog start and view distance. The value −1 means "unchanged".
+- **Supported:** `TimeCycle.LoadModifiers` and `TimeCycle.With` apply light, exposure, tone mapping values, fog start and view distance. The value −1 means "unchanged". Modifier boxes in the world: `TimeCycle.WithBoxes`, at the cutscene camera, see [formats/timecyclemodifiers.md](formats/timecyclemodifiers.md).
 - **Open or unresolved:**
   - The alpha value of the colours; assumed to be a blend fraction, measured only at 255.
   - `AmbientDownMult` and `GlobEnvRefl` are used since 2026-10-22, details in [formats/timecyclemodifiers.md](formats/timecyclemodifiers.md).
