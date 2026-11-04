@@ -46,7 +46,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var paint = actor.Paint;
       var tints = paint == null ? null : scene.Materials.Where(m => m.PaintSlot > 0 && m.PaintSlot <= paint.Length)
         .ToDictionary(m => m.Id, m => new Vector3(paint[m.PaintSlot - 1][0], paint[m.PaintSlot - 1][1], paint[m.PaintSlot - 1][2]));
-      sources.Add(ModelSource.Shown(scene, skinned) with { Tints = tints });
+      // Peds lit as they are; props (a door) as the location is (their light baked into vertex colours); vehicles never baked.
+      sources.Add(ModelSource.Shown(scene, skinned, baked: !actor.IsPed) with { Tints = tints });
       var worn = CutsceneMessages.WornProps(actor);
       if (worn.Count > 0 && skinned && actor.PropScene != null)
       {
@@ -54,6 +55,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       return sources;
     }
+
+    /// <summary>A location's models, their light baked into their vertex colours.</summary>
+    public static List<ModelSource> LocationSources(CutsceneLocation location) =>
+      location.Models.Select(m => ModelSource.Shown(m, false, baked: true)).ToList();
 
     /// <summary>A location's models and its objects to draw (all but those only for the mirrored surroundings' map).</summary>
     public static IEnumerable<LocationObject> DrawnObjects(CutsceneLocation location) => location.Objects.Where(o => !o.MirrorOnly);

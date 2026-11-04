@@ -120,6 +120,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
       }
     }
 
+    /// <summary>Whether the GPU has reached a mark of <see cref="Signal"/> (without waiting).</summary>
+    public bool IsDone(ulong value) => _fence.CompletedValue >= value;
+
     /// <summary>Waits until the GPU has reached a mark of <see cref="Signal"/> (from any thread).</summary>
     public void Wait(ulong value)
     {

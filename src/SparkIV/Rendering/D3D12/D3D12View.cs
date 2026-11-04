@@ -37,9 +37,14 @@ namespace SparkIV.WinUI.Rendering.D3D12
   {
     /// <summary>
     /// Before a frame (render thread): <paramref name="now"/> the view's clock in seconds, the picture's size in pixels.
+    /// Returns the camera (view-projection, eye), the frame's light and how it becomes the picture, and whether it plays
+    /// (the eye adapts gently then, at once when stopped).
     /// </summary>
-    (Matrix4x4 ViewProjection, Vector3 ToLight, float Ambient) Update(MeshRenderer renderer, double now, int width, int height);
+    SceneView Update(MeshRenderer renderer, double now, int width, int height);
   }
+
+  /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
+  public readonly record struct SceneView(Matrix4x4 ViewProjection, Vector3 Eye, FrameLight Light, ToneParams Tone, bool Playing);
 
   /// <summary>
   /// The native renderer in a <see cref="SwapChainPanel"/> (#112): device, swap chain and renderer, drawing an
@@ -60,6 +65,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
     private readonly D3D12Device _device;
     private readonly PanelSwapChain _swapChain;
     private readonly MeshRenderer _renderer;
+    private readonly ToneMapper _toneMapper;
     private readonly Thread _thread;
     private volatile bool _stop;
     private readonly object _lock = new object();
@@ -67,6 +73,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
     private int _width, _height;
     private float _scaleX, _scaleY;
     private bool _sizeChanged, _scaleChanged;
+    private double _lastMeasure = double.NegativeInfinity;
 
     /// <summary>Starts on the UI thread, once the panel is loaded; <paramref name="failed"/> hears (on the UI thread) why drawing stopped.</summary>
     public D3D12View(SwapChainPanel panel, IRenderScene scene, Action<string> failed)
@@ -81,7 +88,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
       _device = new D3D12Device();
       _swapChain = new PanelSwapChain(_device, panel, _width, _height, _scaleX, _scaleY);
-      _renderer = new MeshRenderer(_device, PanelSwapChain.BackBufferFormat);
+      _renderer = new MeshRenderer(_device, ToneMapper.LightFormat);
+      _toneMapper = new ToneMapper(_device, PanelSwapChain.BackBufferFormat);
 
       panel.SizeChanged += Panel_SizeChanged;
       panel.CompositionScaleChanged += Panel_CompositionScaleChanged;
@@ -145,10 +153,27 @@ namespace SparkIV.WinUI.Rendering.D3D12
           }
 
           double now = clock.Elapsed.TotalSeconds;
-          var (viewProjection, toLight, ambient) = _scene.Update(_renderer, now, _swapChain.Width, _swapChain.Height);
+          var view = _scene.Update(_renderer, now, _swapChain.Width, _swapChain.Height);
+          _toneMapper.Resize(_swapChain.Width, _swapChain.Height);
+          // The eye adapts to the last measure read (a few frames old): gently while playing, at once when stopped.
+          _toneMapper.ReadMeasure(wait: false);
+          _toneMapper.Adapt(view.Tone, view.Playing, last > 0 ? now - last : 0);
           var list = _swapChain.Begin();
-          _renderer.Draw(list, _swapChain.RenderTargetView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, viewProjection, toLight, ambient);
-          _swapChain.End();
+          _toneMapper.BeginLight(list);
+          _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light);
+          _toneMapper.EndLight(list);
+          // Measured at most every 200 ms (as the page), else when the last measure is read.
+          bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);
+          if (measured)
+          {
+            _lastMeasure = now;
+          }
+          _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone);
+          ulong mark = _swapChain.End();
+          if (measured)
+          {
+            _toneMapper.MeasureSent(mark);
+          }
           draws += _renderer.DrawCalls;
 
           // Frame times: from present to present (the scene's updates, which may load, count too).
@@ -198,6 +223,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       PanelSwapChain.ClearPanel(_panel);
       CloseHandle(_swapChain.WaitableObject);
       _renderer.Dispose();
+      _toneMapper.Dispose();
       _swapChain.Dispose();
       _device.Dispose();
     }

@@ -88,6 +88,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     public int BoneCount => _parent.Length;
 
+    /// <summary>Where the actor is at the frame last posed (<see cref="SkinAt"/>): its model tracks' place, else its root bone's.</summary>
+    public Vector3 Place { get; private set; }
+
     /// <summary>The clip's frames a second (30 in GTA IV), or 30 without a clip.</summary>
     public float FramesPerSecond => _motion.Clip != null ? CutsceneMessages.FramesPerSecond(_motion.Clip) : 30;
 
@@ -266,6 +269,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           world[i] *= place;
         }
+        Place = at;
+      }
+      else
+      {
+        // A prop without model tracks: where its root bone puts it (the page's poseCast).
+        Place = world.Length > 0 ? world[0].Translation : Vector3.Zero;
       }
       var skin = new Matrix4x4[world.Length];
       for (int i = 0; i < world.Length; i++)

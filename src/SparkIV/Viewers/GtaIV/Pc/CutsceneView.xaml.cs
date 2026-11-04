@@ -880,6 +880,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return false;
       }
       _skyModifiers ??= TimeCycle.LoadModifiers(folder);
+      if (_player != null && OriginOf(Math.Max(0, _section)) is float[] lightOrigin)
+      {
+        // The player's light of the same time cycle (the boxes and the room by its own camera, each frame).
+        _player.SetLighting(CutsceneLighting.Load(folder, OutsideWeather, hour, location, new Vector3(lightOrigin[0], lightOrigin[1], lightOrigin[2])));
+      }
       // As the game, under the map's modifier boxes where the camera is (the intro's harbour at 05:15, GTAIV.3.trace:
       // gDirectionalColour 1/7 in colour and strength, KsS1nomoon's boxes).
       if (CameraNow() is Vector3 camera)

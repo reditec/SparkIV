@@ -178,7 +178,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var models = location.Models.ToList();
       Load(renderer =>
       {
-        var prepared = renderer.Prepare(models.Select(m => ModelSource.Shown(m, false)).ToList());
+        var prepared = renderer.Prepare(models.Select(m => ModelSource.Shown(m, false, baked: true)).ToList());
         return () =>
         {
           // Dropped (or another load for the key) meanwhile: not wanted any more.
@@ -188,7 +188,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             return;
           }
           var numbers = renderer.Register(prepared, group.Group);
-          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place)).ToArray();
+          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0)).ToArray();
           group.Registered = true;
           ShowLocations();
           LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
@@ -318,6 +318,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>Through the section's camera or around the cast.</summary>
     public void UseCamera(bool on) => Order(() => _useCamera = on);
 
+    /// <summary>The light of the time cycle at the clock (null: a plain light, as without a location).</summary>
+    public void SetLighting(CutsceneLighting? lighting) => Order(() => _lighting = lighting);
+
+    private CutsceneLighting? _lighting;
+
     private void StartPlaying(bool on)
     {
       if (on && _time * _fps >= _frames - 1)
@@ -346,7 +351,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
     }
 
-    public (Matrix4x4 ViewProjection, Vector3 ToLight, float Ambient) Update(MeshRenderer renderer, double now, int width, int height)
+    public SceneView Update(MeshRenderer renderer, double now, int width, int height)
     {
       if (_renderer == null)
       {
@@ -391,28 +396,37 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         if (_castInstances.TryGetValue(actor, out var instances))
         {
           var palette = pose.SkinAt(frame, _fps);
+          float ambient = _lighting?.ActorAmbient(pose.Place) ?? 1;
           foreach (int instance in instances)
           {
             renderer.SetPalette(instance, palette);
+            renderer.SetActorAmbient(instance, ambient);
           }
         }
       }
 
       float aspect = width / (float)Math.Max(1, height);
+      Matrix4x4 viewProjection;
+      Vector3 eyeAt, toLight;
       if (_useCamera && _camera != null)
       {
         var (eye, forward, up, fov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
-        var view = Matrix4x4.CreateLookAt(eye, eye + forward, up);
         var right = Vector3.Normalize(Vector3.Cross(forward, up));
-        // The light from a little above and to the left of the camera, as the page's.
-        return (view * Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 0.1f, _far), -forward + up * 0.55f - right * 0.35f, 0.35f);
+        viewProjection = Matrix4x4.CreateLookAt(eye, eye + forward, up) * Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 0.1f, _far);
+        eyeAt = eye;
+        toLight = -forward + up * 0.55f - right * 0.35f;
       }
-      // Without the cutscene's camera: slowly round the cast (the free view comes with the model view's move, #112 6).
-      float angle = (float)(now * 0.3);
-      float distance = _radius * 2.6f;
-      var orbitEye = _center + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, _radius * 0.6f);
-      var orbit = Matrix4x4.CreateLookAt(orbitEye, _center, Vector3.UnitZ);
-      return (orbit * Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, aspect, 0.05f, _far), new Vector3(0.4f, -0.5f, 0.8f), 0.35f);
+      else
+      {
+        // Without the cutscene's camera: slowly round the cast (the free view comes with the model view's move, #112 6).
+        float angle = (float)(now * 0.3);
+        float distance = _radius * 2.6f;
+        eyeAt = _center + new Vector3(MathF.Cos(angle) * distance, MathF.Sin(angle) * distance, _radius * 0.6f);
+        viewProjection = Matrix4x4.CreateLookAt(eyeAt, _center, Vector3.UnitZ) * Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 4, aspect, 0.05f, _far);
+        toLight = new Vector3(0.4f, -0.5f, 0.8f);
+      }
+      var (light, tone) = _lighting?.At(eyeAt) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing);
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).

@@ -139,15 +139,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
       return CommandList;
     }
 
-    /// <summary>Ends a frame: closes and sends the command list and shows the buffer (with vsync).</summary>
-    public void End()
+    /// <summary>Ends a frame: closes and sends the command list and shows the buffer (with vsync); the frame's fence mark.</summary>
+    public ulong End()
     {
       int index = BufferIndex;
       CommandList.ResourceBarrierTransition(BackBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
       CommandList.Close();
       _device.Queue.ExecuteCommandList(CommandList);
       _swapChain.Present(1, PresentFlags.None).CheckError();
-      _frameMarks[index] = _device.Signal();
+      return _frameMarks[index] = _device.Signal();
     }
 
     private void MakeTargets()

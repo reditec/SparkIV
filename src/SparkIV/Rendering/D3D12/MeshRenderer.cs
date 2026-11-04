@@ -41,11 +41,17 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>A colour each material's texture is multiplied by, by material id (a vehicle's paint); white if none.</summary>
     public IReadOnlyDictionary<int, Vector3>? Tints { get; init; }
 
+    /// <summary>
+    /// Whether its light is baked into its vertex colours (a location's map objects, a cutscene's props: their red by
+    /// day, green at night darken the light from around; without colours 0.45), else a ped's or a vehicle's.
+    /// </summary>
+    public bool Baked { get; init; }
+
     /// <summary>A model's checked meshes (as the page shows them), moving with bones or not.</summary>
-    public static ModelSource Shown(ModelScene scene, bool skinned)
+    public static ModelSource Shown(ModelScene scene, bool skinned, bool baked = false)
     {
       var shown = scene.Root.CheckedMeshes().ToHashSet();
-      return new ModelSource(scene.Meshes.Where(m => shown.Contains(m.Id)).ToList(), scene.Materials, scene.Textures, skinned);
+      return new ModelSource(scene.Meshes.Where(m => shown.Contains(m.Id)).ToList(), scene.Materials, scene.Textures, skinned) { Baked = baked };
     }
   }
 
@@ -61,40 +67,60 @@ namespace SparkIV.WinUI.Rendering.D3D12
   /// </summary>
   public sealed class MeshRenderer : IDisposable
   {
+    // The light of a solid pixel as the page's outdoor path (spec: the page's GameGlsl outsideLight, used for every
+    // cutscene with a location, inside too): the light from around (above to below by the normal's z) x the darkening
+    // (AO) + the sun x saturate((n.l - 0.25) x 4/3); AO from the vertex colours (a map object's red by day, green at
+    // night; a ped's red; a vehicle's luminance; a tree 0.5; glowing materials 1) x the actor's AmbientDownMult, then
+    // scaled by AoMultiplier (and PedAoMultiplier for peds). Glowing materials over or onto it. Written as light (the
+    // frame's light target; ToneMapper makes the picture).
     private const string Shader = @"
-struct Constants
+struct Draw
 {
-  row_major float4x4 ViewProjection;
   row_major float4x4 World;
-  float4 Light;    // xyz: towards the light, w: ambient
-  float4 Material; // x: cut out (1), y: alpha from the dirt mask (1), z: the instance's bone count (skinned)
+  float4 Instance; // x: AmbientDownMult (actors), y: in a room (1), z: bone count (skinned)
+  float4 Material; // x: cut out (1), y: alpha from the dirt mask (1), z: kind (bits), w: glow multiplier
   float4 DirtMask;
   float4 Tint;     // rgb: the texture multiplied by it (a vehicle's paint)
 };
-ConstantBuffer<Constants> c : register(b0);
+ConstantBuffer<Draw> d : register(b0);
+struct Frame
+{
+  row_major float4x4 ViewProjection;
+  float4 Eye;
+  float4 SunDirection;
+  float4 Sun;
+  float4 AmbientAbove;
+  float4 AmbientBelow;
+  float4 Params;   // x: day/night, y: exposure, z: PedAoMultiplier, w: AoMultiplier
+};
+ConstantBuffer<Frame> f : register(b1);
 Texture2D Albedo : register(t0);
 SamplerState Linear : register(s0);
 struct Bone { row_major float4x4 m; };
 StructuredBuffer<Bone> Palette : register(t1);
 
-struct VsIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; };
-struct VsSkinIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; };
-struct VsOut { float4 position : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; };
+static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64;
 
-VsOut Finish(float4 local, float3 normal, float2 uv, float alpha)
+struct VsIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; };
+struct VsSkinIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; float4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; };
+struct VsOut { float4 position : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; float3 world : WORLD; };
+
+VsOut Finish(float4 local, float3 normal, float2 uv, float alpha, float3 color)
 {
   VsOut output;
-  float4 world = mul(local, c.World);
-  output.position = mul(world, c.ViewProjection);
-  output.normal = mul(normal, (float3x3)c.World);
+  float4 world = mul(local, d.World);
+  output.position = mul(world, f.ViewProjection);
+  output.normal = mul(normal, (float3x3)d.World);
   output.uv = uv;
   output.alpha = alpha;
+  output.color = color;
+  output.world = world.xyz;
   return output;
 }
 
 VsOut VSMain(VsIn input)
 {
-  return Finish(float4(input.position, 1), input.normal, input.uv, input.alpha);
+  return Finish(float4(input.position, 1), input.normal, input.uv, input.alpha, input.color);
 }
 
 // A vertex moved by up to four bones (rest to now); one with no weights, or an instance without its bones, stays as
@@ -103,7 +129,7 @@ VsOut VSSkinned(VsSkinIn input)
 {
   float4 p = float4(input.position, 1);
   float3 n = input.normal;
-  uint count = (uint)c.Material.z;
+  uint count = (uint)d.Instance.z;
   if (count > 0 && dot(input.weights, 1) > 0)
   {
     uint4 b = min((uint4)(input.bones + 0.5), count - 1);
@@ -112,32 +138,75 @@ VsOut VSSkinned(VsSkinIn input)
     p = mul(p, m);
     n = mul(n, (float3x3)m);
   }
-  return Finish(p, n, input.uv, input.alpha);
+  return Finish(p, n, input.uv, input.alpha, input.color);
 }
 
 float4 PSMain(VsOut input) : SV_Target
 {
+  uint kind = (uint)(d.Material.z + 0.5);
+  bool baked = (kind & Baked) != 0, ped = (kind & Ped) != 0, vehicle = (kind & Vehicle) != 0, tree = (kind & Tree) != 0;
+  bool emissive = (kind & Emissive) != 0;
   float4 texel = Albedo.Sample(Linear, input.uv);
   float alpha = texel.a * input.alpha;
-  float3 albedo = texel.rgb * c.Tint.rgb;
-  if (c.Material.y > 0.5)
+  float3 albedo = texel.rgb * d.Tint.rgb;
+  if (d.Material.y > 0.5)
   {
-    alpha = dot(texel.rgb, c.DirtMask.rgb) * input.alpha;
+    alpha = dot(texel.rgb, d.DirtMask.rgb) * input.alpha;
     albedo = float3(0.23, 0.22, 0.2);
   }
-  if (c.Material.x > 0.5)
+  // Cut out: the page's test (texture alpha x vertex alpha at most 45/255 goes; a tree by half, for its stipple).
+  if (d.Material.x > 0.5)
   {
-    clip(alpha - 0.5);
+    clip(alpha - (tree ? 0.5 : 0.17648));
   }
-  float3 nn = normalize(input.normal + 1e-6);
-  float diffuse = abs(dot(nn, normalize(c.Light.xyz)));
-  return float4(albedo * (c.Light.w + (1 - c.Light.w) * diffuse), alpha);
+  float3 vc = input.color;
+  if (vehicle)
+  {
+    albedo *= vc;
+  }
+  // The normal: peds and vehicles turned to the camera (seen from inside: the side facing it).
+  float3 n = normalize(input.normal + 1e-6);
+  if (!tree && !baked && dot(n, f.Eye.xyz - input.world) < 0)
+  {
+    n = -n;
+  }
+  float dayNight = f.Params.x;
+  float ao = tree ? 0.5
+           : emissive ? 1.0
+           : vehicle ? saturate(dot(vc, float3(0.2125, 0.7154, 0.0721)))
+           : saturate(baked ? dayNight * vc.r + (1 - dayNight) * vc.g : vc.r);
+  ao *= d.Instance.x;
+  if (!tree && !vehicle && !emissive)
+  {
+    ao = 1 + (ped ? f.Params.z : 1) * f.Params.w * (ao - 1);
+  }
+  float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
+  float sunLit = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
+  float3 rgb = albedo * (around * ao + f.Sun.rgb * sunLit);
+  if (emissive)
+  {
+    // gta_emissive*: texture x vertex colour x its multiplier x the exposure (night ones only at night, not in a room);
+    // gta_emissive laid over by the texture's alpha, the strong and night ones added.
+    bool night = (kind & Night) != 0;
+    float glow = d.Material.w * f.Params.y * (night ? (d.Instance.y > 0.5 ? 0 : 1 - dayNight) : 1);
+    float3 lightOf = texel.rgb * d.Tint.rgb * vc * glow;
+    if (!night && (kind & Strong) == 0)
+    {
+      rgb = lerp(rgb, lightOf, saturate(texel.a * input.alpha));
+    }
+    else
+    {
+      rgb += lightOf;
+    }
+  }
+  return float4(rgb, alpha);
 }
 ";
 
-    private const int ConstantCount = 16 + 16 + 4 + 4 + 4 + 4;
-    private const int MaterialFloats = 12;
-    private const int VertexFloats = 9;
+    private const int DrawConstants = 16 + 4 + 4 + 4 + 4;
+    private const int FrameFloats = 16 + 4 * 6;
+    private const int FrameSlotBytes = 256;
+    private const int VertexFloats = 12;
     private const int SkinFloats = 8;
 
     // Bone matrices a frame (for all skinned instances), and how many frames' worth are kept (frames in flight).
@@ -167,6 +236,13 @@ float4 PSMain(VsOut input) : SV_Target
       }
 
       public Vector3 Tint { get; }
+
+      /// <summary>Its kind (the shader's bits: baked 1, ped 2, vehicle 4, tree 8, glowing 16, at night 32, strong 64), its glow.</summary>
+      public int Kind { get; init; }
+      public float Glow { get; init; }
+
+      /// <summary>Its back faces not drawn (a map object's or prop's solid: the page culls those).</summary>
+      public bool Culled { get; init; }
 
       public uint Start { get; }
       public uint Count { get; }
@@ -205,6 +281,17 @@ float4 PSMain(VsOut input) : SV_Target
       public Matrix4x4[]? Palette;
       public ulong PaletteAddress;
       public bool Visible = true;
+      public float ActorAmbient = 1;
+      public bool InRoom;
+    }
+
+    /// <summary>An actor's share of the light from around (its room's AmbientDownMult; 1 outside).</summary>
+    public void SetActorAmbient(int instance, float value)
+    {
+      if (_instances[instance] is Instance i)
+      {
+        i.ActorAmbient = value;
+      }
     }
 
     /// <summary>The draw calls of the last frame.</summary>
@@ -222,7 +309,10 @@ float4 PSMain(VsOut input) : SV_Target
     private readonly D3D12Device _device;
     private readonly TextureCache _textures;
     private readonly ID3D12RootSignature _rootSignature;
-    private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[6];
+    // Skinned or not x pass x back faces culled or not.
+    private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[12];
+    private readonly ID3D12Resource _frame;
+    private readonly unsafe byte* _frameMapped;
     private readonly List<Model?> _models = new List<Model?>();
     // (Removed ones stay as null: numbers given out keep their meaning.)
     private readonly List<Instance?> _instances = new List<Instance?>();
@@ -238,9 +328,10 @@ float4 PSMain(VsOut input) : SV_Target
 
       var parameters = new[]
       {
-        new RootParameter1(new RootConstants(0, 0, ConstantCount), ShaderVisibility.All),
+        new RootParameter1(new RootConstants(0, 0, DrawConstants), ShaderVisibility.All),
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 0, 0, 0)), ShaderVisibility.Pixel),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(1, 0), ShaderVisibility.Vertex),
+        new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
       };
       var samplers = new[]
       {
@@ -265,6 +356,7 @@ float4 PSMain(VsOut input) : SV_Target
         new InputElementDescription("NORMAL", 0, Format.R32G32B32_Float, 12, 0),
         new InputElementDescription("TEXCOORD", 0, Format.R32G32_Float, 24, 0),
         new InputElementDescription("ALPHA", 0, Format.R32_Float, 32, 0),
+        new InputElementDescription("COLOR", 0, Format.R32G32B32_Float, 36, 0),
       };
       var skinnedInput = input.Concat(new[]
       {
@@ -286,16 +378,29 @@ float4 PSMain(VsOut input) : SV_Target
         DepthStencilFormat = PanelSwapChainFormats.Depth,
         SampleDescription = new SampleDescription(1, 0),
       };
-      // Both faces for now (lit from either side): which way GTA IV's triangles wind is for the port (step 4).
+      // Both faces, or the back ones culled: the page's front faces wind counter-clockwise (GL's default), and so they
+      // do here (checked: with Direct3D's default, clockwise, bc_1's hall showed the next room's wallpaper through
+      // its walls).
       var both = RasterizerDescription.CullNone;
+      var front = new RasterizerDescription(CullMode.Back, FillMode.Solid) { FrontCounterClockwise = true };
       // A decal a little in front of the surface it lies on (nearer is less depth here).
       var pulled = both with { DepthBias = -16, SlopeScaledDepthBias = -1.0f };
       for (int s = 0; s < 2; s++)
       {
-        _pipelines[s * 3 + (int)Pass.Solid] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, both));
-        _pipelines[s * 3 + (int)Pass.Blend] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, both));
-        _pipelines[s * 3 + (int)Pass.Decal] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, pulled));
+        for (int cull = 0; cull < 2; cull++)
+        {
+          int at = Pipe(s == 1, Pass.Solid, cull == 1);
+          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, cull == 1 ? front : both));
+          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front : both));
+          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled));
+        }
       }
+      // The frame's constants (camera, light), a slot per frame in flight.
+      _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
+                                           ResourceDescription.Buffer((ulong)PaletteSlots * FrameSlotBytes), ResourceStates.GenericRead);
+      void* frameMapped;
+      _frame.Map(0, null, &frameMapped).CheckError();
+      _frameMapped = (byte*)frameMapped;
 
       // The bones' matrices, written each frame into a slot of their own (the GPU may still read the last frames').
       _palette = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
@@ -304,6 +409,8 @@ float4 PSMain(VsOut input) : SV_Target
       _palette.Map(0, null, &mapped).CheckError();
       _paletteMapped = (Matrix4x4*)mapped;
     }
+
+    private static int Pipe(bool skinned, Pass pass, bool culled) => (skinned ? 6 : 0) + (int)pass * 2 + (culled ? 1 : 0);
 
     /// <summary>The number of instances and of the triangles they draw.</summary>
     public int InstanceCount => _instances.Count(i => i != null);
@@ -470,6 +577,9 @@ float4 PSMain(VsOut input) : SV_Target
         bool normals = mesh.Normals != null && mesh.Normals.Length >= count * 3;
         bool uvs = mesh.Uvs != null && mesh.Uvs.Length >= count * 2;
         bool alphas = mesh.Alphas != null && mesh.Alphas.Length >= count;
+        bool colors = mesh.Colors != null && mesh.Colors.Length >= count * 3;
+        // Without vertex colours: a baked mesh 0.45 (the page's guess), others white (the page's defaults).
+        float noColor = source.Baked && !material.Vehicle && !(material.EmissiveMultiplier != null) ? 0.45f : 1f;
         bool skinned = mesh.SkinBones != null && mesh.SkinWeights != null && mesh.SkinBones.Length >= count * 4 && mesh.SkinWeights.Length >= count * 4;
         for (int v = 0; v < count; v++)
         {
@@ -485,6 +595,9 @@ float4 PSMain(VsOut input) : SV_Target
           vertices.Add(uvs ? mesh.Uvs![v * 2] : 0);
           vertices.Add(uvs ? mesh.Uvs![v * 2 + 1] : 0);
           vertices.Add(alphas ? mesh.Alphas![v] : 1);
+          vertices.Add(colors ? mesh.Colors![v * 3] : noColor);
+          vertices.Add(colors ? mesh.Colors![v * 3 + 1] : noColor);
+          vertices.Add(colors ? mesh.Colors![v * 3 + 2] : noColor);
           if (skin != null)
           {
             for (int k = 0; k < 4; k++)
@@ -516,7 +629,19 @@ float4 PSMain(VsOut input) : SV_Target
         int texture = _textures.Acquire(blob, list, uploads, out long textureBytes);
         pending += textureBytes;
         textures.Add(texture);
-        parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout || material.Stipple, dirt, tint));
+        // Its kind for the light (see the shader): vehicles are never baked; a glowing material only with a texture,
+        // and only solid (the see-through ones glow apart: not yet).
+        bool baked = source.Baked && !material.Vehicle;
+        bool glowing = material.EmissiveMultiplier != null && blob != null && pass != Pass.Blend;
+        int kind = (baked ? 1 : 0) | (material.Ped ? 2 : 0) | (material.Vehicle ? 4 : 0) | (material.Tree ? 8 : 0) |
+                   (glowing ? 16 : 0) | (material.EmissiveAtNight ? 32 : 0) | (material.EmissiveStrong ? 64 : 0);
+        parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout || material.Stipple, dirt, tint)
+        {
+          Kind = kind,
+          Glow = glowing ? material.EmissiveMultiplier!.Value : 0,
+          // The page culls the back faces of map objects' and props' solids (not trees').
+          Culled = baked && !material.Tree && pass == Pass.Solid,
+        });
       }
       if (indices.Count == 0)
       {
@@ -565,9 +690,9 @@ float4 PSMain(VsOut input) : SV_Target
     }
 
     /// <summary>A model drawn with a model-to-scene matrix (and, skinned, its bones' matrices); its instance's number.</summary>
-    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null)
+    public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false)
     {
-      _instances.Add(new Instance { Model = model, World = world, Palette = palette });
+      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom });
       return _instances.Count - 1;
     }
 
@@ -599,12 +724,14 @@ float4 PSMain(VsOut input) : SV_Target
       _instances.Clear();
     }
 
-    /// <summary>Clears the target and draws every instance as seen with the view-projection: solid, then blended.</summary>
+    /// <summary>
+    /// Draws every instance into the light target (cleared by the caller) as seen from <paramref name="eye"/> with the
+    /// view-projection, in the frame's light: solid, then decals and see-through materials. Clears the depth.
+    /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
-                            int width, int height, Matrix4x4 viewProjection, Vector3 toLight, float ambient)
+                            int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light)
     {
       list.OMSetRenderTargets(renderTarget, depth);
-      list.ClearRenderTargetView(renderTarget, new Vortice.Mathematics.Color4(0.16f, 0.17f, 0.19f, 1f));
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
       list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
       list.RSSetScissorRect(width, height);
@@ -636,18 +763,29 @@ float4 PSMain(VsOut input) : SV_Target
         }
       }
 
-      var constants = stackalloc float[ConstantCount];
-      *(Matrix4x4*)constants = viewProjection;
-      var light = Vector3.Normalize(toLight);
-      constants[32] = light.X;
-      constants[33] = light.Y;
-      constants[34] = light.Z;
-      constants[35] = ambient;
+      // The frame's constants into this frame's slot.
+      var frame = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
+      *(Matrix4x4*)frame = viewProjection;
+      void Put(int at, Vector3 v, float w = 0)
+      {
+        frame[at] = v.X;
+        frame[at + 1] = v.Y;
+        frame[at + 2] = v.Z;
+        frame[at + 3] = w;
+      }
+      Put(16, eye);
+      Put(20, Vector3.Normalize(light.SunDirection));
+      Put(24, light.Sun);
+      Put(28, light.AmbientAbove);
+      Put(32, light.AmbientBelow);
+      frame[36] = light.DayNight;
+      frame[37] = light.Exposure;
+      frame[38] = light.PedAoScale;
+      frame[39] = light.AoScale;
 
       list.SetGraphicsRootSignature(_rootSignature);
       list.SetDescriptorHeaps(_textures.Heap);
-      list.SetGraphicsRoot32BitConstants(0, 16, constants, 0);
-      list.SetGraphicsRoot32BitConstants(0, 4, constants + 32, 32);
+      list.SetGraphicsRootConstantBufferView(3, _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes));
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
 
       foreach (var pass in new[] { Pass.Solid, Pass.Decal, Pass.Blend })
@@ -659,7 +797,7 @@ float4 PSMain(VsOut input) : SV_Target
     private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
     {
       int lastPipeline = -1, lastTexture = -1;
-      var material = stackalloc float[MaterialFloats];
+      var draw = stackalloc float[DrawConstants];
       foreach (var instance in _instances)
       {
         if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
@@ -668,12 +806,6 @@ float4 PSMain(VsOut input) : SV_Target
         }
         // A skinned model without its bones (none given, or no room for them this frame): drawn at rest.
         bool skinned = model.Skin != null;
-        int pipeline = (skinned ? 3 : 0) + (int)pass;
-        if (pipeline != lastPipeline)
-        {
-          list.SetPipelineState(_pipelines[pipeline]);
-          lastPipeline = pipeline;
-        }
         list.IASetVertexBuffers(0, model.VertexView);
         if (skinned)
         {
@@ -681,25 +813,38 @@ float4 PSMain(VsOut input) : SV_Target
           list.SetGraphicsRootShaderResourceView(2, instance.PaletteAddress != 0 ? instance.PaletteAddress : _palette.GPUVirtualAddress);
         }
         list.IASetIndexBuffer(model.IndexView);
-        var w = instance.World;
-        list.SetGraphicsRoot32BitConstants(0, 16, &w, 16);
+        *(Matrix4x4*)draw = instance.World;
+        draw[16] = instance.ActorAmbient;
+        draw[17] = instance.InRoom ? 1 : 0;
+        draw[18] = instance.PaletteAddress != 0 ? instance.Palette!.Length : 0;
+        draw[19] = 0;
+        list.SetGraphicsRoot32BitConstants(0, 20, draw, 0);
         foreach (var part in model.Parts)
         {
           if (part.Pass != pass)
           {
             continue;
           }
+          int pipeline = Pipe(skinned, pass, part.Culled);
+          if (pipeline != lastPipeline)
+          {
+            list.SetPipelineState(_pipelines[pipeline]);
+            lastPipeline = pipeline;
+          }
           var mask = part.DirtMask ?? Vector3.Zero;
-          material[0] = part.Cutout ? 1 : 0;
-          material[1] = part.DirtMask != null ? 1 : 0;
-          material[2] = instance.PaletteAddress != 0 ? instance.Palette!.Length : 0;
-          material[4] = mask.X;
-          material[5] = mask.Y;
-          material[6] = mask.Z;
-          material[8] = part.Tint.X;
-          material[9] = part.Tint.Y;
-          material[10] = part.Tint.Z;
-          list.SetGraphicsRoot32BitConstants(0, MaterialFloats, material, 36);
+          draw[20] = part.Cutout ? 1 : 0;
+          draw[21] = part.DirtMask != null ? 1 : 0;
+          draw[22] = part.Kind;
+          draw[23] = part.Glow;
+          draw[24] = mask.X;
+          draw[25] = mask.Y;
+          draw[26] = mask.Z;
+          draw[27] = 0;
+          draw[28] = part.Tint.X;
+          draw[29] = part.Tint.Y;
+          draw[30] = part.Tint.Z;
+          draw[31] = 1;
+          list.SetGraphicsRoot32BitConstants(0, 12, draw + 20, 20);
           if (part.Texture != lastTexture)
           {
             list.SetGraphicsRootDescriptorTable(1, _textures.Handle(part.Texture));
@@ -717,6 +862,8 @@ float4 PSMain(VsOut input) : SV_Target
       _textures.Dispose();
       _palette.Unmap(0);
       _palette.Dispose();
+      _frame.Unmap(0);
+      _frame.Dispose();
       foreach (var pipeline in _pipelines)
       {
         pipeline.Dispose();
