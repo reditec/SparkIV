@@ -38,6 +38,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public float Exposure;
     public float PedAoScale;
     public float AoScale;
+    /// <summary>
+    /// The sun's share in the shine (#112 step 4d; GTA IV's gDirectionalLight.w, the page's pedShineScale.x): the
+    /// sun's shine on specular surfaces is the sun x this.
+    /// </summary>
+    public float ShineScale;
 
     /// <summary>A plain light for views without a game's light (the camera's side, a little ambient).</summary>
     public static FrameLight Plain(Vector3 toLight) => new FrameLight
@@ -50,6 +55,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       Exposure = 1,
       PedAoScale = 1,
       AoScale = 1,
+      ShineScale = 1,
     };
   }
 

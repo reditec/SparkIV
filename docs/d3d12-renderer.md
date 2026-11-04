@@ -177,6 +177,25 @@ solid parts (instances added with `castsShadow`; the location casts none), sampl
 four rotated taps (its GL rows and pixel y turned over, so the reads are the page's). Other shadow lamps stay fully
 lit. Not yet: the lamps' shine, light volumes' visible cones and coronas.
 
+### Materials (step 4d)
+
+All textures are read by number from `TextureCache`'s heap (an unbounded, volatile descriptor table, `Tex[]` in space
+1); each model has a buffer of its parts' materials (`PartData`, root SRV t2: texture numbers, flags, specular, paint,
+dirt, vehicle shine, subsurface), and models with tangents or terrain layers have a third vertex stream (tangent, layer
+texture coordinates, layer weights; others read a shared zero buffer with stride 0). As the page does it: terrain
+layers 1–3 by their alpha x weight; normal maps (with tangents the page's pedBumpedRaw, written to the G-buffer
+rounded as the game stores it; without, the page's screen-space branch, which with its bumpiness 0 comes down to the
+normal x sign(2 blue - 1)); parallax; map `*_reflect` environment texture; the sun's shine (pedShine deferred and
+forward variants, flat specular, spec masks; vehicleShine for paint, mesh, tyre, chrome, glass and lamp glass; paint2's
+second shine); gta_vehicle_paint3's second layer, vehicle dirt, lamp glass glowing by its dimmer while the lamps are
+on (`MaterialLook`, filled by `CutsceneDrawing` from the actor as the page's scene message); skin subsurface; peds'
+see-through parts (gta_ped, bucket 1) blended by the stipple's share of their alpha, no cut-out; glass (vehicle glass
+and the map's glass with vertex alpha by their texture's alpha, culled, writing depth; other glass at 0.45) and the
+map's other see-through materials (culled, writing depth, forward shine); the location's decals lit by the surface
+below (its normal and AO copied after the solid pass), normal decals taking its AO.
+Not yet: the mirrored surroundings in the shine (the parabolic map and its sky fallback), the lamps' shine, glowing
+glass (gta_glass_emissive), lamps on the forward-drawn materials, animated textures.
+
 ### Post effects (step 4h)
 
 `ToneMapper.Composite` now does the page's whole composite (gtaiv-pc.js `gamePostEnd`): the quarter copy, made once a

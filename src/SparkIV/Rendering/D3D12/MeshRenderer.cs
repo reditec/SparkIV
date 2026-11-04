@@ -47,12 +47,37 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// </summary>
     public bool Baked { get; init; }
 
+    /// <summary>
+    /// Whether it is a cutscene's cast (an actor's model or worn props): its decals keep their own light instead of
+    /// taking the surface's below (the page's underDecal: not for actors), its see-through parts aren't the map's.
+    /// </summary>
+    public bool Actor { get; init; }
+
+    /// <summary>What the model's owner sets on its materials, by material id (a vehicle's second paint, dirt, shine, lamps).</summary>
+    public IReadOnlyDictionary<int, MaterialLook>? Looks { get; init; }
+
     /// <summary>A model's checked meshes (as the page shows them), moving with bones or not.</summary>
     public static ModelSource Shown(ModelScene scene, bool skinned, bool baked = false)
     {
       var shown = scene.Root.CheckedMeshes().ToHashSet();
       return new ModelSource(scene.Meshes.Where(m => shown.Contains(m.Id)).ToList(), scene.Materials, scene.Textures, skinned) { Baked = baked };
     }
+  }
+
+  /// <summary>
+  /// What an instance's owner sets on a material beyond the model's own values (#112 step 4d; GTA IV (PC): a cutscene
+  /// vehicle's, see CutsceneDrawing): the second paint layer's colour, how dirty, whether its lamps are on, its
+  /// reflectivity and its second shine (colour, exponent factor, strength).
+  /// </summary>
+  public sealed record MaterialLook
+  {
+    public Vector4? Paint2 { get; init; }
+    public float DirtLevel { get; init; }
+    public bool LightsOn { get; init; }
+    public float? ReflectivePower { get; init; }
+    public Vector3 Specular2Color { get; init; }
+    public float Specular2Exponent { get; init; }
+    public float Specular2Strength { get; init; }
   }
 
   /// <summary>
@@ -81,6 +106,7 @@ struct Draw
   float4 Material; // x: cut out (1), y: alpha from the dirt mask (1), z: kind (bits), w: glow multiplier
   float4 DirtMask;
   float4 Tint;     // rgb: the texture multiplied by it (a vehicle's paint)
+  float4 Part;     // x: the part's number in its model's Parts
 };
 ConstantBuffer<Draw> d : register(b0);
 struct Frame
@@ -92,61 +118,117 @@ struct Frame
   float4 AmbientAbove;
   float4 AmbientBelow;
   float4 Params;   // x: day/night, y: exposure, z: PedAoMultiplier, w: AoMultiplier
-  float4 Screen;   // xy: the target's size in pixels
+  float4 Screen;   // xy: the target's size in pixels, z: the texture number of the surface below the decals (0: none)
+  float4 Params2;  // x: the sun's share in the shine (gDirectionalLight.w)
 };
 ConstantBuffer<Frame> f : register(b1);
-Texture2D Albedo : register(t0);
+// All textures (TextureCache's heap), by number (0 white); a part's numbers in its PartData.
+Texture2D Tex[] : register(t0, space1);
 SamplerState Linear : register(s0);
 struct Bone { row_major float4x4 m; };
 StructuredBuffer<Bone> Palette : register(t1);
 
+// A part's material (#112 step 4d): its textures and the numbers the shading takes (see MeshRenderer.PartData).
+struct PartData
+{
+  uint4 Tex;      // albedo, normal map, specular map, environment
+  uint4 Tex2;     // layer 1 (or the second paint layer), layer 2, layer 3, dirt
+  uint4 Bits;     // x: flags (below), y: texture layers (1 to 4), z: which layers have a texture (bits)
+  float4 Spec;    // specular power, intensity, bumpiness, parallax
+  float4 SpecMask;// xyz: the specular map's channels, w: reflectivity
+  float4 Paint2;  // the second paint layer's colour
+  float4 Dirt;    // rgb: the dirt's colour, w: how dirty
+  float4 VShine;  // a vehicle shader's shine numbers (intensity, power, kind)
+  float4 Spec2;   // rgb: the second shine's colour, w: its exponent factor
+  float4 Sub;     // rgb: the skin's subsurface colour, w: its wrap
+  float4 Misc;    // x: the second shine's strength, y: the subsurface band's width, z: a fixed alpha, w: lamp glass glow
+};
+StructuredBuffer<PartData> Parts : register(t2);
+
 static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64;
+static const uint FNormal = 1, FSpec = 2, FSpecFlat = 4, FEnv = 8, FEnvSpec = 16, FPaint2 = 32, FDirt = 64, FStipple = 128,
+  FVehGlass = 256, FVehLights = 512, FDecalBelow = 1024, FDecalAoBelow = 2048, FForwardShine = 4096, FTextureAlpha = 8192,
+  FTextured = 16384, FFixedAlpha = 32768;
 
-struct VsIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; };
-struct VsSkinIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; float4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; };
-struct VsOut { float4 position : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; float3 world : WORLD; };
+// The stipple's share kept per level (stipple.wtd all_stips: of 64) and a vehicle lamp's dimmers (by its vertex alpha).
+static const float Kept[16] = { 0, 6, 8, 12, 11, 12, 16, 24, 32, 40, 48, 52, 52, 56, 58, 64 };
+static const float Dimmers[15] = { 10, 10, 10, 9, 9, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 
-VsOut Finish(float4 local, float3 normal, float2 uv, float alpha, float3 color)
+struct VsIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR;
+              float4 tangent : TANGENT; float4 layerUv : TEXCOORD1; float2 layerUv3 : TEXCOORD2; float4 weights : TEXCOORD3; };
+struct VsSkinIn { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR;
+                  float4 tangent : TANGENT; float4 layerUv : TEXCOORD1; float2 layerUv3 : TEXCOORD2; float4 weights : TEXCOORD3;
+                  float4 bones : BLENDINDICES; float4 boneWeights : BLENDWEIGHT; };
+struct VsOut { float4 position : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0; float alpha : ALPHA; float3 color : COLOR; float3 world : WORLD;
+               float4 tangent : TANGENT; float4 layerUv : TEXCOORD1; float2 layerUv3 : TEXCOORD2; float4 weights : TEXCOORD3; };
+
+// (The page's vertex stage: a tangent's normal and tangent normalised unless skinned; without a tangent the normal
+// as it is.)
+VsOut Finish(float4 local, float3 normal, float4 tangent, bool skinned, VsIn input)
 {
   VsOut output;
   float4 world = mul(local, d.World);
   output.position = mul(world, f.ViewProjection);
-  output.normal = mul(normal, (float3x3)d.World);
-  output.uv = uv;
-  output.alpha = alpha;
-  output.color = color;
+  float3 n = mul(normal, (float3x3)d.World);
+  float3 t = mul(tangent.xyz, (float3x3)d.World);
+  bool hasTangent = dot(t, t) > 1e-8;
+  if (hasTangent && !skinned)
+  {
+    n = normalize(n + 1e-5);
+    t = normalize(t + 1e-5);
+  }
+  output.normal = n;
+  output.tangent = hasTangent ? float4(t, tangent.w) : 0;
+  output.uv = input.uv;
+  output.alpha = input.alpha;
+  output.color = input.color;
   output.world = world.xyz;
+  output.layerUv = input.layerUv;
+  output.layerUv3 = input.layerUv3;
+  output.weights = input.weights;
   return output;
 }
 
 VsOut VSMain(VsIn input)
 {
-  return Finish(float4(input.position, 1), input.normal, input.uv, input.alpha, input.color);
+  return Finish(float4(input.position, 1), input.normal, input.tangent, false, input);
 }
 
 // A vertex moved by up to four bones (rest to now); one with no weights, or an instance without its bones, stays as
 // it is. Bone numbers are kept within the instance's palette (root descriptors have no bounds check).
-void Skin(VsSkinIn input, out float4 p, out float3 n)
+void Skin(float3 position, float3 normal, float3 tangent, float4 bones, float4 weights, out float4 p, out float3 n, out float3 t)
 {
-  p = float4(input.position, 1);
-  n = input.normal;
+  p = float4(position, 1);
+  n = normal;
+  t = tangent;
   uint count = (uint)d.Instance.z;
-  if (count > 0 && dot(input.weights, 1) > 0)
+  if (count > 0 && dot(weights, 1) > 0)
   {
-    uint4 b = min((uint4)(input.bones + 0.5), count - 1);
-    float4x4 m = Palette[b.x].m * input.weights.x + Palette[b.y].m * input.weights.y +
-                 Palette[b.z].m * input.weights.z + Palette[b.w].m * input.weights.w;
+    uint4 b = min((uint4)(bones + 0.5), count - 1);
+    float4x4 m = Palette[b.x].m * weights.x + Palette[b.y].m * weights.y +
+                 Palette[b.z].m * weights.z + Palette[b.w].m * weights.w;
     p = mul(p, m);
     n = mul(n, (float3x3)m);
+    t = mul(t, (float3x3)m);
   }
 }
 
 VsOut VSSkinned(VsSkinIn input)
 {
   float4 p;
-  float3 n;
-  Skin(input, p, n);
-  return Finish(p, n, input.uv, input.alpha, input.color);
+  float3 n, t;
+  Skin(input.position, input.normal, input.tangent.xyz, input.bones, input.boneWeights, p, n, t);
+  VsIn plain;
+  plain.position = input.position;
+  plain.normal = input.normal;
+  plain.uv = input.uv;
+  plain.alpha = input.alpha;
+  plain.color = input.color;
+  plain.tangent = input.tangent;
+  plain.layerUv = input.layerUv;
+  plain.layerUv3 = input.layerUv3;
+  plain.weights = input.weights;
+  return Finish(p, n, float4(t, input.tangent.w), true, plain);
 }
 
 // A lamp's shadow map (#112 step 5), as GTA IV draws one (the page's lampShadowVertex/lampShadowFragment, gtaiv-pc.js;
@@ -154,6 +236,8 @@ VsOut VSSkinned(VsSkinIn input)
 // world's x the axis, y and -z across) and s = -side x L.z, the place L.xy / (|L| - s), the depth |L| / radius; the
 // pixel keeps only what is on its half (s / radius at most 0.01) and stores |L| / radius as it came from the vertices.
 // Here d.Tint holds the lamp (xyz) and its radius (w), d.Material.x the half (-1 or 1).
+struct ShIn { float3 position : POSITION; };
+struct ShSkinIn { float3 position : POSITION; float4 bones : BLENDINDICES; float4 boneWeights : BLENDWEIGHT; };
 struct ShOut { float4 position : SV_Position; float2 lamp : LAMP; };
 
 ShOut ShadowFinish(float4 local)
@@ -168,16 +252,16 @@ ShOut ShadowFinish(float4 local)
   return o;
 }
 
-ShOut VSShadow(VsIn input)
+ShOut VSShadow(ShIn input)
 {
   return ShadowFinish(float4(input.position, 1));
 }
 
-ShOut VSShadowSkinned(VsSkinIn input)
+ShOut VSShadowSkinned(ShSkinIn input)
 {
   float4 p;
-  float3 n;
-  Skin(input, p, n);
+  float3 n, t;
+  Skin(input.position, 0, 0, input.bones, input.boneWeights, p, n, t);
   return ShadowFinish(p);
 }
 
@@ -195,34 +279,151 @@ float PSShadow(ShOut input) : SV_Target
 // the place (w: 1 written, 2 written and baked: the game's stencil for its cutscene lights).
 struct PsOut { float4 light : SV_Target0; float4 albedo : SV_Target1; float4 normal : SV_Target2; float4 place : SV_Target3; };
 
-PsOut Shade(VsOut input)
+// The page's pedBumpedRaw (step 4d): a tangent-space normal map (DXT5nm's x in alpha found per pixel), z from the raw
+// 0..1 values (0.707 when flat), bent by bumpiness along the tangent and binormal.
+float3 PedBumped(float3 nIn, float4 t, float2 uv, float bumpiness, uint map)
 {
+  float4 raw = Tex[map].Sample(Linear, uv);
+  float2 xy = (1 - raw.w - raw.x >= 0) ? raw.wy : raw.xy;
+  float2 k = (xy - 0.5) * bumpiness;
+  float z = sqrt(abs(1 - dot(xy, xy)));
+  float3 b = cross(t.xyz, nIn) * t.w;
+  return normalize(nIn * z + t.xyz * k.x + b * k.y + 1e-5);
+}
+
+// The page's gBufferRounded: the normal as GTA IV's G-buffer stores it (64 steps a channel, 10 bits).
+float3 Rounded(float3 g)
+{
+  float3 s = round(floor(64 * (g + 1)) / 128 * 1023) / 1023;
+  return normalize(s * 2 - 0.99999);
+}
+
+// The light of a surface (no albedo): the light from around by the normal's z x AO + the sun past n.l 0.25.
+float3 LitBy(float3 n, float ao)
+{
+  float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
+  float sunLit = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
+  return around * ao + f.Sun.rgb * sunLit;
+}
+
+// deferred: the solid pass and the decals (G-buffer); else the see-through pass (forward, blended).
+PsOut Shade(VsOut input, bool deferred)
+{
+  PartData p = Parts[(uint)d.Part.x];
+  uint bits = p.Bits.x;
   uint kind = (uint)(d.Material.z + 0.5);
   bool baked = (kind & Baked) != 0, ped = (kind & Ped) != 0, vehicle = (kind & Vehicle) != 0, tree = (kind & Tree) != 0;
   bool emissive = (kind & Emissive) != 0;
-  float4 texel = Albedo.Sample(Linear, input.uv);
-  float alpha = texel.a * input.alpha;
-  float3 albedo = texel.rgb * d.Tint.rgb;
-  if (d.Material.y > 0.5)
+  bool textured = (bits & FTextured) != 0, normalMap = (bits & FNormal) != 0, specMap = (bits & FSpec) != 0;
+  bool textureAlpha = (bits & FTextureAlpha) != 0;
+  bool tangentBranch = dot(input.tangent.xyz, input.tangent.xyz) > 0.25;
+  // Parallax (gta_parallax_specmap): the texture and the normal map at uv + (height x s - 0.5 s) x V.xy.
+  float2 uvP = input.uv;
+  if (p.Spec.w > 0 && normalMap && tangentBranch)
   {
-    alpha = dot(texel.rgb, d.DirtMask.rgb) * input.alpha;
-    albedo = float3(0.23, 0.22, 0.2);
+    float3 pn = normalize(input.normal), pt = normalize(input.tangent.xyz), pe = f.Eye.xyz - input.world;
+    float3 pv = float3(dot(pt, pe), dot(cross(pt, pn) * input.tangent.w, pe), dot(pn, pe));
+    uvP += (Tex[p.Tex.y].Sample(Linear, input.uv).a * p.Spec.w - 0.5 * p.Spec.w) * pv.xy / max(length(pv), 1e-5);
   }
-  // Cut out: the page's test (texture alpha x vertex alpha at most 45/255 goes; a tree by half, for its stipple).
-  if (d.Material.x > 0.5)
+  float4 texel = Tex[p.Tex.x].Sample(Linear, uvP);
+  float3 albedo = texel.rgb * d.Tint.rgb;
+  float baseA = texel.a;
+  // gta_vehicle_paint3's second layer over it by its alpha (on the second texture coordinates).
+  if ((bits & FPaint2) != 0)
   {
-    clip(alpha - (tree ? 0.5 : 0.17648));
+    float4 l = Tex[p.Tex2.x].Sample(Linear, input.layerUv.xy) * p.Paint2;
+    albedo = lerp(albedo, l.rgb, saturate(l.a));
   }
   float3 vc = input.color;
   if (vehicle)
   {
     albedo *= vc;
   }
-  // The normal: peds and vehicles turned to the camera (seen from inside: the side facing it).
+  // A vehicle's dirt: towards the dirt colour by the dirt texture's red x how dirty.
+  float dirtAmount = 0;
+  if (vehicle && (bits & FDirt) != 0 && p.Dirt.w > 0)
+  {
+    float dd = Tex[p.Tex2.w].Sample(Linear, input.uv).r;
+    dirtAmount = dd * p.Dirt.w;
+    if (dd > 0)
+    {
+      albedo = lerp(albedo, p.Dirt.rgb, dirtAmount);
+    }
+  }
+  // Terrain: each layer over the ones below by its alpha x its weight (gta_terrain_va_*lyr).
+  uint layers = p.Bits.y;
+  if (layers > 1)
+  {
+    if ((p.Bits.z & 1) != 0)
+    {
+      float4 l = Tex[p.Tex2.x].Sample(Linear, input.layerUv.xy);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.y));
+    }
+    if (layers > 2 && (p.Bits.z & 2) != 0)
+    {
+      float4 l = Tex[p.Tex2.y].Sample(Linear, input.layerUv.zw);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.z));
+    }
+    if (layers > 3 && (p.Bits.z & 4) != 0)
+    {
+      float4 l = Tex[p.Tex2.z].Sample(Linear, input.layerUv3);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.w));
+    }
+    baseA = 1;
+  }
+  float alpha = baseA * input.alpha;
+  // A dirt decal: the vertices' colour where the texture's channels in the mask say.
+  if (d.Material.y > 0.5)
+  {
+    alpha = dot(texel.rgb, d.DirtMask.rgb) * input.alpha;
+    baseA = alpha;
+    albedo = vc;
+  }
+  // Cut out: the page's test (texture alpha x vertex alpha at most 45/255 goes; a tree by half, for its stipple).
+  if (d.Material.x > 0.5)
+  {
+    clip(alpha - (tree ? 0.5 : 0.17648));
+  }
+  // The normal: peds and vehicles turned to the camera (seen from inside: the side facing it), then bent by the
+  // normal map: with tangents the tangent frame (and, written to the G-buffer, rounded as the game stores it);
+  // without (vehicles, map meshes without tangents) the page's screen-space frame, whose bumpiness is 0 there: it
+  // comes down to the normal x sign(2 blue - 1) (the page's NaN at blue 0.5 kept as the normal).
   float3 n = normalize(input.normal + 1e-6);
   if (!tree && !baked && dot(n, f.Eye.xyz - input.world) < 0)
   {
     n = -n;
+  }
+  float3 envN = n;
+  if (normalMap)
+  {
+    if (tangentBranch)
+    {
+      envN = PedBumped(dot(n, input.normal) < 0 ? -input.normal : input.normal, input.tangent, uvP, p.Spec.z, p.Tex.y);
+      n = textureAlpha ? envN : Rounded(envN);
+    }
+    else
+    {
+      float b = Tex[p.Tex.y].Sample(Linear, uvP).b;
+      n *= 2 * b - 1 < 0 ? -1 : 1;
+      envN = n;
+    }
+  }
+  float3 view = normalize(input.world - f.Eye.xyz);
+  float4 spec = specMap ? Tex[p.Tex.z].Sample(Linear, input.uv) : 1;
+  float reflective = p.SpecMask.w;
+  // A map *_reflect shader's environment texture added to the albedo (by the specular map x intensity, or alone) x
+  // reflectivity; see-through, divided by the alpha first.
+  if ((bits & FEnv) != 0 && !vehicle)
+  {
+    float3 r = reflect(view, envN);
+    float3 env = Tex[p.Tex.w].Sample(Linear, -0.5 * (r.xz / max(length(r), 1e-5) + 1)).rgb
+               * ((bits & FEnvSpec) != 0 ? dot(spec.rgb, p.SpecMask.rgb) * p.Spec.y : 1) * reflective;
+    if (textureAlpha)
+    {
+      float seen = baseA * input.alpha;
+      env *= seen >= 0.01 ? 1 / seen : 100;
+    }
+    albedo += env;
   }
   float dayNight = f.Params.x;
   float ao = tree ? 0.5
@@ -234,9 +435,103 @@ PsOut Shade(VsOut input)
   {
     ao = 1 + (ped ? f.Params.z : 1) * f.Params.w * (ao - 1);
   }
-  float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
-  float sunLit = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
-  float3 rgb = albedo * (around * ao + f.Sun.rgb * sunLit);
+  // A decal under the surface's light (its normal and AO there), or only its AO (normal decals).
+  float4 below = 0;
+  if ((bits & (FDecalBelow | FDecalAoBelow)) != 0 && f.Screen.z > 0.5)
+  {
+    below = Tex[(uint)f.Screen.z].Load(int3(input.position.xy, 0));
+    if ((bits & FDecalAoBelow) != 0)
+    {
+      ao = below.w;
+    }
+  }
+  float3 lit = LitBy(n, ao);
+  if ((bits & FDecalBelow) != 0 && f.Screen.z > 0.5)
+  {
+    lit = LitBy(normalize(below.xyz + 1e-6), below.w);
+  }
+  // The sun's shine (the page's vehicleShine and pedShine, sun parts; the mirrored surroundings and the lamps' shine
+  // not yet).
+  float3 R = reflect(view, n);
+  float sunR = saturate(dot(R, f.SunDirection.xyz));
+  float shineScale = f.Params2.x;
+  float3 vehicleShine = 0, shine = 0;
+  bool vehicleGlassShader = p.VShine.z > 0.5 && p.VShine.z < 1.5;
+  if (vehicle && (vehicleGlassShader || (specMap && textured)) && reflective > 0)
+  {
+    float4 vs = specMap && textured ? spec : 1;
+    float strength = dot(vs.rgb, p.SpecMask.rgb) * p.VShine.x * reflective;
+    if (p.VShine.z > 1.5)
+    {
+      strength = min(strength, 1);
+    }
+    float power = vs.a * p.VShine.y * reflective;
+    float3 sunShine = f.Sun.rgb * pow(sunR + 1e-4, power + 1e-4);
+    if (vehicleGlassShader || p.VShine.z > 2.5)
+    {
+      float fr = pow(1 - abs(dot(view, n)), 4);
+      float s = min(strength, 1) * (1 - dirtAmount) * saturate(0.5 * fr + 0.5);
+      vehicleShine = s * (vehicleGlassShader ? 4 : 1) * shineScale * sunShine;
+    }
+    else
+    {
+      vehicleShine = strength * (1 - dirtAmount) * sunShine * 2 * shineScale;
+    }
+    // gta_vehicle_paint2's second shine, into the colour (lit with it).
+    if (p.Misc.x > 0)
+    {
+      float e = max(p.Spec2.w * vs.a * reflective, 1);
+      float glint = dot(vs.rgb, p.SpecMask.rgb) * reflective * p.Misc.x * pow(max(dot(R, f.SunDirection.xyz), 0), e);
+      albedo += p.Spec2.rgb * glint;
+    }
+  }
+  if (!vehicle && (specMap || (bits & FSpecFlat) != 0) && textured)
+  {
+    float amount = (specMap ? dot(spec.rgb, p.SpecMask.rgb) : 1) * p.Spec.y;
+    if ((bits & FForwardShine) != 0)
+    {
+      // Forward (glass, see-through map materials, a ped's see-through parts): no halving, no 0.75 on the power.
+      shine = amount * f.Sun.rgb * pow(sunR + 1e-4, spec.a * p.Spec.x + 1e-4) * shineScale;
+    }
+    else
+    {
+      // The G-buffer's (deferred_lighting's sun pass): 2 x GB2.x x the sun x 2 gDirectionalLight.w.
+      float power = spec.a * p.Spec.x * (baked ? 1 : 0.75);
+      shine = 2 * (baked ? 0.5 : 0.25) * amount * f.Sun.rgb * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale;
+    }
+  }
+  // How much of it shows (the see-through pass and decals): the texture's alpha x the vertex's (a vehicle lamp's
+  // vertex alpha is its lamp's number), a person's see-through part by its stipple's share; a fixed alpha (0.45) for
+  // glass without its own.
+  float a = alpha;
+  if (!deferred && (bits & FFixedAlpha) != 0)
+  {
+    a = p.Misc.z;
+  }
+  else if (textureAlpha)
+  {
+    a = (bits & FVehLights) != 0 ? baseA : alpha;
+    if (a < 0.01)
+    {
+      discard;
+    }
+    if ((bits & FStipple) != 0)
+    {
+      float level = min(a, 1) * 3.996;
+      int index = (int)floor(level) * 4 + (int)floor(frac(level) * 4);
+      a *= Kept[index] / 64;
+    }
+  }
+  // Skin (gta_ped_skin): SubColor x the texture's alpha in a band at the edge of the sun's light.
+  if (p.Misc.y > 0)
+  {
+    float x = max((dot(n, -f.SunDirection.xyz) + p.Sub.w) / (1 + p.Sub.w), 0);
+    float band = smoothstep(0, p.Misc.y, x) * (1 - smoothstep(p.Misc.y, 2 * p.Misc.y, x));
+    albedo += 0.5 * band * p.Sub.rgb * baseA;
+  }
+  // A vehicle's glass: its shine divided by its alpha (the blend multiplies it back: it shows whole).
+  float glassShine = (bits & FVehGlass) != 0 ? (a >= 0.01 ? 1 / a : 100) : 1;
+  float3 rgb = albedo * lit + vehicleShine * glassShine + shine;
   float3 lampAlbedo = albedo;
   if (emissive)
   {
@@ -257,11 +552,17 @@ PsOut Shade(VsOut input)
       rgb += lightOf;
     }
   }
+  // A vehicle's lamp glass (gta_vehicle_lightsemissive): texture x vertex colour x its lamp's dimmer x the glow
+  // (lamps on: emissiveMultiplier) x the exposure.
+  if ((bits & FVehLights) != 0)
+  {
+    rgb += albedo * vc * Dimmers[clamp((int)(input.alpha * 255 + 0.5), 0, 14)] * p.Misc.w * f.Params.y;
+  }
   PsOut o;
-  o.light = float4(rgb, alpha);
+  o.light = float4(rgb, deferred ? alpha : a);
   // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
   // game's decals write GB0's colour only, the page's outBelow.)
-  o.albedo = float4(lampAlbedo, alpha);
+  o.albedo = float4(lampAlbedo, a);
   o.normal = float4(n, ao);
   o.place = float4(input.world, baked ? 2 : 1);
   return o;
@@ -269,14 +570,14 @@ PsOut Shade(VsOut input)
 
 PsOut PSMain(VsOut input)
 {
-  return Shade(input);
+  return Shade(input, true);
 }
 
-// The see-through materials: the light target only (no lamps on them yet: the game lights them forward, its
-// lamps over 4 m only; not ported).
+// The see-through materials and glass: the light target only (no lamps on them yet: the game lights them forward,
+// its lamps over 4 m only; not ported).
 float4 PSBlend(VsOut input) : SV_Target
 {
-  return Shade(input).light;
+  return Shade(input, false).light;
 }
 
 // The lamps (#112 step 5): one light volume per light, a box round its sphere drawn over the solid scene (its faces
@@ -409,8 +710,21 @@ float4 PSLight(LvOut input) : SV_Target
 }
 ";
 
-    private const int DrawConstants = 16 + 4 + 4 + 4 + 4;
-    private const int FrameFloats = 16 + 4 * 7;
+    private const int DrawConstants = 16 + 4 + 4 + 4 + 4 + 4;
+    private const int FrameFloats = 16 + 4 * 8;
+    // A part's material for the shader (PartData: 11 x 4 numbers), and the per-vertex extras (tangent, layer texture
+    // coordinates, layer weights: 14 floats) of models that have any.
+    private const int PartWords = 44;
+    private const int ExtraFloats = 14;
+
+    // The shader's PartData flags.
+    [Flags]
+    private enum PartFlags : uint
+    {
+      NormalMap = 1, SpecularMap = 2, SpecularFlat = 4, Environment = 8, EnvironmentSpecular = 16, Paint2 = 32, Dirt = 64,
+      Stipple = 128, VehicleGlass = 256, VehicleLights = 512, DecalBelow = 1024, DecalAoBelow = 2048, ForwardShine = 4096,
+      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768,
+    }
 
     /// <summary>
     /// How many lights' shadow maps a frame can draw (the atlas's rows; see <see cref="DeferredLight.ShadowSlot"/>): each
@@ -432,7 +746,9 @@ float4 PSLight(LvOut input) : SV_Target
     private const int LightCapacity = 16384;
     private const int LightBytes = 64;
 
-    internal enum Pass : byte { Solid, Blend, Decal }
+    // Glass: see-through, drawn with the others but writing depth (vehicle glass, the map's glass and see-through
+    // materials: the page's glassDepth).
+    internal enum Pass : byte { Solid, Blend, Decal, Glass }
 
     /// <summary>Models made on the GPU by <see cref="Prepare"/> (any thread), not yet drawn: <see cref="Register"/> adds them.</summary>
     public sealed class PreparedModels
@@ -463,6 +779,9 @@ float4 PSLight(LvOut input) : SV_Target
       /// <summary>Its back faces not drawn (a map object's or prop's solid: the page culls those).</summary>
       public bool Culled { get; init; }
 
+      /// <summary>Its number in its model's PartData.</summary>
+      public int Index { get; init; }
+
       public uint Start { get; }
       public uint Count { get; }
       public int Texture { get; }
@@ -484,12 +803,18 @@ float4 PSLight(LvOut input) : SV_Target
       public uint IndexCount;
       public Part[] Parts = Array.Empty<Part>();
       public Vector3 Min, Max;
+      // The parts' materials (PartData, t2) and the vertices' extras (null: none, the shared zeros read instead).
+      public ID3D12Resource PartData = null!;
+      public ID3D12Resource? Extras;
+      public VertexBufferView ExtrasView;
 
       public void Dispose()
       {
         Vertices.Dispose();
         Indices.Dispose();
         Skin?.Dispose();
+        PartData.Dispose();
+        Extras?.Dispose();
       }
     }
 
@@ -530,7 +855,12 @@ float4 PSLight(LvOut input) : SV_Target
     private readonly TextureCache _textures;
     private readonly ID3D12RootSignature _rootSignature;
     // Skinned or not x pass x back faces culled or not.
-    private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[12];
+    private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[16];
+    // Zeros read as the extras of models without any (a stride of 0: every vertex the same).
+    private readonly ID3D12Resource _noExtras;
+    // The surface's normal and AO under the decals (a copy of the G-buffer's after the solid pass), its texture number.
+    private ID3D12Resource? _below;
+    private readonly int _belowSlot;
     private readonly ID3D12Resource _frame;
     private readonly unsafe byte* _frameMapped;
     private readonly List<Model?> _models = new List<Model?>();
@@ -574,9 +904,13 @@ float4 PSLight(LvOut input) : SV_Target
       var parameters = new[]
       {
         new RootParameter1(new RootConstants(0, 0, DrawConstants), ShaderVisibility.All),
-        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 0, 0, 0)), ShaderVisibility.Pixel),
+        // All the textures' views (t0 in space 1, unbounded; a part's numbers in its PartData). Volatile: the loading
+        // thread adds views to other slots while frames are drawn.
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, uint.MaxValue, 0, 1, 0, DescriptorRangeFlags.DescriptorsVolatile)), ShaderVisibility.Pixel),
         new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(1, 0), ShaderVisibility.Vertex),
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
+        // The model's parts' materials (t2).
+        new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(2, 0), ShaderVisibility.Pixel),
       };
       var samplers = new[]
       {
@@ -609,6 +943,18 @@ float4 PSLight(LvOut input) : SV_Target
         new InputElementDescription("BLENDINDICES", 0, Format.R32G32B32A32_Float, 0, 1),
         new InputElementDescription("BLENDWEIGHT", 0, Format.R32G32B32A32_Float, 16, 1),
       }).ToArray();
+      // The extras (step 4d), stream 2: tangent (w the binormal's side), layers 1-2's and 3's texture coordinates, weights.
+      var extras = new[]
+      {
+        new InputElementDescription("TANGENT", 0, Format.R32G32B32A32_Float, 0, 2),
+        new InputElementDescription("TEXCOORD", 1, Format.R32G32B32A32_Float, 16, 2),
+        new InputElementDescription("TEXCOORD", 2, Format.R32G32_Float, 32, 2),
+        new InputElementDescription("TEXCOORD", 3, Format.R32G32B32A32_Float, 40, 2),
+      };
+      var shadowInput = input;
+      var shadowSkinnedInput = skinnedInput;
+      input = input.Concat(extras).ToArray();
+      skinnedInput = skinnedInput.Concat(extras).ToArray();
       // Solid and decals also write the G-buffer (step 5); the see-through materials the light target only.
       var withGBuffer = new[] { targetFormat }.Concat(GBufferFormats).ToArray();
       GraphicsPipelineStateDescription Pipeline(bool skinned, BlendDescription blend, DepthStencilDescription depth, RasterizerDescription rasterizer, bool gBuffer) => new GraphicsPipelineStateDescription
@@ -647,6 +993,7 @@ float4 PSLight(LvOut input) : SV_Target
           _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, cull == 1 ? front : both, true));
           _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front : both, false));
           _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, decalBlend, DepthStencilDescription.Read, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled, true));
+          _pipelines[Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Default, cull == 1 ? front : both, false));
         }
       }
 
@@ -707,7 +1054,7 @@ float4 PSLight(LvOut input) : SV_Target
             RootSignature = _rootSignature,
             VertexShader = s == 1 ? shadowSkinned : shadowVertex,
             PixelShader = shadowPixel,
-            InputLayout = new InputLayoutDescription(s == 1 ? skinnedInput : input),
+            InputLayout = new InputLayoutDescription(s == 1 ? shadowSkinnedInput : shadowInput),
             SampleMask = uint.MaxValue,
             PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
             RasterizerState = new RasterizerDescription(half == 0 ? CullMode.Front : CullMode.Back, FillMode.Solid) { FrontCounterClockwise = true },
@@ -732,6 +1079,14 @@ float4 PSLight(LvOut input) : SV_Target
       void* mapped;
       _palette.Map(0, null, &mapped).CheckError();
       _paletteMapped = (Matrix4x4*)mapped;
+
+      _noExtras = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
+                                              ResourceDescription.Buffer(256), ResourceStates.GenericRead);
+      void* zeros;
+      _noExtras.Map(0, null, &zeros).CheckError();
+      new Span<byte>(zeros, 256).Clear();
+      _noExtras.Unmap(0);
+      _belowSlot = _textures.Reserve();
     }
 
     // A light added onto the light target's colour (one + one), its alpha left.
@@ -763,6 +1118,15 @@ float4 PSLight(LvOut input) : SV_Target
         d3d.CreateRenderTargetView(_gBuffer[i], null, _gBufferRtvs.GetCPUDescriptorHandleForHeapStart() + i * (int)rtvSize);
         d3d.CreateShaderResourceView(_gBuffer[i], null, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() + i * (int)srvSize);
       }
+      // The surface under the decals: the normal + AO target's copy, read by its number with the textures.
+      _below?.Dispose();
+      _below = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(GBufferFormats[1], (uint)Math.Max(1, width), (uint)Math.Max(1, height), 1, 1),
+        ResourceStates.PixelShaderResource);
+      if (_belowSlot > 0)
+      {
+        d3d.CreateShaderResourceView(_below, null, _textures.CpuHandle(_belowSlot));
+      }
       _gWidth = width;
       _gHeight = height;
     }
@@ -770,7 +1134,10 @@ float4 PSLight(LvOut input) : SV_Target
     private CpuDescriptorHandle GBufferView(int i) =>
       _gBufferRtvs.GetCPUDescriptorHandleForHeapStart() + i * (int)_device.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
 
-    private static int Pipe(bool skinned, Pass pass, bool culled) => (skinned ? 6 : 0) + (int)pass * 2 + (culled ? 1 : 0);
+    private static int Pipe(bool skinned, Pass pass, bool culled) => (skinned ? 8 : 0) + (int)pass * 2 + (culled ? 1 : 0);
+
+    // Which parts a pass draws: the see-through pass both kinds of see-through (in the models' order, as the page).
+    private static bool Drawn(Pass part, Pass pass) => pass == Pass.Blend ? part is Pass.Blend or Pass.Glass : part == pass;
 
     /// <summary>The number of instances and of the triangles they draw.</summary>
     public int InstanceCount => _instances.Count(i => i != null);
@@ -921,14 +1288,35 @@ float4 PSLight(LvOut input) : SV_Target
       }
       var vertices = new List<float>();
       var skin = source.Skinned ? new List<float>() : null;
+      // The extras only for a model with tangents or texture layers (step 4d).
+      bool anyExtras = source.Meshes.Any(m => m.Tangents != null || m.LayerUvs != null);
+      var extras = anyExtras ? new List<float>() : null;
       var indices = new List<uint>();
       var parts = new List<Part>();
+      var partData = new List<uint>();
       var min = new Vector3(float.MaxValue);
       var max = new Vector3(float.MinValue);
+      long textureBytes = 0;
+      int Texture(string? key)
+      {
+        byte[]? found = key != null && source.Textures.TryGetValue(key, out var b) ? b : null;
+        if (key != null && found == null)
+        {
+          lock (MissingTextures)
+          {
+            MissingTextures.Add(key);
+          }
+        }
+        int number = _textures.Acquire(found, list, uploads, out long bytes);
+        textureBytes += bytes;
+        textures.Add(number);
+        return number;
+      }
       foreach (var mesh in source.Meshes)
       {
         materials.TryGetValue(mesh.Material, out var material);
-        if (mesh.Indices.Length == 0 || material == null || material.Hidden || material.Glass)
+        // (A see-through glowing glass, gta_glass_emissive: the game draws only its glow - not yet.)
+        if (mesh.Indices.Length == 0 || material == null || material.Hidden || (material.Glass && material.EmissiveMultiplier != null))
         {
           continue;
         }
@@ -938,6 +1326,9 @@ float4 PSLight(LvOut input) : SV_Target
         bool uvs = mesh.Uvs != null && mesh.Uvs.Length >= count * 2;
         bool alphas = mesh.Alphas != null && mesh.Alphas.Length >= count;
         bool colors = mesh.Colors != null && mesh.Colors.Length >= count * 3;
+        bool tangents = mesh.Tangents != null && mesh.Tangents.Length >= count * 4;
+        bool layerUvs = mesh.LayerUvs != null && mesh.LayerUvs.Length >= count * 6;
+        bool layerWeights = mesh.LayerWeights != null && mesh.LayerWeights.Length >= count * 4;
         // Without vertex colours: a baked mesh 0.45 (the page's guess), others white (the page's defaults).
         float noColor = source.Baked && !material.Vehicle && !(material.EmissiveMultiplier != null) ? 0.45f : 1f;
         bool skinned = mesh.SkinBones != null && mesh.SkinWeights != null && mesh.SkinBones.Length >= count * 4 && mesh.SkinWeights.Length >= count * 4;
@@ -969,40 +1360,151 @@ float4 PSLight(LvOut input) : SV_Target
               skin.Add(skinned ? mesh.SkinWeights![v * 4 + k] : 0);
             }
           }
+          if (extras != null)
+          {
+            for (int k = 0; k < 4; k++)
+            {
+              extras.Add(tangents ? mesh.Tangents![v * 4 + k] : 0);
+            }
+            for (int k = 0; k < 6; k++)
+            {
+              extras.Add(layerUvs ? mesh.LayerUvs![v * 6 + k] : 0);
+            }
+            for (int k = 0; k < 4; k++)
+            {
+              extras.Add(layerWeights ? mesh.LayerWeights![v * 4 + k] : 0);
+            }
+          }
         }
         uint start = (uint)indices.Count;
         foreach (ushort index in mesh.Indices)
         {
           indices.Add(first + index);
         }
-        byte[]? blob = material.TextureKey != null && source.Textures.TryGetValue(material.TextureKey, out var found) ? found : null;
-        if (material.TextureKey != null && blob == null)
+        var look = source.Looks != null && source.Looks.TryGetValue(material.Id, out var found) ? found : null;
+        int texture = Texture(material.TextureKey);
+        bool textured = texture != 0;
+        // Which pass (the page's: see-through = glass, or blended with a texture; untextured blended ones as before).
+        var pass = material.Glass ? Pass.Glass : material.Decal || material.DirtMask != null ? Pass.Decal : material.Blend ? Pass.Blend : Pass.Solid;
+        var flags = textured ? PartFlags.Textured : 0;
+        var vehicleShine = material.VehicleShine is { Length: >= 3 } vs ? new Vector3(vs[0], vs[1], vs[2]) : new Vector3(0.15f, 190f, 0f);
+        float fixedAlpha = 1;
+        bool culled = false;
+        if (material.Glass)
         {
-          lock (MissingTextures)
+          // A vehicle's glass (gta_vehicle_vehglass, textured) and the map's glass with vertex alpha: by the texture's
+          // alpha, back faces culled, writing depth; other glass at 0.45, as a blended material (the page's).
+          bool vehicleGlass = material.Vehicle && textured && vehicleShine.Z > 0.5f && vehicleShine.Z < 1.5f;
+          bool mapGlass = !material.Vehicle && textured && alphas;
+          if (vehicleGlass || mapGlass)
           {
-            MissingTextures.Add(material.TextureKey);
+            flags |= PartFlags.TextureAlpha | (vehicleGlass ? PartFlags.VehicleGlass : PartFlags.ForwardShine);
+            culled = true;
+          }
+          else
+          {
+            flags |= PartFlags.FixedAlpha;
+            fixedAlpha = 0.45f;
+            pass = Pass.Blend;
           }
         }
-        var pass = material.Decal || material.DirtMask != null ? Pass.Decal : material.Blend ? Pass.Blend : Pass.Solid;
-        var dirt = material.DirtMask is { Length: >= 3 } d ? new Vector3(d[0], d[1], d[2]) : (Vector3?)null;
+        else if (pass == Pass.Blend || pass == Pass.Decal)
+        {
+          flags |= PartFlags.TextureAlpha;
+          // The map's other see-through materials (the page's forwardMap): forward shine, culled, writing depth.
+          if (pass == Pass.Blend && source.Baked && !source.Actor && !material.Vehicle && !material.Emissive)
+          {
+            flags |= PartFlags.ForwardShine;
+            pass = Pass.Glass;
+            culled = true;
+          }
+          // A person's see-through part (gta_ped, bucket 1): its stipple's share of the alpha, forward shine.
+          if (pass == Pass.Blend && material.Stipple)
+          {
+            flags |= PartFlags.Stipple | PartFlags.ForwardShine;
+          }
+          // A decal of the location takes the surface's light below (a normal decal only its AO); glue its own.
+          if (pass == Pass.Decal && !source.Actor && !material.OwnLight)
+          {
+            flags |= material.DecalNormal ? PartFlags.DecalAoBelow : PartFlags.DecalBelow;
+          }
+        }
+        if (material.VehicleLights)
+        {
+          flags |= PartFlags.VehicleLights;
+        }
+        // The maps: normal map, specular map, environment (each only with the texture itself).
+        int normal = 0, specular = 0, environment = 0, dirtTexture = 0;
+        var layer = new int[3];
+        uint layersOn = 0;
+        int layers = 1;
+        if (textured)
+        {
+          normal = Texture(material.NormalKey);
+          specular = Texture(material.SpecularKey);
+          environment = material.Vehicle ? 0 : Texture(material.EnvironmentKey);
+          flags |= (normal != 0 ? PartFlags.NormalMap : 0) | (specular != 0 ? PartFlags.SpecularMap : 0) |
+                   (specular == 0 && material.SpecularFlat ? PartFlags.SpecularFlat : 0) |
+                   (environment != 0 ? PartFlags.Environment : 0) | (material.EnvSpecular ? PartFlags.EnvironmentSpecular : 0);
+          if (layerUvs && material.LayerCount > 1)
+          {
+            layers = material.LayerCount;
+            for (int k = 0; k < material.LayerKeys.Count && k < 3; k++)
+            {
+              layer[k] = Texture(material.LayerKeys[k]);
+              layersOn |= layer[k] != 0 ? 1u << k : 0;
+            }
+          }
+          else if (layerUvs && material.Paint2Key != null)
+          {
+            layer[0] = Texture(material.Paint2Key);
+            flags |= layer[0] != 0 ? PartFlags.Paint2 : 0;
+          }
+          if (material.Vehicle && material.DirtKey != null && look != null && look.DirtLevel > 0)
+          {
+            dirtTexture = Texture(material.DirtKey);
+            flags |= dirtTexture != 0 ? PartFlags.Dirt : 0;
+          }
+        }
+        var paint2 = look?.Paint2 ?? (material.Paint2 is { Length: >= 4 } p2 ? new Vector4(p2[0], p2[1], p2[2], p2[3]) : Vector4.One);
+        var mask = material.SpecularMask is { Length: >= 3 } sm ? new Vector3(sm[0], sm[1], sm[2]) : Vector3.UnitX;
+        var sub = material.SubSurface is { Length: >= 5 } ss ? ss : null;
+        float lampGlow = material.VehicleLights && look != null && look.LightsOn ? material.EmissiveMultiplier ?? 0 : 0;
+        int partIndex = parts.Count;
+        AddPart(partData, new uint[] { (uint)texture, (uint)normal, (uint)specular, (uint)environment },
+                new uint[] { (uint)layer[0], (uint)layer[1], (uint)layer[2], (uint)dirtTexture },
+                new uint[] { (uint)flags, (uint)layers, layersOn, 0 },
+                new float[]
+                {
+                  material.SpecularPower, material.SpecularIntensity, material.Bumpiness, material.Parallax,
+                  mask.X, mask.Y, mask.Z, look?.ReflectivePower ?? material.ReflectivePower,
+                  paint2.X, paint2.Y, paint2.Z, paint2.W,
+                  material.DirtColor.Length >= 3 ? material.DirtColor[0] : 0.23f, material.DirtColor.Length >= 3 ? material.DirtColor[1] : 0.22f,
+                  material.DirtColor.Length >= 3 ? material.DirtColor[2] : 0.2f, material.Vehicle ? look?.DirtLevel ?? 0 : 0,
+                  vehicleShine.X, vehicleShine.Y, vehicleShine.Z, 0,
+                  look?.Specular2Color.X ?? 0, look?.Specular2Color.Y ?? 0, look?.Specular2Color.Z ?? 0, look?.Specular2Exponent ?? 0,
+                  sub?[0] ?? 0, sub?[1] ?? 0, sub?[2] ?? 0, sub?[3] ?? 0,
+                  look?.Specular2Strength ?? 0, sub?[4] ?? 0, fixedAlpha, lampGlow,
+                });
+        var dirt = material.DirtMask is { Length: >= 3 } dm ? new Vector3(dm[0], dm[1], dm[2]) : (Vector3?)null;
         var tint = source.Tints != null && source.Tints.TryGetValue(material.Id, out var t) ? t : Vector3.One;
-        int texture = _textures.Acquire(blob, list, uploads, out long textureBytes);
-        pending += textureBytes;
-        textures.Add(texture);
         // Its kind for the light (see the shader): vehicles are never baked; a glowing material only with a texture,
         // and only solid (the see-through ones glow apart: not yet).
         bool baked = source.Baked && !material.Vehicle;
-        bool glowing = material.EmissiveMultiplier != null && blob != null && pass != Pass.Blend;
+        bool glowing = material.EmissiveMultiplier != null && textured && pass != Pass.Blend && pass != Pass.Glass;
         int kind = (baked ? 1 : 0) | (material.Ped ? 2 : 0) | (material.Vehicle ? 4 : 0) | (material.Tree ? 8 : 0) |
                    (glowing ? 16 : 0) | (material.EmissiveAtNight ? 32 : 0) | (material.EmissiveStrong ? 64 : 0);
-        parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout || material.Stipple, dirt, tint)
+        parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout, dirt, tint)
         {
           Kind = kind,
           Glow = glowing ? material.EmissiveMultiplier!.Value : 0,
-          // The page culls the back faces of map objects' and props' solids (not trees').
-          Culled = baked && !material.Tree && pass == Pass.Solid,
+          // The page culls the back faces of map objects' and props' solids (not trees'), vehicle glass, the map's
+          // glass and see-through materials.
+          Culled = culled || (baked && !material.Tree && pass == Pass.Solid),
+          Index = partIndex,
         });
       }
+      pending += textureBytes;
       if (indices.Count == 0)
       {
         foreach (int texture in textures)
@@ -1013,7 +1515,7 @@ float4 PSLight(LvOut input) : SV_Target
       }
       var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray() };
       model.Textures.AddRange(textures);
-      pending += (long)vertices.Count * 4 + (long)indices.Count * 4 + (skin?.Count ?? 0) * 4L;
+      pending += (long)vertices.Count * 4 + (long)indices.Count * 4 + (skin?.Count ?? 0) * 4L + (extras?.Count ?? 0) * 4L + partData.Count * 4L;
       model.Vertices = Upload(vertices.ToArray(), list, uploads, out ulong vertexBytes);
       model.Indices = Upload(indices.ToArray(), list, uploads, out ulong indexBytes);
       model.VertexView = new VertexBufferView(model.Vertices.GPUVirtualAddress, (uint)vertexBytes, VertexFloats * 4);
@@ -1023,11 +1525,34 @@ float4 PSLight(LvOut input) : SV_Target
         model.Skin = Upload(skin.ToArray(), list, uploads, out ulong skinBytes);
         model.SkinView = new VertexBufferView(model.Skin.GPUVirtualAddress, (uint)skinBytes, SkinFloats * 4);
       }
+      if (extras != null)
+      {
+        model.Extras = Upload(extras.ToArray(), list, uploads, out ulong extraBytes);
+        model.ExtrasView = new VertexBufferView(model.Extras.GPUVirtualAddress, (uint)extraBytes, ExtraFloats * 4);
+      }
+      else
+      {
+        model.ExtrasView = new VertexBufferView(_noExtras.GPUVirtualAddress, 256, 0);
+      }
+      model.PartData = Upload(partData.ToArray(), list, uploads, out _, ResourceStates.AllShaderResource);
       return model;
     }
 
+    // A part's PartData (see the shader): three uint4, then eight float4.
+    private static void AddPart(List<uint> into, uint[] tex, uint[] tex2, uint[] bits, float[] numbers)
+    {
+      into.AddRange(tex);
+      into.AddRange(tex2);
+      into.AddRange(bits);
+      foreach (float n in numbers)
+      {
+        into.Add(BitConverter.SingleToUInt32Bits(n));
+      }
+    }
+
     /// <summary>An array into a new buffer in a default heap, its copy from an upload buffer recorded in the list.</summary>
-    private unsafe ID3D12Resource Upload<T>(T[] data, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out ulong bytes) where T : unmanaged
+    private unsafe ID3D12Resource Upload<T>(T[] data, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out ulong bytes,
+                                           ResourceStates state = ResourceStates.VertexAndConstantBuffer | ResourceStates.IndexBuffer) where T : unmanaged
     {
       var d3d = _device.Device;
       bytes = (ulong)(data.Length * sizeof(T));
@@ -1045,7 +1570,7 @@ float4 PSLight(LvOut input) : SV_Target
       upload.Unmap(0);
       list.ResourceBarrierTransition(buffer, ResourceStates.Common, ResourceStates.CopyDest);
       list.CopyBufferRegion(buffer, 0, upload, 0, bytes);
-      list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, ResourceStates.VertexAndConstantBuffer | ResourceStates.IndexBuffer);
+      list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, state);
       return buffer;
     }
 
@@ -1157,8 +1682,13 @@ float4 PSLight(LvOut input) : SV_Target
       frame[39] = light.AoScale;
       frame[40] = width;
       frame[41] = height;
-      frame[42] = 0;
+      // The surface under the decals: its texture number (0: none).
+      frame[42] = _belowSlot;
       frame[43] = 0;
+      frame[44] = light.ShineScale;
+      frame[45] = 0;
+      frame[46] = 0;
+      frame[47] = 0;
 
       // The shadowed lights' maps (step 5), before anything else is drawn.
       ShadowMapsDrawn = 0;
@@ -1183,10 +1713,20 @@ float4 PSLight(LvOut input) : SV_Target
         list.SetGraphicsRootSignature(_rootSignature);
         list.SetDescriptorHeaps(_textures.Heap);
         list.SetGraphicsRootConstantBufferView(3, frameAddress);
+        list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
         list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
       Bind(true);
       DrawPass(list, Pass.Solid);
+      // The surface's normal and AO as the solid pass left them, for the decals taking its light (step 4d).
+      if (_below != null)
+      {
+        list.ResourceBarrierTransition(_gBuffer[1]!, ResourceStates.RenderTarget, ResourceStates.CopySource);
+        list.ResourceBarrierTransition(_below, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
+        list.CopyResource(_below, _gBuffer[1]!);
+        list.ResourceBarrierTransition(_below, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+        list.ResourceBarrierTransition(_gBuffer[1]!, ResourceStates.CopySource, ResourceStates.RenderTarget);
+      }
       DrawPass(list, Pass.Decal);
       // The lamps over the solid scene and its decals (step 5); the water and see-through materials come after
       // (forward, without them for now).
@@ -1351,11 +1891,11 @@ float4 PSLight(LvOut input) : SV_Target
 
     private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
     {
-      int lastPipeline = -1, lastTexture = -1;
+      int lastPipeline = -1;
       var draw = stackalloc float[DrawConstants];
       foreach (var instance in _instances)
       {
-        if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
+        if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => Drawn(p.Pass, pass)))
         {
           continue;
         }
@@ -1367,6 +1907,8 @@ float4 PSLight(LvOut input) : SV_Target
           list.IASetVertexBuffers(1, model.SkinView);
           list.SetGraphicsRootShaderResourceView(2, instance.PaletteAddress != 0 ? instance.PaletteAddress : _palette.GPUVirtualAddress);
         }
+        list.IASetVertexBuffers(2, model.ExtrasView);
+        list.SetGraphicsRootShaderResourceView(4, model.PartData.GPUVirtualAddress);
         list.IASetIndexBuffer(model.IndexView);
         *(Matrix4x4*)draw = instance.World;
         draw[16] = instance.ActorAmbient;
@@ -1376,11 +1918,11 @@ float4 PSLight(LvOut input) : SV_Target
         list.SetGraphicsRoot32BitConstants(0, 20, draw, 0);
         foreach (var part in model.Parts)
         {
-          if (part.Pass != pass)
+          if (!Drawn(part.Pass, pass))
           {
             continue;
           }
-          int pipeline = Pipe(skinned, pass, part.Culled);
+          int pipeline = Pipe(skinned, part.Pass, part.Culled);
           if (pipeline != lastPipeline)
           {
             list.SetPipelineState(_pipelines[pipeline]);
@@ -1399,12 +1941,11 @@ float4 PSLight(LvOut input) : SV_Target
           draw[29] = part.Tint.Y;
           draw[30] = part.Tint.Z;
           draw[31] = 1;
-          list.SetGraphicsRoot32BitConstants(0, 12, draw + 20, 20);
-          if (part.Texture != lastTexture)
-          {
-            list.SetGraphicsRootDescriptorTable(1, _textures.Handle(part.Texture));
-            lastTexture = part.Texture;
-          }
+          draw[32] = part.Index;
+          draw[33] = 0;
+          draw[34] = 0;
+          draw[35] = 0;
+          list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
           list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
           DrawCalls++;
         }
@@ -1425,6 +1966,8 @@ float4 PSLight(LvOut input) : SV_Target
       {
         g?.Dispose();
       }
+      _below?.Dispose();
+      _noExtras.Dispose();
       _gBufferRtvs.Dispose();
       _gBufferSrvs.Dispose();
       _shadowAtlas.Dispose();

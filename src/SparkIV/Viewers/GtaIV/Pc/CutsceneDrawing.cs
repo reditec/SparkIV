@@ -47,13 +47,57 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var tints = paint == null ? null : scene.Materials.Where(m => m.PaintSlot > 0 && m.PaintSlot <= paint.Length)
         .ToDictionary(m => m.Id, m => new Vector3(paint[m.PaintSlot - 1][0], paint[m.PaintSlot - 1][1], paint[m.PaintSlot - 1][2]));
       // Peds lit as they are; props (a door) as the location is (their light baked into vertex colours); vehicles never baked.
-      sources.Add(ModelSource.Shown(scene, skinned, baked: !actor.IsPed) with { Tints = tints });
+      sources.Add(ModelSource.Shown(scene, skinned, baked: !actor.IsPed) with { Tints = tints, Actor = true, Looks = LooksOf(actor, scene) });
       var worn = CutsceneMessages.WornProps(actor);
       if (worn.Count > 0 && skinned && actor.PropScene != null)
       {
-        sources.Add(new ModelSource(worn, actor.PropScene.Materials, actor.PropScene.Textures, true));
+        sources.Add(new ModelSource(worn, actor.PropScene.Materials, actor.PropScene.Textures, true) { Actor = true });
       }
       return sources;
+    }
+
+    /// <summary>
+    /// What a cutscene vehicle sets on its materials, as the page's scene message (Cutscene.Scene): the second paint
+    /// layer's vehicle colour, its dirt, its lamps on or off, the reflectivity the game gives it (Shine[4]) and
+    /// gta_vehicle_paint2's second shine (the sixth colour, exponent factor 6.8 x specular2FactorED / specularFactorED,
+    /// strength specular2ColorIntensityED² / specularColorFactorED). Null for peds and props.
+    /// </summary>
+    private static Dictionary<int, MaterialLook>? LooksOf(CutActor actor, ModelScene scene)
+    {
+      if (!scene.Materials.Any(m => m.Vehicle || m.Paint2Slot > 0))
+      {
+        return null;
+      }
+      var paint = actor.Paint;
+      var looks = new Dictionary<int, MaterialLook>();
+      foreach (var m in scene.Materials)
+      {
+        var look = new MaterialLook();
+        if (paint != null && m.Paint2Slot > 0 && m.Paint2Slot <= paint.Length)
+        {
+          var c = paint[m.Paint2Slot - 1];
+          look = look with { Paint2 = new Vector4(c[0], c[1], c[2], 1) };
+        }
+        if (m.Vehicle)
+        {
+          look = look with { DirtLevel = actor.Dirt, LightsOn = actor.LightsOn };
+          if (actor.Shine is { Length: >= 5 } shine)
+          {
+            look = look with { ReflectivePower = shine[4] };
+            if (m.HasSpecular2 && paint != null && paint.Length >= 6)
+            {
+              look = look with
+              {
+                Specular2Color = new Vector3(paint[5][0], paint[5][1], paint[5][2]),
+                Specular2Exponent = 6.8f * shine[2] / shine[0],
+                Specular2Strength = shine[3] * shine[3] / shine[1],
+              };
+            }
+          }
+        }
+        looks[m.Id] = look;
+      }
+      return looks;
     }
 
     /// <summary>A location's models, their light baked into their vertex colours.</summary>

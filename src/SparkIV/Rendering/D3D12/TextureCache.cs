@@ -90,6 +90,26 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     public GpuDescriptorHandle Handle(int number) => _heap.GetGPUDescriptorHandleForHeapStart() + number * (int)_descriptorSize;
 
+    /// <summary>A view's slot in the heap where <see cref="Reserve"/>'s owner writes its own view.</summary>
+    public CpuDescriptorHandle CpuHandle(int number) => _heap.GetCPUDescriptorHandleForHeapStart() + number * (int)_descriptorSize;
+
+    /// <summary>
+    /// A slot of the heap kept for the caller's own view (a target read by the shaders by number, as the textures are);
+    /// never given to a texture. 0 when the heap is full.
+    /// </summary>
+    public int Reserve()
+    {
+      lock (_sync)
+      {
+        int number = _free.Count > 0 ? _free.Pop() : _next < Capacity ? _next++ : 0;
+        if (number > 0)
+        {
+          _uses[number] = 1;
+        }
+        return number;
+      }
+    }
+
     /// <summary>
     /// A texture's number for a blob, counted as used once more (made on first use: its copies recorded into
     /// <paramref name="list"/>, the upload buffers added to <paramref name="uploads"/> for the caller to free once the

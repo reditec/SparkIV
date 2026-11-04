@@ -122,6 +122,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Exposure = c.Exposure,
       PedAoScale = c.PedAoMultiplier,
       AoScale = c.AoMultiplier,
+      // gDirectionalLight.w (the page's pedShineScale.x).
+      ShineScale = c.DirectionalLightW,
     };
 
     private static ToneParams ToneOf(TimeCycle c) => new ToneParams
