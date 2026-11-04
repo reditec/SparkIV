@@ -1,6 +1,6 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 3, textures** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
+Status: **step 4a, the cast** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
 Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
 
 ## Why
@@ -18,6 +18,8 @@ timeline, status bar, dialogs) stays; only the drawing area changes.
 | `PanelSwapChain` | Composition swap chain (`CreateSwapChainForComposition`, flip-discard, 3 × B8G8R8A8, `FrameLatencyWaitableObject`, maximum latency 2) set on the WinUI `SwapChainPanel` through `ISwapChainPanelNative::SetSwapChain` (IID `63aad0b8-7c24-40ff-85a8-640d944cc325`, vtable slot 3). Buffers in pixels (`ActualSize × CompositionScale`), shown at `1 / CompositionScale` via `IDXGISwapChain2.MatrixTransform`. An RTV per buffer, one D32 depth buffer, per buffer a command allocator and the fence mark of its last frame. |
 | `MeshRenderer` | Root signature: 44 root constants (row-major view-projection, the instance's model-to-scene matrix, light direction + ambient, the part's material: cut-out, dirt mask) and a descriptor table with the texture (t0), a static anisotropic (16×) wrapping sampler. HLSL compiled at run time with DXC (`vs_6_0`/`ps_6_0`) to DXIL. Per model its meshes in one vertex buffer (position, normal, texture coordinates, vertex alpha: 36 bytes) and one 32-bit index buffer, copied from upload heaps into default heaps; a part per mesh (index range, texture, pass). Models are drawn as instances. Passes: solid (cut-out texels clipped at alpha 0.5), then decals (alpha-blended, no depth write, pulled forward by a depth bias; dirt decals' alpha = dot(texel, dirt mask) × vertex alpha) and see-through materials (alpha-blended, no depth write, not sorted yet). Glass and hidden planes left out for now. Lambert + ambient, only the first texture layer, both faces drawn. Draws into any target. |
 | `TextureCache` | The textures of the models' `Textures` blobs, each blob made once (by reference), with a shader resource view in one shader-visible heap (65 536 views; number 0 is white). Blobs as the game has them ("SXT1", `ModelScene.Raw`): DXT1/3/5 straight as BC1/2/3, A8R8G8B8 as B8G8R8A8, L8 as R8 read as grey (view swizzle), with their mip levels as far as the data holds them (as the page's `uploadRaw`). PNG blobs (a cast's) decoded with System.Drawing, without mip levels. BC textures whose size isn't a multiple of 4 can't be made and are drawn white (counted). Uploads are sent in batches of about 256 MB. |
+| `ModelSource` | What a model draws: its checked meshes (`ModelPart.CheckedMeshes`: the level of detail and the variation the page shows too), materials, textures, and whether it moves with bones. Skinned models get a second vertex stream (four bone numbers and weights, 32 bytes); the bones' matrices of each skinned instance are written every frame into a slot of a persistently mapped upload buffer (four slots, 65 536 matrices each) and read as a root SRV (t1); bone numbers are clamped to the instance's bone count. |
+| `CutscenePose` (`Viewers/GtaIV/Pc`, GTA IV PC) | An actor's bones at any frame, the page's `sampledPose`/`findFollowers`/`gameHelper`/`worldMatrices`/`poseCast` in C#: the clip's tracks over the rest pose (positions linear, turns nlerp), helper bones following a tracked sibling, the ped helper bones by the game's rules (arm roll, upper-arm roll, forearm twist, neck roll, calf roll), the clip's model tracks placing a ped in the scene, removed bones (`[VEHICLE_REMOVAL]`, with what hangs on them) as zero matrices. Its input, `CutsceneMessages.CastMotion` (`Motions()`), is what `Section()` sends the page, taken out of it (the messages checked byte for byte before and after). Worn props (`WornProps()`) are fixed to their bone as for the page. |
 | `OffscreenTarget` | Drawing without a window: a B8G8R8A8 texture and a D32 depth buffer of a given size; after a frame the colour is copied into a readback buffer (rows every 256 bytes) and saved as PNG (System.Drawing). |
 | `CutsceneCamera` (`Viewers/GtaIV/Pc`, GTA IV PC) | A section's camera clip (camera_0) at any frame: the page's `filmCameraNow` in C# – positions linear, the turn by normalized linear interpolation, looking along its y with z up, FOV of the whole frame, not smoothed across a cut (> 25 cm or 5°). `ViewProjection`: near 0.1 m like the page. |
 
@@ -56,9 +58,13 @@ before and, with `D3D12CAP=<frames>` (`D3D12SIZE=WxH`, `D3D12TAG`, `D3D12FOV` fo
 field of view), draws those frames into an `OffscreenTarget` at the reference's size and saves them as PNG. The
 comparison with the game's picture is the same as for the page; the values are kept apart from the page's.
 
-Drawn so far: the location (all placed objects but mirror-only far versions) through the cutscene's camera, with its
-first texture layer (step 3). Not yet: the cast (needs skinning and the clips, step 4), terrain layers, normal and
-specular maps, vertex colours, glass, lighting, sky, water, post effects (steps 4–5).
+Drawn so far: the location (all placed objects but mirror-only far versions, their checked meshes only) through the
+cutscene's camera, with its first texture layer (step 3), and the cast posed at the frame with its worn props (step
+4a; `D3D12NOCAST=1` leaves it out), vehicles in their paint (`ModelSource.Tints`: a material's paint slot takes the
+actor's colour, as the page's `paint` uniform). Until 4a every level of detail of the location's models was drawn at
+once. Not yet: face shapes (a seam at Roman's neck in the intro), peds' hair (alpha as gloss, stipple + blend: Bernie's
+hair comes out dark), the second paint layer, vehicle dirt and shine, animated textures, terrain layers, normal and specular maps, vertex colours, glass,
+lighting, sky, water, post effects (steps 4b–5).
 The differences are therefore large; what the run shows now is that framing, camera and geometry match the game.
 First check (bc_1, 13 references): walls, door frames, pipes and furniture lie exactly over the game's, also at the
 reference with a frozen FOV (s3 f994.50); a section with its location takes about 5–10 s. Full run (2026-11-04): all
