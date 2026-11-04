@@ -57,11 +57,24 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     // The render thread's state.
     private MeshRenderer? _renderer;
-    private IReadOnlyList<CutActor> _actors = Array.Empty<CutActor>();
     private readonly Dictionary<CutActor, int[]> _castInstances = new Dictionary<CutActor, int[]>();
-    private CutsceneLocation? _location;
-    private bool _rebuild;
     private float _far = 1000;
+
+    // Models go onto the GPU on a thread of their own, one load at a time (the drawing goes on meanwhile): the cast in
+    // group 1, each location (by its origin's key, as CutsceneView keeps them) in a group of its own.
+    private const int CastGroup = 1;
+    private readonly System.Threading.SemaphoreSlim _loading = new System.Threading.SemaphoreSlim(1, 1);
+    private sealed class LocationGroup
+    {
+      public int Group;
+      public int[] Instances = Array.Empty<int>();
+      public bool Registered;
+    }
+    private readonly Dictionary<string, LocationGroup> _locations = new Dictionary<string, LocationGroup>();
+    private string? _shownLocation;
+    private int _nextGroup = 2;
+    // Orders that need the renderer, held until the first frame has it.
+    private readonly List<Action> _waiting = new List<Action>();
     private Dictionary<CutActor, CutscenePose> _poses = new Dictionary<CutActor, CutscenePose>();
     private CutsceneCamera? _camera;
     private bool _useCamera = true;
@@ -83,23 +96,182 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     private void Tell(Action action) => _dispatcher.TryEnqueue(() => action());
 
-    /// <summary>Every actor of the scene (its models put on the GPU; shown while a section has it).</summary>
-    public void SetCast(IReadOnlyList<CutActor> actors) => Order(() =>
+    /// <summary>Every actor of the scene (its models put on the GPU in the background; shown while a section has it).</summary>
+    public void SetCast(IReadOnlyList<CutActor> actors)
     {
-      _actors = actors.ToList();
-      _rebuild = true;
+      var list = actors.ToList();
+      Order(() => Load(renderer =>
+      {
+        var sources = list.Select(a => CutsceneDrawing.SourcesOf(a)).ToList();
+        var prepared = renderer.Prepare(sources.SelectMany(s => s).ToList());
+        return () =>
+        {
+          renderer.RemoveGroup(CastGroup);
+          _castInstances.Clear();
+          var numbers = renderer.Register(prepared, CastGroup);
+          var min = new Vector3(float.MaxValue);
+          var max = new Vector3(float.MinValue);
+          int at = 0;
+          for (int a = 0; a < list.Count; a++)
+          {
+            var mine = numbers.Skip(at).Take(sources[a].Count).ToArray();
+            at += sources[a].Count;
+            _castInstances[list[a]] = mine.Select(n => renderer.AddInstance(n, Matrix4x4.Identity)).ToArray();
+            foreach (int n in mine)
+            {
+              if (renderer.Bounds(n) is var (lo, hi))
+              {
+                min = Vector3.Min(min, lo);
+                max = Vector3.Max(max, hi);
+              }
+            }
+          }
+          if (min.X <= max.X)
+          {
+            _center = (min + max) * 0.5f;
+            _radius = Math.Max(0.5f, (max - min).Length() * 0.5f);
+          }
+          ShowActors();
+          LogScene(renderer, "cast: " + list.Count + " actors");
+        };
+      }));
+    }
+
+    /// <summary>
+    /// The location shown, by its origin's key (null: none), and how far the camera sees (its far plane). One not on the
+    /// GPU yet is put there in the background; the one shown so far stays until it is there.
+    /// </summary>
+    public void SetLocation(string? key, CutsceneLocation? location, float drawDistance) => Order(() =>
+    {
+      _far = Math.Max(1000f, drawDistance * 2);
+      _shownLocation = location != null ? key : null;
+      if (key != null && location != null && !_locations.ContainsKey(key))
+      {
+        LoadLocation(key, location);
+      }
+      ShowLocations();
     });
 
-    /// <summary>The location shown (null: none), and how far the camera sees (its far plane).</summary>
-    public void SetLocation(CutsceneLocation? location, float drawDistance) => Order(() =>
+    /// <summary>A location put on the GPU ahead, not shown (the next section's at another origin).</summary>
+    public void PrepareLocation(string key, CutsceneLocation location) => Order(() =>
     {
-      if (!ReferenceEquals(location, _location))
+      if (!_locations.ContainsKey(key))
       {
-        _location = location;
-        _rebuild = true;
+        LoadLocation(key, location);
       }
-      _far = Math.Max(1000f, drawDistance * 2);
     });
+
+    /// <summary>A location no longer wanted: off the GPU (or not put there, if it is still loading).</summary>
+    public void DropLocation(string key) => Order(() =>
+    {
+      if (_locations.Remove(key, out var group) && group.Registered && _renderer != null)
+      {
+        _renderer.RemoveGroup(group.Group);
+      }
+    });
+
+    private void LoadLocation(string key, CutsceneLocation location)
+    {
+      var group = new LocationGroup { Group = _nextGroup++ };
+      _locations[key] = group;
+      var objects = CutsceneDrawing.DrawnObjects(location).ToList();
+      var models = location.Models.ToList();
+      Load(renderer =>
+      {
+        var prepared = renderer.Prepare(models.Select(m => ModelSource.Shown(m, false)).ToList());
+        return () =>
+        {
+          // Dropped (or another load for the key) meanwhile: not wanted any more.
+          if (!_locations.TryGetValue(key, out var now) || now != group)
+          {
+            renderer.Discard(prepared);
+            return;
+          }
+          var numbers = renderer.Register(prepared, group.Group);
+          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place)).ToArray();
+          group.Registered = true;
+          ShowLocations();
+          LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
+        };
+      });
+    }
+
+    /// <summary>
+    /// Work for the GPU on a loading thread (one at a time): <paramref name="prepare"/> makes the models there and gives
+    /// back what the render thread then does with them (at the start of a frame).
+    /// </summary>
+    private void Load(Func<MeshRenderer, Action> prepare)
+    {
+      if (_renderer is not MeshRenderer renderer)
+      {
+        _waiting.Add(() => Load(prepare));
+        return;
+      }
+      _pendingLoads++;
+      System.Threading.Tasks.Task.Run(async () =>
+      {
+        await _loading.WaitAsync();
+        var watch = Stopwatch.StartNew();
+        try
+        {
+          var then = prepare(renderer);
+          long ms = watch.ElapsedMilliseconds;
+          Order(() =>
+          {
+            then();
+            _pendingLoads--;
+            D3D12Device.Log($"loaded in the background in {ms} ms");
+            if (_pendingLoads == 0)
+            {
+              Tell(() => Loaded?.Invoke());
+            }
+          });
+        }
+        catch (Exception ex)
+        {
+          D3D12Device.Log("loading failed: " + ex);
+          Order(() => _pendingLoads--);
+        }
+        finally
+        {
+          _loading.Release();
+        }
+      });
+    }
+
+    private int _pendingLoads;
+
+    private void ShowLocations()
+    {
+      if (_renderer == null)
+      {
+        return;
+      }
+      // The one asked for once it is on the GPU; until then the one shown before stays (none: none).
+      if (_shownLocation == null)
+      {
+        _visibleLocation = null;
+      }
+      else if (_locations.TryGetValue(_shownLocation, out var wanted) && wanted.Registered)
+      {
+        _visibleLocation = _shownLocation;
+      }
+      foreach (var (key, group) in _locations)
+      {
+        foreach (int instance in group.Instances)
+        {
+          _renderer.SetVisible(instance, key == _visibleLocation);
+        }
+      }
+    }
+
+    private string? _visibleLocation;
+
+    private static void LogScene(MeshRenderer renderer, string what)
+    {
+      var textures = renderer.TextureStats;
+      D3D12Device.Log($"{what} on the GPU; now {renderer.InstanceCount} instances, {renderer.Triangles} triangles, {textures.Made} textures ({textures.Bytes / 1048576} MB)");
+    }
 
     /// <summary>
     /// A section: its actors' motions, its camera (null: none), its frames a second and frames; at a frame, playing or
@@ -174,60 +346,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
     }
 
-    /// <summary>The cast and the location onto the GPU anew (a location changed: for now all of it, see #112 4b v2).</summary>
-    private void Rebuild(MeshRenderer renderer)
-    {
-      var watch = Stopwatch.StartNew();
-      renderer.Clear();
-      _castInstances.Clear();
-      var min = new Vector3(float.MaxValue);
-      var max = new Vector3(float.MinValue);
-      foreach (var actor in _actors)
-      {
-        var numbers = renderer.AddModels(CutsceneDrawing.SourcesOf(actor));
-        _castInstances[actor] = numbers.Select(n => renderer.AddInstance(n, Matrix4x4.Identity)).ToArray();
-        foreach (int n in numbers)
-        {
-          if (renderer.Bounds(n) is var (a, b))
-          {
-            min = Vector3.Min(min, a);
-            max = Vector3.Max(max, b);
-          }
-        }
-      }
-      if (min.X <= max.X)
-      {
-        _center = (min + max) * 0.5f;
-        _radius = Math.Max(0.5f, (max - min).Length() * 0.5f);
-      }
-      if (_location != null)
-      {
-        var numbers = renderer.AddModels(_location.Models);
-        foreach (var o in CutsceneDrawing.DrawnObjects(_location))
-        {
-          renderer.AddInstance(numbers[o.Model], o.Place);
-        }
-      }
-      ShowActors();
-      var textures = renderer.TextureStats;
-      D3D12Device.Log($"scene on the GPU: {_actors.Count} actors, location {(_location != null ? _location.Objects.Count + " objects" : "none")}, " +
-                      $"{renderer.InstanceCount} instances, {renderer.Triangles} triangles, {textures.Made} textures ({textures.Bytes / 1048576} MB) in {watch.ElapsedMilliseconds} ms");
-      Tell(() => Loaded?.Invoke());
-    }
-
     public (Matrix4x4 ViewProjection, Vector3 ToLight, float Ambient) Update(MeshRenderer renderer, double now, int width, int height)
     {
-      _renderer = renderer;
+      if (_renderer == null)
+      {
+        _renderer = renderer;
+        foreach (var waiting in _waiting)
+        {
+          waiting();
+        }
+        _waiting.Clear();
+      }
       while (_orders.TryDequeue(out var order))
       {
         order();
-      }
-      if (_rebuild)
-      {
-        _rebuild = false;
-        Rebuild(renderer);
-        // (The time it took isn't played over.)
-        _last = 0;
       }
 
       // The clock, as the page's tick: on by the time passed, stopping at the section's end.

@@ -37,7 +37,6 @@ namespace SparkIV.WinUI.Rendering.D3D12
   public sealed class D3D12Device : IDisposable
   {
     private readonly ID3D12Fence _fence;
-    private readonly AutoResetEvent _fenceEvent = new AutoResetEvent(false);
     private ulong _fenceValue;
     private readonly ID3D12InfoQueue? _infoQueue;
 
@@ -105,23 +104,36 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12CommandQueue Queue { get; }
     public string AdapterName { get; } = "";
 
-    /// <summary>A mark on the queue: the value the fence takes once the GPU has done everything sent so far.</summary>
+    private readonly object _signalLock = new object();
+
+    /// <summary>
+    /// A mark on the queue: the value the fence takes once the GPU has done everything sent so far. From any thread
+    /// (the render thread and a loading thread send to the same queue).
+    /// </summary>
     public ulong Signal()
     {
-      ulong value = ++_fenceValue;
-      Queue.Signal(_fence, value);
-      return value;
-    }
-
-    /// <summary>Waits until the GPU has reached a mark of <see cref="Signal"/>.</summary>
-    public void Wait(ulong value)
-    {
-      if (_fence.CompletedValue < value)
+      lock (_signalLock)
       {
-        _fence.SetEventOnCompletion(value, _fenceEvent.SafeWaitHandle.DangerousGetHandle());
-        _fenceEvent.WaitOne();
+        ulong value = ++_fenceValue;
+        Queue.Signal(_fence, value);
+        return value;
       }
     }
+
+    /// <summary>Waits until the GPU has reached a mark of <see cref="Signal"/> (from any thread).</summary>
+    public void Wait(ulong value)
+    {
+      if (_fence.CompletedValue >= value)
+      {
+        return;
+      }
+      var done = _fenceEvents.Value!;
+      _fence.SetEventOnCompletion(value, done.SafeWaitHandle.DangerousGetHandle());
+      done.WaitOne();
+    }
+
+    // An event per thread to wait on (the render thread and a loading thread wait at the same time).
+    private readonly ThreadLocal<AutoResetEvent> _fenceEvents = new ThreadLocal<AutoResetEvent>(() => new AutoResetEvent(false), trackAllValues: true);
 
     /// <summary>Waits until the GPU has done everything sent so far.</summary>
     public void WaitIdle() => Wait(Signal());
@@ -175,7 +187,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
       FlushMessages();
       _infoQueue?.Dispose();
       _fence.Dispose();
-      _fenceEvent.Dispose();
+      foreach (var e in _fenceEvents.Values)
+      {
+        e.Dispose();
+      }
+      _fenceEvents.Dispose();
       Queue.Dispose();
       Device.Dispose();
       Factory.Dispose();

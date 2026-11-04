@@ -144,9 +144,16 @@ float4 PSMain(VsOut input) : SV_Target
     private const int PaletteCapacity = 65536;
     private const int PaletteSlots = 4;
 
-    private enum Pass : byte { Solid, Blend, Decal }
+    internal enum Pass : byte { Solid, Blend, Decal }
 
-    private readonly struct Part
+    /// <summary>Models made on the GPU by <see cref="Prepare"/> (any thread), not yet drawn: <see cref="Register"/> adds them.</summary>
+    public sealed class PreparedModels
+    {
+      internal PreparedModels(List<Model?> models) => Models = models;
+      internal List<Model?> Models { get; }
+    }
+
+    internal readonly struct Part
     {
       public Part(uint start, uint count, int texture, Pass pass, bool cutout, Vector3? dirtMask, Vector3 tint)
       {
@@ -169,8 +176,10 @@ float4 PSMain(VsOut input) : SV_Target
       public Vector3? DirtMask { get; }
     }
 
-    private sealed class Model : IDisposable
+    internal sealed class Model : IDisposable
     {
+      public int Group;
+      public readonly List<int> Textures = new List<int>();
       public ID3D12Resource Vertices = null!;
       public ID3D12Resource Indices = null!;
       public ID3D12Resource? Skin;
@@ -202,14 +211,21 @@ float4 PSMain(VsOut input) : SV_Target
     public int DrawCalls { get; private set; }
 
     /// <summary>Shows or hides an instance (an actor not in the section played).</summary>
-    public void SetVisible(int instance, bool visible) => _instances[instance].Visible = visible;
+    public void SetVisible(int instance, bool visible)
+    {
+      if (_instances[instance] is Instance i)
+      {
+        i.Visible = visible;
+      }
+    }
 
     private readonly D3D12Device _device;
     private readonly TextureCache _textures;
     private readonly ID3D12RootSignature _rootSignature;
     private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[6];
     private readonly List<Model?> _models = new List<Model?>();
-    private readonly List<Instance> _instances = new List<Instance>();
+    // (Removed ones stay as null: numbers given out keep their meaning.)
+    private readonly List<Instance?> _instances = new List<Instance?>();
     private readonly ID3D12Resource _palette;
     private readonly unsafe Matrix4x4* _paletteMapped;
     private int _paletteSlot;
@@ -290,14 +306,14 @@ float4 PSMain(VsOut input) : SV_Target
     }
 
     /// <summary>The number of instances and of the triangles they draw.</summary>
-    public int InstanceCount => _instances.Count;
-    public long Triangles => _instances.Sum(i => (long)(_models[i.Model]?.IndexCount ?? 0) / 3);
+    public int InstanceCount => _instances.Count(i => i != null);
+    public long Triangles => _instances.Sum(i => i == null ? 0 : (long)(_models[i.Model]?.IndexCount ?? 0) / 3);
 
     /// <summary>Texture keys materials name that their model's textures don't hold (drawn white).</summary>
     public SortedSet<string> MissingTextures { get; } = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The textures made, those that couldn't be (drawn white), and their bytes on the GPU.</summary>
-    public (int Made, int Failed, long Bytes) TextureStats => (_textures.Count - 1, _textures.Failed, _textures.Bytes);
+    /// <summary>The textures on the GPU, those that couldn't be made (drawn white), and their bytes.</summary>
+    public (int Made, int Failed, long Bytes) TextureStats => (_textures.Count, _textures.Failed, _textures.Bytes);
 
     private static byte[] Compile(DxcShaderStage stage, string entryPoint)
     {
@@ -313,36 +329,124 @@ float4 PSMain(VsOut input) : SV_Target
     public int[] AddModels(IReadOnlyList<ModelScene> scenes) => AddModels(scenes.Select(s => ModelSource.Shown(s, false)).ToList());
 
     /// <summary>
-    /// Models onto the GPU with their textures (the GPU done before returning): per model its meshes' positions,
-    /// normals, texture coordinates and alpha in one vertex buffer (a skinned model's bones and weights in a second),
-    /// their indices (32-bit) in one index buffer, a part per mesh. Returns each model's number for
-    /// <see cref="AddInstance"/>; a model with nothing to draw still gets one (drawing nothing).
+    /// Models onto the GPU with their textures and drawn from now on (<see cref="Prepare"/> and <see cref="Register"/>
+    /// in one, on the drawing thread). Returns each model's number for <see cref="AddInstance"/>.
     /// </summary>
-    public int[] AddModels(IReadOnlyList<ModelSource> sources)
+    public int[] AddModels(IReadOnlyList<ModelSource> sources, int group = 0) => Register(Prepare(sources), group);
+
+    // The upload buffers sent and waited for after about this many bytes (a location: hundreds of MB).
+    private const long FlushBytes = 256L << 20;
+
+    /// <summary>
+    /// Models made on the GPU with their textures, from any thread (a loading one: the drawing goes on meanwhile; the
+    /// GPU done with the copies before returning): per model its meshes' positions, normals, texture coordinates and
+    /// alpha in one vertex buffer (a skinned model's bones and weights in a second), their indices (32-bit) in one index
+    /// buffer, a part per mesh. Not drawn until <see cref="Register"/>ed.
+    /// </summary>
+    public PreparedModels Prepare(IReadOnlyList<ModelSource> sources)
     {
       var d3d = _device.Device;
-      var numbers = new int[sources.Count];
+      var models = new List<Model?>(sources.Count);
       var uploads = new List<ID3D12Resource>();
-      using var allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
-      using var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
-      for (int s = 0; s < sources.Count; s++)
+      long pending = 0;
+      var allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
+      var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
+      void Send()
       {
-        numbers[s] = _models.Count;
-        _models.Add(Build(sources[s], list, uploads));
+        list.Close();
+        _device.Queue.ExecuteCommandList(list);
+        _device.WaitIdle();
+        foreach (var upload in uploads)
+        {
+          upload.Dispose();
+        }
+        uploads.Clear();
+        pending = 0;
       }
-      _textures.Flush();
-      list.Close();
-      _device.Queue.ExecuteCommandList(list);
-      _device.WaitIdle();
-      foreach (var upload in uploads)
+      try
       {
-        upload.Dispose();
+        foreach (var source in sources)
+        {
+          models.Add(Build(source, list, uploads, ref pending));
+          if (pending >= FlushBytes)
+          {
+            Send();
+            allocator.Reset();
+            list.Reset(allocator, null);
+          }
+        }
+        Send();
+      }
+      finally
+      {
+        list.Dispose();
+        allocator.Dispose();
+      }
+      return new PreparedModels(models);
+    }
+
+    /// <summary>Prepared models drawn from now on (the drawing thread), in a group (see <see cref="RemoveGroup"/>); their numbers.</summary>
+    public int[] Register(PreparedModels prepared, int group = 0)
+    {
+      var numbers = new int[prepared.Models.Count];
+      for (int i = 0; i < numbers.Length; i++)
+      {
+        numbers[i] = _models.Count;
+        if (prepared.Models[i] is Model model)
+        {
+          model.Group = group;
+        }
+        _models.Add(prepared.Models[i]);
       }
       return numbers;
     }
 
-    private Model? Build(ModelSource source, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
+    /// <summary>A group's models and their instances gone (the drawing thread; the GPU done with them first), their textures let go.</summary>
+    public void RemoveGroup(int group)
     {
+      _device.WaitIdle();
+      for (int i = 0; i < _instances.Count; i++)
+      {
+        if (_instances[i] is Instance instance && _models[instance.Model] is Model model && model.Group == group)
+        {
+          _instances[i] = null;
+        }
+      }
+      for (int i = 0; i < _models.Count; i++)
+      {
+        if (_models[i] is Model model && model.Group == group)
+        {
+          Free(model);
+          _models[i] = null;
+        }
+      }
+    }
+
+    /// <summary>Prepared models never registered let go (the GPU is done with them: Prepare waited).</summary>
+    public void Discard(PreparedModels prepared)
+    {
+      foreach (var model in prepared.Models)
+      {
+        if (model != null)
+        {
+          Free(model);
+        }
+      }
+      prepared.Models.Clear();
+    }
+
+    private void Free(Model model)
+    {
+      foreach (int texture in model.Textures)
+      {
+        _textures.Release(texture);
+      }
+      model.Dispose();
+    }
+
+    private Model? Build(ModelSource source, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, ref long pending)
+    {
+      var textures = new List<int>();
       var materials = new Dictionary<int, SceneMaterial>();
       foreach (var m in source.Materials)
       {
@@ -401,18 +505,30 @@ float4 PSMain(VsOut input) : SV_Target
         byte[]? blob = material.TextureKey != null && source.Textures.TryGetValue(material.TextureKey, out var found) ? found : null;
         if (material.TextureKey != null && blob == null)
         {
-          MissingTextures.Add(material.TextureKey);
+          lock (MissingTextures)
+          {
+            MissingTextures.Add(material.TextureKey);
+          }
         }
         var pass = material.Decal || material.DirtMask != null ? Pass.Decal : material.Blend ? Pass.Blend : Pass.Solid;
         var dirt = material.DirtMask is { Length: >= 3 } d ? new Vector3(d[0], d[1], d[2]) : (Vector3?)null;
         var tint = source.Tints != null && source.Tints.TryGetValue(material.Id, out var t) ? t : Vector3.One;
-        parts.Add(new Part(start, (uint)mesh.Indices.Length, _textures.Get(blob), pass, material.Cutout || material.Stipple, dirt, tint));
+        int texture = _textures.Acquire(blob, list, uploads, out long textureBytes);
+        pending += textureBytes;
+        textures.Add(texture);
+        parts.Add(new Part(start, (uint)mesh.Indices.Length, texture, pass, material.Cutout || material.Stipple, dirt, tint));
       }
       if (indices.Count == 0)
       {
+        foreach (int texture in textures)
+        {
+          _textures.Release(texture);
+        }
         return null;
       }
       var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray() };
+      model.Textures.AddRange(textures);
+      pending += (long)vertices.Count * 4 + (long)indices.Count * 4 + (skin?.Count ?? 0) * 4L;
       model.Vertices = Upload(vertices.ToArray(), list, uploads, out ulong vertexBytes);
       model.Indices = Upload(indices.ToArray(), list, uploads, out ulong indexBytes);
       model.VertexView = new VertexBufferView(model.Vertices.GPUVirtualAddress, (uint)vertexBytes, VertexFloats * 4);
@@ -456,23 +572,31 @@ float4 PSMain(VsOut input) : SV_Target
     }
 
     /// <summary>A skinned instance's bones' matrices now (rest to now; see CutscenePose).</summary>
-    public void SetPalette(int instance, Matrix4x4[] palette) => _instances[instance].Palette = palette;
+    public void SetPalette(int instance, Matrix4x4[] palette)
+    {
+      if (_instances[instance] is Instance i)
+      {
+        i.Palette = palette;
+      }
+    }
 
     /// <summary>A model's box (its own space), or null when it draws nothing.</summary>
     public (Vector3 Min, Vector3 Max)? Bounds(int model) =>
       model >= 0 && model < _models.Count && _models[model] is Model m ? (m.Min, m.Max) : null;
 
-    /// <summary>All models, instances and textures gone (the GPU done with them first).</summary>
+    /// <summary>All models and instances gone (the GPU done with them first), their textures let go.</summary>
     public void Clear()
     {
       _device.WaitIdle();
       foreach (var model in _models)
       {
-        model?.Dispose();
+        if (model != null)
+        {
+          Free(model);
+        }
       }
       _models.Clear();
       _instances.Clear();
-      _textures.Reset();
     }
 
     /// <summary>Clears the target and draws every instance as seen with the view-projection: solid, then blended.</summary>
@@ -495,8 +619,12 @@ float4 PSMain(VsOut input) : SV_Target
       int used = 0;
       foreach (var instance in _instances)
       {
+        if (instance == null)
+        {
+          continue;
+        }
         instance.PaletteAddress = 0;
-        if (instance.Palette is Matrix4x4[] palette && palette.Length > 0 && used + palette.Length <= PaletteCapacity)
+        if (instance.Visible && instance.Palette is Matrix4x4[] palette && palette.Length > 0 && used + palette.Length <= PaletteCapacity)
         {
           long at = (long)_paletteSlot * PaletteCapacity + used;
           fixed (Matrix4x4* source = palette)
@@ -534,7 +662,7 @@ float4 PSMain(VsOut input) : SV_Target
       var material = stackalloc float[MaterialFloats];
       foreach (var instance in _instances)
       {
-        if (!instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
+        if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => p.Pass == pass))
         {
           continue;
         }

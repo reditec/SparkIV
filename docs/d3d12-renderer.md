@@ -101,8 +101,16 @@ time, followed gently as the page does) and the camera button. The render thread
 frame, keeps the clock as the page's `tick` does, poses the section's actors (the others hidden) and looks through the
 section's camera (else it goes round the cast). It reports the frame it shows, its frames per second while playing and
 when the rate falls below 30 or is back, as the page's `frame`, `fps` and `fpsBelow`, so the status bar and
-`SparkIV-fps.log` work as before. For now a new location puts the whole scene onto the GPU again on the render
-thread (a pause when a section at another origin starts); loading on a thread of its own comes next.
+`SparkIV-fps.log` work as before.
+
+Models go onto the GPU on a loading thread, one load at a time, while the frames go on (`MeshRenderer.Prepare`, any
+thread, its copies in its own command list on the same queue; `Register`, the render thread, at the start of a frame):
+the cast in one group, each location (by its origin's key, as the view keeps them: the shown section's and the next
+one's, `PrepareLocation`) in a group of its own, dropped with `RemoveGroup` when the view drops it. The location asked
+for is shown once it is on the GPU; until then the one shown before stays. Textures are counted by the models using
+them and freed with the last (their views' slots used again). The fence is safe from several threads (an event per
+thread). In this mode the view no longer makes the page's location messages (the harbour's took seconds and
+gigabytes).
 
 ## Next steps (#112)
 

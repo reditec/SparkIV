@@ -674,6 +674,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
+      // (The player: onto the GPU ahead, in the background.)
+      _player?.PrepareLocation(key, _locations[key]);
       await SendLocationScene(key, paced: true);
       // A section there chosen meanwhile: shown now; else on to the next one.
       LoadLocation();
@@ -689,6 +691,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       _locations.Remove(key);
       _locationVisibleOf.Remove(key);
+      _player?.DropLocation(key);
     }
 
     /// <summary>One location loaded (some seconds, in the background) and kept; false when it couldn't be.</summary>
@@ -798,6 +801,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
+      if (_player != null)
+      {
+        // The native renderer takes the location as it is (CutscenePlayer): no page messages made (the harbour's took
+        // seconds and gigabytes); marked as there for the section changes.
+        _locationVisibleOf[key] = new List<int>();
+        return;
+      }
       int first = 100000 + _locationKeys.IndexOf(key) * LocationIdBand;
       // (Filled on the other thread while the parts are made: kept here only once they all are.)
       var visible = new List<int>();
@@ -836,7 +846,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      _player?.SetLocation(s_location ? _document.Location : null, _drawDistance);
+      _player?.SetLocation(s_location ? _locationKey : null, _document.Location, _drawDistance);
       _ = SendLocationScene(_locationKey);
       Post(_document.Location.LightsMessage(_document.Location.LightVolume != null ? LocationUrl(CutsceneLocation.LightVolumeKey) : null,
                                             _document.Location.Corona != null ? LocationUrl(CutsceneLocation.CoronaKey) : null));
@@ -1113,7 +1123,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private void Location_Click(object sender, RoutedEventArgs e)
     {
       s_location = LocationButton.IsChecked == true;
-      _player?.SetLocation(s_location ? _document.Location : null, _drawDistance);
+      _player?.SetLocation(s_location ? _locationKey : null, _document.Location, _drawDistance);
       if (s_location)
       {
         LoadLocation();

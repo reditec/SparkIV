@@ -29,11 +29,13 @@ using Vortice.DXGI;
 namespace SparkIV.WinUI.Rendering.D3D12
 {
   /// <summary>
-  /// The native renderer's textures (#112 step 3): each texture of a <see cref="SparkIV.WinUI.Viewers.ModelScene"/>
-  /// (its <c>Textures</c> blobs) made once on the GPU, with a shader resource view in one shader-visible heap. Blobs
-  /// as the game has them ("SXT1", see ModelScene.Raw: DXT1/3/5 straight as BC1/2/3, A8R8G8B8 as B8G8R8A8, L8 as R8
-  /// read as grey) keep their mip levels as far as the data holds them, as the page's uploadRaw; PNG blobs (a cast's)
-  /// are decoded, without mip levels. Number 0 is plain white (no texture, or one that can't be made). No WinUI here.
+  /// The native renderer's textures (#112): each texture of a <see cref="SparkIV.WinUI.Viewers.ModelScene"/> (its
+  /// <c>Textures</c> blobs) made once on the GPU, with a shader resource view in one shader-visible heap, counted by
+  /// the models using it and freed when the last lets go (its view's slot used again). Blobs as the game has them
+  /// ("SXT1", see ModelScene.Raw: DXT1/3/5 straight as BC1/2/3, A8R8G8B8 as B8G8R8A8, L8 as R8 read as grey) keep their
+  /// mip levels as far as the data holds them, as the page's uploadRaw; PNG blobs (a cast's) are decoded, without mip
+  /// levels. Number 0 is plain white (no texture, or one that can't be made). Safe from several threads: the copies go
+  /// into the caller's command list (a loading thread's). No WinUI here.
   /// </summary>
   public sealed class TextureCache : IDisposable
   {
@@ -43,18 +45,17 @@ namespace SparkIV.WinUI.Rendering.D3D12
     private const int MappingDefault = 0 | (1 << 3) | (2 << 6) | (3 << 9) | (1 << 12);
     private const int MappingGrey = 0 | (0 << 3) | (0 << 6) | (5 << 9) | (1 << 12);
 
-    // Uploads are sent and waited for after about this many bytes (the location's textures: hundreds of MB).
-    private const long FlushBytes = 256L << 20;
-
+    private readonly object _sync = new object();
     private readonly D3D12Device _device;
     private readonly ID3D12DescriptorHeap _heap;
     private readonly uint _descriptorSize;
-    private readonly List<ID3D12Resource> _textures = new List<ID3D12Resource>();
+    private readonly ID3D12Resource?[] _textures = new ID3D12Resource?[Capacity];
+    private readonly long[] _bytes = new long[Capacity];
+    private readonly int[] _uses = new int[Capacity];
+    private readonly byte[]?[] _blobOf = new byte[]?[Capacity];
     private readonly Dictionary<byte[], int> _known = new Dictionary<byte[], int>(ReferenceEqualityComparer.Instance);
-    private readonly List<ID3D12Resource> _pendingUploads = new List<ID3D12Resource>();
-    private long _pendingBytes;
-    private ID3D12CommandAllocator? _allocator;
-    private ID3D12GraphicsCommandList? _list;
+    private readonly Stack<int> _free = new Stack<int>();
+    private int _next;
 
     public TextureCache(D3D12Device device)
     {
@@ -62,72 +63,105 @@ namespace SparkIV.WinUI.Rendering.D3D12
       _heap = device.Device.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
                                                                                Capacity, DescriptorHeapFlags.ShaderVisible));
       _descriptorSize = device.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
-      Reset();
+      // Number 0: white, never freed.
+      using var allocator = device.Device.CreateCommandAllocator(CommandListType.Direct);
+      using var list = device.Device.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
+      var uploads = new List<ID3D12Resource>();
+      lock (_sync)
+      {
+        int white = Make(Format.B8G8R8A8_UNorm, 1, 1, new[] { (new byte[] { 255, 255, 255, 255 }, 4, 1) }, MappingDefault, list, uploads, out long bytes);
+        _uses[white] = 1;
+      }
+      list.Close();
+      device.Queue.ExecuteCommandList(list);
+      device.WaitIdle();
+      foreach (var upload in uploads)
+      {
+        upload.Dispose();
+      }
     }
 
     public ID3D12DescriptorHeap Heap => _heap;
 
-    /// <summary>Textures made, textures that couldn't be (drawn white), and their bytes on the GPU.</summary>
-    public int Count => _textures.Count;
+    /// <summary>Textures on the GPU (white not counted), those that couldn't be made (drawn white), their bytes.</summary>
+    public int Count { get { lock (_sync) { return _known.Count; } } }
     public int Failed { get; private set; }
     public long Bytes { get; private set; }
 
     public GpuDescriptorHandle Handle(int number) => _heap.GetGPUDescriptorHandleForHeapStart() + number * (int)_descriptorSize;
 
-    /// <summary>All textures gone but white (the GPU done with them first).</summary>
-    public void Reset()
-    {
-      _device.WaitIdle();
-      foreach (var texture in _textures)
-      {
-        texture.Dispose();
-      }
-      _textures.Clear();
-      _known.Clear();
-      Failed = 0;
-      Bytes = 0;
-      var white = new byte[] { 255, 255, 255, 255 };
-      Make(Format.B8G8R8A8_UNorm, 1, 1, new[] { (white, 4, 1) }, MappingDefault);
-      Flush();
-    }
-
     /// <summary>
-    /// A texture's number for a blob (made once per blob, the upload recorded; <see cref="Flush"/> sends it), or 0
-    /// for none.
+    /// A texture's number for a blob, counted as used once more (made on first use: its copies recorded into
+    /// <paramref name="list"/>, the upload buffers added to <paramref name="uploads"/> for the caller to free once the
+    /// list is done); 0 (white) for none. <paramref name="bytes"/>: the upload bytes it added.
     /// </summary>
-    public int Get(byte[]? blob)
+    public int Acquire(byte[]? blob, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out long bytes)
     {
+      bytes = 0;
       if (blob == null || blob.Length < 4)
       {
         return 0;
       }
-      if (_known.TryGetValue(blob, out int number))
+      lock (_sync)
       {
+        if (_known.TryGetValue(blob, out int number))
+        {
+          if (number != 0)
+          {
+            _uses[number]++;
+          }
+          return number;
+        }
+        number = 0;
+        try
+        {
+          number = blob[0] == 'S' && blob[1] == 'X' && blob[2] == 'T' && blob[3] == '1' ? MakeRaw(blob, list, uploads, out bytes) : MakeImage(blob, list, uploads, out bytes);
+        }
+        catch (Exception ex)
+        {
+          D3D12Device.Log("texture not made: " + ex.Message);
+        }
+        if (number == 0)
+        {
+          Failed++;
+          return 0;
+        }
+        _known[blob] = number;
+        _blobOf[number] = blob;
+        _uses[number] = 1;
         return number;
       }
-      number = 0;
-      try
-      {
-        number = blob[0] == 'S' && blob[1] == 'X' && blob[2] == 'T' && blob[3] == '1' ? MakeRaw(blob) : MakeImage(blob);
-      }
-      catch (Exception ex)
-      {
-        D3D12Device.Log("texture not made: " + ex.Message);
-      }
-      if (number == 0)
-      {
-        Failed++;
-      }
-      _known[blob] = number;
-      if (_pendingBytes >= FlushBytes)
-      {
-        Flush();
-      }
-      return number;
     }
 
-    private int MakeRaw(byte[] blob)
+    /// <summary>A use of a texture ended; the last frees it (only once the GPU is done with it: the caller waits first).</summary>
+    public void Release(int number)
     {
+      if (number <= 0)
+      {
+        return;
+      }
+      lock (_sync)
+      {
+        if (--_uses[number] > 0)
+        {
+          return;
+        }
+        _textures[number]?.Dispose();
+        _textures[number] = null;
+        Bytes -= _bytes[number];
+        _bytes[number] = 0;
+        if (_blobOf[number] is byte[] blob)
+        {
+          _known.Remove(blob);
+        }
+        _blobOf[number] = null;
+        _free.Push(number);
+      }
+    }
+
+    private int MakeRaw(byte[] blob, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out long bytes)
+    {
+      bytes = 0;
       int format = BitConverter.ToInt32(blob, 4);
       int width = BitConverter.ToInt32(blob, 8);
       int height = BitConverter.ToInt32(blob, 12);
@@ -150,10 +184,10 @@ namespace SparkIV.WinUI.Rendering.D3D12
         {
           break;
         }
-        var bytes = new byte[size];
-        Buffer.BlockCopy(blob, offset, bytes, 0, size);
+        var bytesOfLevel = new byte[size];
+        Buffer.BlockCopy(blob, offset, bytesOfLevel, 0, size);
         offset += size;
-        data.Add((bytes, rowBytes, rows));
+        data.Add((bytesOfLevel, rowBytes, rows));
       }
       if (data.Count == 0)
       {
@@ -167,27 +201,30 @@ namespace SparkIV.WinUI.Rendering.D3D12
         3 => Format.B8G8R8A8_UNorm,
         _ => Format.R8_UNorm,
       };
-      return Make(dxgi, width, height, data.ToArray(), format == 4 ? MappingGrey : MappingDefault);
+      return Make(dxgi, width, height, data.ToArray(), format == 4 ? MappingGrey : MappingDefault, list, uploads, out bytes);
     }
 
-    private unsafe int MakeImage(byte[] blob)
+    private int MakeImage(byte[] blob, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out long bytes)
     {
       using var image = new Bitmap(new MemoryStream(blob));
       int width = image.Width, height = image.Height;
-      var bytes = new byte[width * height * 4];
+      var pixels = new byte[width * height * 4];
       var locked = image.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
       for (int y = 0; y < height; y++)
       {
-        System.Runtime.InteropServices.Marshal.Copy(locked.Scan0 + y * locked.Stride, bytes, y * width * 4, width * 4);
+        System.Runtime.InteropServices.Marshal.Copy(locked.Scan0 + y * locked.Stride, pixels, y * width * 4, width * 4);
       }
       image.UnlockBits(locked);
-      return Make(Format.B8G8R8A8_UNorm, width, height, new[] { (bytes, width * 4, height) }, MappingDefault);
+      return Make(Format.B8G8R8A8_UNorm, width, height, new[] { (pixels, width * 4, height) }, MappingDefault, list, uploads, out bytes);
     }
 
-    /// <summary>A texture with its levels' data (rows of bytes each), copied over an upload buffer; its number.</summary>
-    private unsafe int Make(Format format, int width, int height, (byte[] Bytes, int RowBytes, int Rows)[] levels, int mapping)
+    /// <summary>A texture with its levels' data (rows of bytes each), copied over an upload buffer; its number (0: no room).</summary>
+    private unsafe int Make(Format format, int width, int height, (byte[] Bytes, int RowBytes, int Rows)[] levels, int mapping,
+                            ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads, out long total)
     {
-      if (_textures.Count >= Capacity)
+      total = 0;
+      int number = _free.Count > 0 ? _free.Pop() : _next < Capacity ? _next++ : -1;
+      if (number < 0)
       {
         return 0;
       }
@@ -198,7 +235,6 @@ namespace SparkIV.WinUI.Rendering.D3D12
       // Each level's rows every 256 bytes, each level at a multiple of 512 bytes in the upload buffer.
       var offsets = new long[levels.Length];
       var pitches = new int[levels.Length];
-      long total = 0;
       for (int l = 0; l < levels.Length; l++)
       {
         total = (total + 511) & ~511L;
@@ -222,7 +258,6 @@ namespace SparkIV.WinUI.Rendering.D3D12
       }
       upload.Unmap(0);
 
-      var list = List();
       for (int l = 0; l < levels.Length; l++)
       {
         int w = Math.Max(1, width >> l), h = Math.Max(1, height >> l);
@@ -234,12 +269,10 @@ namespace SparkIV.WinUI.Rendering.D3D12
         list.CopyTextureRegion(new TextureCopyLocation(texture, (uint)l), 0, 0, 0, new TextureCopyLocation(upload, footprint), null);
       }
       list.ResourceBarrierTransition(texture, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
-      _pendingUploads.Add(upload);
-      _pendingBytes += total;
+      uploads.Add(upload);
+      _textures[number] = texture;
+      _bytes[number] = total;
       Bytes += total;
-
-      int number = _textures.Count;
-      _textures.Add(texture);
       var view = new ShaderResourceViewDescription
       {
         Format = format,
@@ -251,46 +284,18 @@ namespace SparkIV.WinUI.Rendering.D3D12
       return number;
     }
 
-    private ID3D12GraphicsCommandList List()
-    {
-      if (_list == null)
-      {
-        _allocator = _device.Device.CreateCommandAllocator(CommandListType.Direct);
-        _list = _device.Device.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, _allocator, null);
-      }
-      return _list;
-    }
-
-    /// <summary>Sends the recorded uploads and waits for the GPU (then the upload buffers are freed).</summary>
-    public void Flush()
-    {
-      if (_list != null)
-      {
-        _list.Close();
-        _device.Queue.ExecuteCommandList(_list);
-        _device.WaitIdle();
-        _list.Dispose();
-        _allocator!.Dispose();
-        _list = null;
-        _allocator = null;
-      }
-      foreach (var upload in _pendingUploads)
-      {
-        upload.Dispose();
-      }
-      _pendingUploads.Clear();
-      _pendingBytes = 0;
-    }
-
     public void Dispose()
     {
-      Flush();
       _device.WaitIdle();
-      foreach (var texture in _textures)
+      lock (_sync)
       {
-        texture.Dispose();
+        foreach (var texture in _textures)
+        {
+          texture?.Dispose();
+        }
+        Array.Clear(_textures);
+        _known.Clear();
       }
-      _textures.Clear();
       _heap.Dispose();
     }
   }
