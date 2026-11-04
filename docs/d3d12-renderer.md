@@ -150,6 +150,16 @@ visual tests it starts at the trace's value, `CLOUDPHASE`), below the horizon fa
 dome, and the near fog's share. Only the main view: the parabolic surroundings map and the water's mirror come with
 the water and shadows. In the app the player draws it through `IRenderScene.DrawBackground`.
 
+### The water (step 4f, first version)
+
+`CutsceneWater` (GTA IV PC) draws the location's water between the solid meshes and the see-through ones
+(`MeshRenderer.Draw`'s `afterSolid`, in the app `IRenderScene.DrawAfterSolid`): the water.dat quads with their vertex
+colours, and outside the sea grid round the camera with the page's swell and ripple simulation (made deterministic:
+the given time instead of the wall clock, a seeded random), the near field taken from a mask of the quads (their boxes,
+made on the CPU), Fresnel, the sun's glint and foam, the game's fog. Not yet: the mirrored scene (the mirror shows the
+sky only, so the sea comes out a little light), seeing through to the ground, the sun's shadow on it. Its simulation
+warms up over the first frames; inside, where the sea isn't simulated, there is nothing to warm up.
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

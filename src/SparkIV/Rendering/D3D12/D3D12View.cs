@@ -50,6 +50,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
                         int width, int height, SceneView view)
     {
     }
+
+    /// <summary>
+    /// Draws what goes between the solid meshes and the see-through ones (water; render thread, with its own states).
+    /// Nothing by default.
+    /// </summary>
+    void DrawAfterSolid(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
+                        Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view)
+    {
+    }
   }
 
   /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
@@ -170,7 +179,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
           var list = _swapChain.Begin();
           _toneMapper.BeginLight(list);
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
-          _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light);
+          _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
+                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view));
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
           bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);

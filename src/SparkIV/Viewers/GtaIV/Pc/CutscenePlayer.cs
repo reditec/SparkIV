@@ -74,10 +74,46 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, SkyParams.From(cycle, _lighting.Hour, phase));
     }
 
+    // The water (#112 4f): made on the render thread; the location shown's water put on the GPU when it changes.
+    private CutsceneWater? _water;
+    private CutsceneLocation? _waterLocation;
+    private bool _waterNew;
+
+    public void DrawAfterSolid(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
+                               Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view)
+    {
+      if (_lighting == null || _waterLocation == null || _waterLocation.Water.Count < 4)
+      {
+        return;
+      }
+      _water ??= new CutsceneWater(device, ToneMapper.LightFormat, PanelSwapChainFormats.Depth);
+      if (_waterNew)
+      {
+        _waterNew = false;
+        using var allocator = device.Device.CreateCommandAllocator(Vortice.Direct3D12.CommandListType.Direct);
+        using var upload = device.Device.CreateCommandList<Vortice.Direct3D12.ID3D12GraphicsCommandList>(0, Vortice.Direct3D12.CommandListType.Direct, allocator, null);
+        var uploads = new List<Vortice.Direct3D12.ID3D12Resource>();
+        _water.SetWater(_waterLocation, upload, uploads);
+        upload.Close();
+        device.Queue.ExecuteCommandList(upload);
+        device.WaitIdle();
+        foreach (var u in uploads)
+        {
+          u.Dispose();
+        }
+      }
+      var cycle = _lighting.CycleAt(view.Eye);
+      var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
+      // (Its simulation warms up over the first frames by itself.)
+      _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky), _time);
+    }
+
     public void Dispose()
     {
       _sky?.Dispose();
       _sky = null;
+      _water?.Dispose();
+      _water = null;
     }
     private readonly DispatcherQueue _dispatcher;
     private readonly ConcurrentQueue<Action> _orders = new ConcurrentQueue<Action>();
@@ -188,6 +224,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         _skyTextures = (location.Clouds, location.CloudDetail);
         _skyTexturesNew = true;
+      }
+      if (location != null && !ReferenceEquals(location, _waterLocation))
+      {
+        _waterLocation = location;
+        _waterNew = true;
       }
       if (key != null && location != null && !_locations.ContainsKey(key))
       {

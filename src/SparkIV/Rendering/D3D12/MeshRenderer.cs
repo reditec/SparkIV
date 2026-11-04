@@ -729,7 +729,8 @@ float4 PSMain(VsOut input) : SV_Target
     /// view-projection, in the frame's light: solid, then decals and see-through materials. Clears the depth.
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
-                            int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light)
+                            int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light,
+                            Action<ID3D12GraphicsCommandList>? afterSolid = null)
     {
       list.OMSetRenderTargets(renderTarget, depth);
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
@@ -783,15 +784,26 @@ float4 PSMain(VsOut input) : SV_Target
       frame[38] = light.PedAoScale;
       frame[39] = light.AoScale;
 
-      list.SetGraphicsRootSignature(_rootSignature);
-      list.SetDescriptorHeaps(_textures.Heap);
-      list.SetGraphicsRootConstantBufferView(3, _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes));
-      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-
-      foreach (var pass in new[] { Pass.Solid, Pass.Decal, Pass.Blend })
+      void Bind()
       {
-        DrawPass(list, pass);
+        list.OMSetRenderTargets(renderTarget, depth);
+        list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
+        list.RSSetScissorRect(width, height);
+        list.SetGraphicsRootSignature(_rootSignature);
+        list.SetDescriptorHeaps(_textures.Heap);
+        list.SetGraphicsRootConstantBufferView(3, _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes));
+        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
+      Bind();
+      DrawPass(list, Pass.Solid);
+      DrawPass(list, Pass.Decal);
+      // What goes between the solid scene and the see-through materials (the water), with its own states.
+      if (afterSolid != null)
+      {
+        afterSolid(list);
+        Bind();
+      }
+      DrawPass(list, Pass.Blend);
     }
 
     private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
