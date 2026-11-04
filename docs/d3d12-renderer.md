@@ -550,6 +550,39 @@ lamps and the sky). Worse: intro s6 f712.5 +0.27, s3 f749.75 +0.18, s6 f469.75 +
 (a small even lift; that frame's larger gap is Bernie's TV screen, white natively, dark on the page - not found),
 bc_1 s1 f144 +0.04. Guards: et01_aa s3 f49.75 2.55, intro s4 f420.5 2.95, bc_1 s1 f144 1.03, bc_3 s3 f357.25 6.35.
 
+**Cost of the map** (cutgen `D3D12BENCH=1`, Release, `SPARKIV_D3D12_DEBUG=0`, all frames; the bench now draws as a
+captured frame does: water, coronas, light volumes and the map; `D3D12NOPARABOLIC=1` without the map):
+
+| Case | with the map | without | the map |
+|---|---|---|---|
+| intro s4, 1920 x 1080, 2049 frames | mean 21.27 ms, median 21.27 | 20.44, 20.43 | +0.83 ms |
+| bc_3 s3, 1920 x 1061, 1038 frames | mean 12.05 ms, median 10.13 | 11.40, 9.57 | +0.65 ms (median +0.56) |
+
+Under a millisecond, so the page's cache (it draws the map again only when its key changes, ModelView.html ~3756-3759:
+the eye to three decimals, the visible meshes' count, the draw distance and the haze end, or the sky) isn't ported:
+the map is drawn every frame. (Compared with the earlier bench lines, intro s4 15.7 ms and bc_3 s3 10.6 ms, the rest of
+the rise is the glows, coronas, volumes, forward lamps and the fog's depth effect.)
+
+### Smaller fixes (2026-11-04, round 3)
+
+- **Render targets and colours without a texture** (ModelScene.cs ~1128-1134 and the material message's
+  `color = Color ?? (RenderTarget ? 0 : null)`, ~1608; the page's base colour when untextured, ModelView.html ~448):
+  a part without a texture takes the material's own colour, a render target (script_rt: a TV switched off) black.
+  Native drew them with the white default texture: Bernie's TV screen (PUB3Bern_GB_tv) was grey where the game and
+  the page show black. bc_1 s1 f940 3.59 -> 3.27 (page 3.25).
+- **The depth test less or equal** (ModelView.html ~3180-3184, the game's ZFUNC 4) for the main passes, the water's
+  mirror and the mirrored surroundings' map: a surface laid on another with the same vertices is drawn over it. (No
+  reference changed by it.)
+- Full run (all 72, one frame each): sum -0.47, nothing worse; bc_1 s1 f940 3.59 -> 3.27, f459.5 1.45 -> 1.30.
+  Native mean 3.345 (page 3.38).
+- Open: the intro galley's rubber mat (s3 f569.75, +1.83 against the page): the debug views show its texel black
+  already at level 0 (texture coordinates fine, no paint2/environment/layer flags), where the page shows a ribbed grey
+  mat; which mesh and texture native draws there is not found yet (the depth test made no difference).
+- cutgen's `D3D12DEBUGVIEW=<n>` (`MeshRenderer.DebugView`, `Params2.w`): the solid and see-through passes show 1 the
+  albedo, 2 the normal, 3 AO, 4 the light without albedo, 5 alpha, 6 the vertex colour, 7 the texture's texel, 8 flags
+  (paint2, environment, layers), 9 the texture at level 0, 10 the texture coordinates. `D3D12NODECALBELOW=1`, and the
+  diagnostics `LOCMATS=<text>` (the location's materials) and `GLASSINFO=1`.
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

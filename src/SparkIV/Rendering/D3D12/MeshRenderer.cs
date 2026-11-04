@@ -791,6 +791,17 @@ PsOut Shade(VsOut input, bool deferred)
   {
     rgb += albedo * vc * Dimmers[clamp((int)(input.alpha * 255 + 0.5), 0, 14)] * p.Misc.w * f.Params.y;
   }
+  // (Debug views, MeshRenderer.DebugView in f.Params2.w: 1 the albedo, 2 the normal (0.5 + 0.5 n), 3 AO, 4 the light
+  // without albedo, 5 the texture's alpha x the vertex's, 6 the vertex colour - each x the exposure, for the picture.)
+  uint debugView = (uint)(f.Params2.w + 0.5);
+  if (debugView != 0)
+  {
+    float3 dv = debugView == 1 ? albedo : debugView == 2 ? 0.5 + 0.5 * n : debugView == 3 ? ao.xxx : debugView == 4 ? lit
+              : debugView == 5 ? alpha.xxx : debugView == 6 ? vc : debugView == 7 ? texel.rgb
+              : debugView == 9 ? Tex[p.Tex.x].SampleLevel(Linear, uvP, 0).rgb : debugView == 10 ? float3(frac(input.uv), 0)
+              : float3((bits & FPaint2) != 0 ? 1 : 0, (bits & FEnv) != 0 ? 1 : 0, layers > 1 ? 1 : 0);
+    rgb = dv * (debugView == 4 ? 1 : f.Params.y);
+  }
   PsOut o;
   o.light = float4(rgb, deferred ? alpha : a);
   // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
@@ -1712,6 +1723,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // do here (checked: with Direct3D's default, clockwise, bc_1's hall showed the next room's wallpaper through
       // its walls).
       var both = RasterizerDescription.CullNone;
+      // The depth test less or equal, as the page's (ModelView.html ~3180-3184: the game's ZFUNC 4): a surface laid on
+      // another with the same vertices is drawn over it (the intro's galley mat ah_rubbermat over cj_black_rubber).
+      var depthLe = DepthStencilDescription.Default with { DepthFunc = ComparisonFunction.LessEqual };
+      var readLe = DepthStencilDescription.Read with { DepthFunc = ComparisonFunction.LessEqual };
       var front = new RasterizerDescription(CullMode.Back, FillMode.Solid) { FrontCounterClockwise = true };
       // A decal a little in front of the surface it lies on (nearer is less depth here).
       var pulled = both with { DepthBias = -16, SlopeScaledDepthBias = -1.0f };
@@ -1720,10 +1735,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         for (int cull = 0; cull < 2; cull++)
         {
           int at = Pipe(s == 1, Pass.Solid, cull == 1);
-          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, cull == 1 ? front : both, true));
-          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front : both, false));
-          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, decalBlend, DepthStencilDescription.Read, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled, true));
-          _pipelines[Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Default, cull == 1 ? front : both, false));
+          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, depthLe, cull == 1 ? front : both, true));
+          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, readLe, cull == 1 ? front : both, false));
+          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, decalBlend, readLe, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled, true));
+          _pipelines[Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, depthLe, cull == 1 ? front : both, false));
         }
       }
 
@@ -1824,7 +1839,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         SourceBlend = Blend.SourceAlpha, DestinationBlend = Blend.InverseSourceAlpha, BlendOperation = BlendOperation.Add,
         SourceBlendAlpha = Blend.Zero, DestinationBlendAlpha = Blend.One, BlendOperationAlpha = BlendOperation.Add,
       };
-      var parabolicState = Pipeline(false, parabolicBlend, DepthStencilDescription.Default, both, false);
+      var parabolicState = Pipeline(false, parabolicBlend, depthLe, both, false);
       parabolicState.VertexShader = Compile(DxcShaderStage.Vertex, "VSParabolic");
       parabolicState.PixelShader = Compile(DxcShaderStage.Pixel, "PSParabolic");
       _parabolicPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(parabolicState);
@@ -1864,7 +1879,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
           RasterizerState = mirrorCull,
           BlendState = k == 0 ? BlendDescription.Opaque : BlendDescription.AlphaBlend,
-          DepthStencilState = k == 0 ? DepthStencilDescription.Default : DepthStencilDescription.Read,
+          DepthStencilState = k == 0 ? depthLe : readLe,
           RenderTargetFormats = new[] { targetFormat },
           DepthStencilFormat = PanelSwapChainFormats.Depth,
           SampleDescription = new SampleDescription(MirrorSamples, 0),
@@ -2518,6 +2533,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
                 });
         var dirt = material.DirtMask is { Length: >= 3 } dm ? new Vector3(dm[0], dm[1], dm[2]) : (Vector3?)null;
         var tint = source.Tints != null && source.Tints.TryGetValue(material.Id, out var t) ? t : Vector3.One;
+        // Without a texture a colour of its own, a render target (script_rt: a TV switched off) black - the page's
+        // material color (ModelScene's message: Color ?? (RenderTarget ? 0 : null)), its base colour when untextured.
+        if (!textured && (material.Color is { Length: >= 3 } || material.RenderTarget))
+        {
+          tint = material.Color is { Length: >= 3 } own ? new Vector3(own[0], own[1], own[2]) : Vector3.Zero;
+        }
         // Its kind for the light (see the shader): vehicles are never baked; a glowing material only with a texture,
         // and only solid (the see-through ones glow apart: not yet).
         bool baked = source.Baked && !material.Vehicle;
@@ -2793,6 +2814,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // The mirrored surroundings' map (outside: the caller hands the sky's drawing into it), read by the shine.
       frame[45] = light.GlobalScalarsW;
       frame[46] = 0;
+      frame[47] = DebugView;
       if (parabolicSky != null && !NoParabolic)
       {
         DrawParabolic(list, eye, parabolicSky, parabolicHaze, light.DrawReach);
@@ -3649,6 +3671,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
       }
     }
+
+    /// <summary>A debug view of the solid and see-through passes (0 none; see the shader's Shade: 1 albedo, 2 normal, 3 AO, 4 light, 5 alpha, 6 vertex colour).</summary>
+    public int DebugView { get; set; }
 
     /// <summary>The decals lit by their own normal and AO instead of the surface's below (for comparisons).</summary>
     public bool NoDecalBelow { get; set; }
