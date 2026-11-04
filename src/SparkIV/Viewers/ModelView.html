@@ -2949,19 +2949,25 @@
 
   // Frames shown per second while playing, told to the host once a second (its status bar): a count per frame and
   // one message a second, nothing drawn or read back for it.
-  // Also when the rate falls below 30 and when it is back at 30 or more, over the last half second (so one slow frame
-  // alone doesn't count), with the cutscene's frame: for the host's log (SparkIV-fps.log).
-  // The lowest and highest of that rate since playing began, with their frames, go with the once-a-second message.
+  // Also when the rate falls below 30 and when it is back, over the last second, with the cutscene's frame: for the
+  // host's log (SparkIV-fps.log). Below under 27.5, back from 29.5: the scene plays at 30 a second, which a 60 Hz
+  // screen shows every second refresh, so a single frame a refresh late already makes 29 or 28 - the intro's first
+  // log went back and forth between 29 and 30 every few frames, hiding the real drops (23.6 at the skyline).
+  // The lowest and highest of that rate since playing began (or this section came), with their frames, go with the
+  // once-a-second message.
   const fpsCount = { frames: 0, since: 0, times: [], below: false, min: null, max: null };
+  function fpsReset() {
+    fpsCount.frames = 0; fpsCount.since = 0; fpsCount.times.length = 0; fpsCount.below = false; fpsCount.min = fpsCount.max = null;
+  }
   function countFrame(now) {
     const times = fpsCount.times;
     times.push(now);
-    while (times.length > 2 && now - times[0] > 500) times.shift();
-    if (times.length > 2 && now - times[0] >= 450) {
+    while (times.length > 2 && now - times[0] > 1000) times.shift();
+    if (times.length > 2 && now - times[0] >= 950) {
       const rate = Math.round((times.length - 1) * 10000 / (now - times[0])) / 10;
       const frame = Math.floor(currentFrame() + 1e-6);
-      if ((rate < 30) !== fpsCount.below) {
-        fpsCount.below = rate < 30;
+      if (fpsCount.below ? rate >= 29.5 : rate < 27.5) {
+        fpsCount.below = !fpsCount.below;
         post({ type: "fpsBelow", below: fpsCount.below, fps: rate, frame });
       }
       if (!fpsCount.min || rate < fpsCount.min.fps) fpsCount.min = { fps: rate, frame };
@@ -2977,7 +2983,7 @@
   }
 
   function tick(now) {
-    if (!playback.playing || !clip) { fpsCount.frames = 0; fpsCount.since = 0; fpsCount.times.length = 0; fpsCount.below = false; fpsCount.min = fpsCount.max = null; return; }
+    if (!playback.playing || !clip) { fpsReset(); return; }
     countFrame(now);
     const dt = playback.last ? (now - playback.last) / 1000 : 0;
     playback.last = now;
@@ -2997,6 +3003,7 @@
     playback.playing = on;
     playback.last = 0;
     playback.reportedFrame = -1;
+    fpsReset();
     if (on) requestAnimationFrame(tick); else showFrame();
   }
 
