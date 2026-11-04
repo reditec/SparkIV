@@ -1,6 +1,6 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 2, offscreen mode** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
+Status: **step 3, textures** – in the app behind the switch `SPARKIV_D3D12=1` (still the step-1 prototype view).
 Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
 
 ## Why
@@ -16,11 +16,12 @@ timeline, status bar, dialogs) stays; only the drawing area changes.
 |---|---|
 | `D3D12Device` | DXGI factory, adapter by `GpuPreference.HighPerformance` (no software adapter), `ID3D12Device` at feature level 11.0, the direct queue and one fence (`Signal`/`Wait`/`WaitIdle`). Debug build only: debug layer and `ID3D12InfoQueue`, its messages written to `SparkIV-d3d12.log` beside `SparkIV.exe`. |
 | `PanelSwapChain` | Composition swap chain (`CreateSwapChainForComposition`, flip-discard, 3 × B8G8R8A8, `FrameLatencyWaitableObject`, maximum latency 2) set on the WinUI `SwapChainPanel` through `ISwapChainPanelNative::SetSwapChain` (IID `63aad0b8-7c24-40ff-85a8-640d944cc325`, vtable slot 3). Buffers in pixels (`ActualSize × CompositionScale`), shown at `1 / CompositionScale` via `IDXGISwapChain2.MatrixTransform`. An RTV per buffer, one D32 depth buffer, per buffer a command allocator and the fence mark of its last frame. |
-| `MeshRenderer` | Root signature with 36 root constants (row-major view-projection, the instance's model-to-scene matrix, light direction + ambient), HLSL compiled at run time with DXC (`vs_6_0`/`ps_6_0`) to DXIL. Per model its meshes in one vertex buffer (position + normal, 24 bytes) and one 32-bit index buffer, copied from upload heaps into default heaps, all models' copies in one command list. Models are drawn as instances (one draw each). Meshes of hidden materials are left out. Lambert + ambient, no textures, both faces drawn. Draws into any target (render target and depth view, size). |
+| `MeshRenderer` | Root signature: 44 root constants (row-major view-projection, the instance's model-to-scene matrix, light direction + ambient, the part's material: cut-out, dirt mask) and a descriptor table with the texture (t0), a static anisotropic (16×) wrapping sampler. HLSL compiled at run time with DXC (`vs_6_0`/`ps_6_0`) to DXIL. Per model its meshes in one vertex buffer (position, normal, texture coordinates, vertex alpha: 36 bytes) and one 32-bit index buffer, copied from upload heaps into default heaps; a part per mesh (index range, texture, pass). Models are drawn as instances. Passes: solid (cut-out texels clipped at alpha 0.5), then decals (alpha-blended, no depth write, pulled forward by a depth bias; dirt decals' alpha = dot(texel, dirt mask) × vertex alpha) and see-through materials (alpha-blended, no depth write, not sorted yet). Glass and hidden planes left out for now. Lambert + ambient, only the first texture layer, both faces drawn. Draws into any target. |
+| `TextureCache` | The textures of the models' `Textures` blobs, each blob made once (by reference), with a shader resource view in one shader-visible heap (65 536 views; number 0 is white). Blobs as the game has them ("SXT1", `ModelScene.Raw`): DXT1/3/5 straight as BC1/2/3, A8R8G8B8 as B8G8R8A8, L8 as R8 read as grey (view swizzle), with their mip levels as far as the data holds them (as the page's `uploadRaw`). PNG blobs (a cast's) decoded with System.Drawing, without mip levels. BC textures whose size isn't a multiple of 4 can't be made and are drawn white (counted). Uploads are sent in batches of about 256 MB. |
 | `OffscreenTarget` | Drawing without a window: a B8G8R8A8 texture and a D32 depth buffer of a given size; after a frame the colour is copied into a readback buffer (rows every 256 bytes) and saved as PNG (System.Drawing). |
 | `CutsceneCamera` (`Viewers/GtaIV/Pc`, GTA IV PC) | A section's camera clip (camera_0) at any frame: the page's `filmCameraNow` in C# – positions linear, the turn by normalized linear interpolation, looking along its y with z up, FOV of the whole frame, not smoothed across a cut (> 25 cm or 5°). `ViewProjection`: near 0.1 m like the page. |
 
-`D3D12Device`, `MeshRenderer`, `OffscreenTarget` and `CutsceneCamera` use no WinUI, so the visual tests' cutgen
+`D3D12Device`, `MeshRenderer`, `TextureCache`, `OffscreenTarget` and `CutsceneCamera` use no WinUI, so the visual tests' cutgen
 compiles them in.
 | `D3D12View` | Ties the panel to device, swap chain and renderer. Draws on its own thread, which waits on the waitable object before each frame, so frames go out at the refresh rate and the UI thread stays free (loading the cast doesn't stall the view). Size and DPI changes are recorded on the UI thread and applied at the next frame. Once a second: frames per second, mean and longest frame time into the status bar (`FpsText`) and the log. |
 
@@ -55,8 +56,9 @@ before and, with `D3D12CAP=<frames>` (`D3D12SIZE=WxH`, `D3D12TAG`, `D3D12FOV` fo
 field of view), draws those frames into an `OffscreenTarget` at the reference's size and saves them as PNG. The
 comparison with the game's picture is the same as for the page; the values are kept apart from the page's.
 
-Drawn so far: the location (all placed objects but mirror-only far versions) through the cutscene's camera. Not yet:
-the cast (needs skinning and the clips, step 4), textures (step 3), lighting, sky, water, post effects (steps 4–5).
+Drawn so far: the location (all placed objects but mirror-only far versions) through the cutscene's camera, with its
+first texture layer (step 3). Not yet: the cast (needs skinning and the clips, step 4), terrain layers, normal and
+specular maps, vertex colours, glass, lighting, sky, water, post effects (steps 4–5).
 The differences are therefore large; what the run shows now is that framing, camera and geometry match the game.
 First check (bc_1, 13 references): walls, door frames, pipes and furniture lie exactly over the game's, also at the
 reference with a frozen FOV (s3 f994.50); a section with its location takes about 5–10 s. Full run (2026-11-04): all
@@ -71,8 +73,6 @@ checks indoors, outdoors with the skyline, TLAD and the intro's crane from above
 
 ## Next steps (#112)
 
-3. **Geometry straight from `ModelScene`** for the whole cast and the location: vertex/index buffers per mesh,
-   textures (DXT straight from the WTD).
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation
    (skinning), shaders (HLSL via DXC), sky, water, shadows, post effects (DoF, bloom, tone mapping), decals, coronas,
    room modifiers.
