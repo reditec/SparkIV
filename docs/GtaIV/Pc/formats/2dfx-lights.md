@@ -21,8 +21,9 @@ Models (`.wdr`, `.wdd`, `.wft`) can contain light effects, i.e. lamps and wall l
 
 | Flag | Meaning | Status | Source |
 |---|---|---|---|
-| 0x20 | on by day | used | 0xC1F9A0 |
-| 0x40 (without 0x20) | night only | used | ibid. |
+| 0x20 | on by day: while the night factor is below 0.25 | used | 0xC1F9A0 |
+| 0x40 | on at night: from 0.25 on; with 0x20 always | used | ibid. |
+| 0x1 | fades instead of switching: 0x20 by 1 − night factor (up to 0.999), 0x40 by the night factor (from 0.001) | used | ibid. |
 | 0x80 | Flicker | ignored | 0xC1E200 |
 | 0x200, 0x1000 | Blinking | ignored | ibid. |
 | 0x4000 | Light flag 2, only if the object (instance flag 0x80) allows it; effect open | **unclear** | ibid. |
@@ -43,6 +44,7 @@ The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light
 - **Cutscene lights and rooms** (observation, 2026-10-23; not confirmed in the exe):
   - A cut light affects characters regardless of the room it is in. Evidence: In et01_aa (section 4, frame 484), `FillLight1_3` is 1.2 m behind the camera and thus behind the wall in the neighbouring room. In the game video it lights the characters in front of the camera.
   - No per-light room check has been found in the game. The stencil rule is confirmed: cut lights hit **only characters**, indoors and outdoors.
+  - **Except those with 0x100** (`env…`, `shd…`): they hit **only the location**, not the characters. Evidence: `GTAIV.3.trace`, intro s3 f569.75, HDR buffer before and after each light. `rim_kit` and `spt_kit` (draws 52562830, 52562851) add +3.3 to the cook's apron and nothing to the wall behind him. `shd_env_kit` (draw 52562883, PS 0x2d5918a0, with its shadow) adds +0.60 to that wall and nothing to the cook. In SparkIV it is lit by the cut lights' formula, without its shadow. Wall 1.75 against the game's 1.71.
     - Indoors: trace GTAIV.3, et01_aa.
     - Outdoors: trace GTAIV.4, et01_ba frame 9350, read out with d3dretrace on 2026-10-23. After `BoothLight_0` (call 145552474) the guard's face rose from 1.72 to 2.69; the booth is unchanged (panel 0.52/0.88/0.94).
   - Since 2026-10-23, SparkIV no longer applies cut lights to any map or prop meshes (`ModelView.html`, `marked < 0 && baked`).
@@ -251,6 +253,38 @@ With the camera inside an interior, the game draws the deferred lamps of that in
 
 - **Evidence:** TLAD trace GTAIV.3, frame 10210 (et01_aa section 2, frame 119.5, camera in `E1elizaLounge_MloRoom`). The frame draws 7 lamps (pixel shaders 0x25d41c80 and the shadow lamp's 0x25d413c0), all in E1_Elizabeta's lounge. Their positions match SparkIV's lamps to 0.01 m (scene offset 353.82 / 1518.52 / 24.69).
 - Within reach SparkIV had 35 lamps, 20 of them in GTA IV's interiors below (`RM3a`, `ProjectF1`, `ProjectF1B`). None of these is drawn by the game; here they lit through the floor.
-- Not explained yet: 6 further lamps of the same interior (hall, kitchen, two in the lounge) are not drawn in that frame either. Probably visibility culling of the light volumes (frustum, portals); **unconfirmed**, the exe's selection is not traced.
+- 6 further lamps of the same interior (hall, kitchen, two in the lounge) are not drawn in that frame either.
 
-In SparkIV: `sceneLightsNow` in `ModelView.html` skips lamps whose room (`roomOf`) belongs to another interior than the camera's room. Status: **used** (the interior rule); the further culling is **unclear**.
+**The room must be seen.** `Light_Add` (0xABCCD0) gives a map lamp its interior and room. It makes the lamp only where 0xA0FE70 says that room is seen this frame. A cutscene's own lights (flag 0x80) are not asked. 0xA0FE70 itself sits in the exe's encrypted part, so the rule is taken from the trace:
+- **Intro galley:** `GTAIV.3.trace`, intro s3 f569.75, frame 52556107 to 52564305, camera in the ship's lower room. The frame draws 13 lamps, all in that room. It draws none of the ship's outside lamps 1.5 m away beyond the hull (2dfx flags 0xac060), and none of the room above.
+- SparkIV, with all of them, lit the cook +2.9 in the HDR buffer, the game's lamps +0.17. With the rule: apron 5.67 / 5.52 / 4.46 against the game's 5.63 / 5.49 / 4.41, face 5.03 against 4.99.
+
+- **No outside lamps from a room:** in both traced frames of the ship (s3 f569.75 and f749.75) the game draws none of the outside's lamps, though in f569.75 two portals to the outside are on screen. In f749.75 it does draw a lamp of the room above (draw 55308098).
+
+In SparkIV: `sceneLightsNow`, `lightVolumesNow` and `coronasNow` in `ModelView.html` skip lamps of another interior. With the camera in a room, they also skip the outside's lamps and lamps of rooms not seen from it (`seenRooms`). A room is seen when it is the camera's or lies behind a portal on screen, followed on through the portals of the rooms seen. Status: **used**. Not traced: whether the game also clips the view through each portal (SparkIV takes the whole screen); with the camera outside, every room is taken as seen.
+
+## How far from the camera: drawn objects and FadeDistance
+
+`Entity_AddModelLights` (0xC1DB60) makes an object's lights:
+- For an object **not drawn** now (its +8 against the phase mask at 0x159B75C), only within 35 m of the camera (35² at 0xE8B800).
+- For a **drawn** object, at any distance.
+- Each light fades out from its **FadeDistance** on (the light's +0x60, RageLib `Unknown5C`, OpenIV `_f5C`; −1 never). The strength is multiplied by saturate((radius − (d − FadeDistance)) / radius). In the intro's harbour the lamps have −1 (620), 75 (196), 299 (119), and a few others.
+- The light volume does the same from +0x64 (`Unknown60`) over VolumeSize × the radius.
+
+Evidence: `GTAIV.3.trace`, intro s4 f420.5 (frame 85641334 to 85664925). The frame draws some 150 lamps, the farthest 550 m away (floodlights on the towers across the water). SparkIV's location holds only the objects within its radius (60 m there).
+
+In SparkIV (`sceneLightsNow`): outside, a lamp whose sphere lies in the view counts as its object drawn (no distance limit). Any other lamp counts only within 35 m (`LampReach`). Every lamp is faded by FadeDistance. At most `MaxLights` (80), the nearest first.
+
+## A vehicle's tail lamps
+
+GTAIV.exe 0xA42B10 makes one spot light for both tail lamps of a vehicle whose lamps are on:
+- **Place:** half way between the bones `taillight_l` and `taillight_r` across and up, at the model's rear along the car (a y from its bounds).
+- **Direction:** pointing back along the car (its −y).
+- **Values** from `common/data/visualSettings.dat`, `car.taillight.*`: colour 1 / 0 / 0, intensity 4 × 2.5 (0x103CCD4), falloffMax 4, inner cone 45°, outer 90° (Light_Add keeps it to 89°).
+- **Light flag** 0x100: a lamp's light, not a cutscene's.
+
+Evidence: `GTAIV.3.trace`, intro s6, draw 271710722 (PS 0x2d592840). Colour 1 / 0 / 0, strength 10, range 4 (c73 1/16), cone cos 0.017, scale 1.45, at 756.505 / −218.397 / 5.516, pointing (−0.206, −0.979, −0.015). Across and up it lies half way between the `taillight_l`/`taillight_r` bones. Along the car its y is the least y of the vehicle's collision bound's box (0xA42B10 asks CAutomobile's virtual +0x60, 0xB11830, which gives the bound's +0x20; in the `.wft` the fragment points to the bound at +0xEC). In the trace the cab's chassis is at 757.033 / −215.885 / 5.430, as in SparkIV, so in the cab's own space the light is at y −2.565. The bound in `rom.wft` gives −2.586, the meshes' rear −2.543. SparkIV takes the bound's: 4 mm across, 1 mm up and 2 cm along from the trace (with the meshes' rear it was 2.2 cm the other way). Why the game's value is 2 cm short of the file's is open. The bound's rear comes from one part, the rear bumper (placed at −2.4467, as the `bumper_r` bone, its box reaching 0.1394 further back). Its vertices reach only −2.545, so the box has a margin of about 0.04 m. The game's value would fit a margin of about 0.02 m, which is not proven.
+
+**Which vehicles:** in the intro only Roman's cab has its lamps on. Its mission script `roman1` makes the cab (`rom`, `CREATE_CAR(0x8cd0264c, …)`) in its wait loop during the intro and calls `FORCE_CAR_LIGHTS(…, 2)`. The car on the crane has all its lamp dimmers at 0 in the trace. SparkIV reads `FORCE_CAR_LIGHTS` into the script index (`ScriptVehicle.Lights`) and turns on the lamps and their light only for those vehicles (`CutActor.LightsOn`).
+
+Not traced: other night cutscenes. Vehicles there without a script's `FORCE_CAR_LIGHTS` stay dark. The game's brake factor 1.75 (0xFE89A4) when not braking is not used: the cab's light has the 10 of the trace.

@@ -28,6 +28,48 @@ using System.Numerics;
 namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 {
   /// <summary>
+  /// A box of the map (a .wpl's records after its placements) where a time cycle modifier works, between two hours:
+  /// fully inside, fading out over <paramref name="Range"/> metres round it (height counting three times), and over
+  /// the hour before <paramref name="StartHour"/> and the hour <paramref name="EndHour"/> (GTAIV.exe 0xAEF890, 0xAEF9E0).
+  /// </summary>
+  public sealed record ModifierBox(Vector3 Min, Vector3 Max, float Range, int StartHour, int EndHour, uint Modifier)
+  {
+    public float StrengthAt(Vector3 at, float hour)
+    {
+      float height = Range / 3;
+      if (at.X < Min.X - Range || at.Y < Min.Y - Range || at.Z < Min.Z - height || at.X > Max.X + Range || at.Y > Max.Y + Range || at.Z > Max.Z + height)
+      {
+        return 0;
+      }
+      float dx = at.X > Max.X ? at.X - Max.X : Math.Max(Min.X - at.X, 0);
+      float dy = at.Y > Max.Y ? at.Y - Max.Y : Math.Max(Min.Y - at.Y, 0);
+      float dz = at.Z > Max.Z ? at.Z - Max.Z : Math.Max(Min.Z - at.Z, 0);
+      float distance = MathF.Sqrt(dx * dx + dy * dy + 9 * dz * dz);
+      return (distance > 0 ? 1 - distance / Range : 1) * ByHour(hour);
+    }
+
+    private float ByHour(float hour)
+    {
+      if (StartHour == EndHour)
+      {
+        return 1;
+      }
+      int whole = (int)hour;
+      float into = hour - whole;
+      if ((whole + 1) % 24 == StartHour)
+      {
+        return into;
+      }
+      if (whole == EndHour)
+      {
+        return 1 - into;
+      }
+      bool within = StartHour < EndHour ? whole >= StartHour && whole <= EndHour : whole < EndHour || whole >= StartHour;
+      return within ? 1 : 0;
+    }
+  }
+
+  /// <summary>
   /// The light of a time and weather outside, from the game's pc\data\timecyc.dat: per weather (EXTRASUNNY,
   /// SUNNY, CLOUDY ...) a line for each of 0, 5, 6, 7, 9, 12, 18, 19, 20, 21 and 22 o'clock, its columns: the
   /// light from around (Amb0, Amb1), the sun's (Dir), the sky's top and bottom, the sun's core and corona
@@ -69,6 +111,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// for every ped and Elizabeta's earrings, 0.996 for the map.
     /// </summary>
     public float ActorAmbient { get; private init; } = 1f;
+
+    /// <summary>
+    /// A modifier's AmbientOcclusionMult (column 64) and PedAmbOccHack (67), globalScalars2.z and .y (1 without):
+    /// how much of the AO counts. Everything: 1 + z (AO - 1), peds: 1 + y z (AO - 1). The intro's ship, room modifier
+    /// boatcabs 0.8 and 0.1 (GTAIV.3.trace: c40 = 1, 0.109, 0.802): a ped in its AmbientDownMult of 0 stays at 0.91.
+    /// </summary>
+    public float AoMultiplier { get; private init; } = 1f;
+    public float PedAoMultiplier { get; private init; } = 1f;
     /// <summary>
     /// How bright the water mirrors (water.fxc's waterReflectionScale): the line's 126th number. GTAIV.exe's
     /// reader (0xAEFEB0, its sscanf's 126th target) puts it at +0x80 of the time's values, which 0xAD7EF0 sets as
@@ -348,6 +398,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         SunMultiplier = 1f,
         FarClip = Or(1, FarClip),
         ActorAmbient = Or(19, ActorAmbient),
+        AoMultiplier = Or(64, AoMultiplier),
+        PedAoMultiplier = Or(67, PedAoMultiplier),
         // The fog as the modifier sets it (the TLAD trace GTAIV.3, et01_aa in Elizabeta's flat, modifier em_4:
         // globalFogParams c41 = (3, 1500, 0, 0.784) - MaxFogStart (column 3) 3, NearFog's alpha (column 27) 200
         // / 255 -, and the near fog's colour, measured back from the light before and after the fog, NearFog's
@@ -375,6 +427,85 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         GlobalScalarsW = Set(54) ? 0.6f * Math.Clamp(m[54], 0f, 4f) : GlobalScalarsW,
         // Halved under a modifier (GTAIV.exe 0xAEE7E0: x 0.5 by the modifier's strength, 0xFE8830).
         Noise = Noise / 2,
+      };
+    }
+
+    /// <summary>
+    /// The time cycle under the map's modifier boxes (<see cref="ModifierBox"/>) at a place and hour, as GTAIV.exe
+    /// 0xAEE7E0: for each modifier the strongest of its boxes, then the modifiers in their order.
+    /// </summary>
+    public TimeCycle WithBoxes(IEnumerable<ModifierBox> boxes, IReadOnlyDictionary<uint, float[]> modifiers, Vector3 at, float hour)
+    {
+      var strongest = StrengthsAt(boxes, at, hour);
+      var cycle = this;
+      foreach (var (name, modifier) in modifiers)
+      {
+        if (strongest.TryGetValue(name, out float strength))
+        {
+          cycle = cycle.Blended(modifier, strength);
+        }
+      }
+      return cycle;
+    }
+
+    /// <summary>The strength of each modifier with a box reaching the place at the hour.</summary>
+    public static Dictionary<uint, float> StrengthsAt(IEnumerable<ModifierBox> boxes, Vector3 at, float hour)
+    {
+      var strongest = new Dictionary<uint, float>();
+      foreach (var box in boxes)
+      {
+        float strength = box.StrengthAt(at, hour);
+        if (strength > 0 && (!strongest.TryGetValue(box.Modifier, out float known) || known < strength))
+        {
+          strongest[box.Modifier] = strength;
+        }
+      }
+      return strongest;
+    }
+
+    /// <summary>
+    /// The time cycle with a modifier mixed in by a box's strength, as GTAIV.exe 0xAF2960: colours by their alpha x
+    /// the strength (colour and multiplier apart: KsS1nomoon's sun 0 x 0 takes both down, so at a quarter of the
+    /// strength left a sixteenth of the sun), the post effect values by PostFxStrength (column 31) x the strength.
+    /// </summary>
+    public TimeCycle Blended(float[] m, float s)
+    {
+      static float Mix(float from, float to, float t) => from + (to - from) * t;
+      Vector3 Rgb(int i) => new Vector3(m[i], m[i + 1], m[i + 2]) / 255f;
+      float By(int alpha) => Math.Clamp(m[alpha] / 255f, 0f, 1f) * s;
+      bool Set(int i) => i < m.Length && m[i] >= 0;
+      float Limited(float value, int min, int max)
+      {
+        value = m[min] > 0 && value < m[min] ? Mix(value, m[min], s) : value;
+        return m[max] > 0 && m[max] < value ? Mix(value, m[max], s) : value;
+      }
+      float above = By(7), below = By(12), sun = By(17), nearFog = By(27), post = m[31] > 0 ? s * m[31] : 0;
+      float Post(int i, float value) => post > 0 && Set(i) ? Mix(value, m[i], post) : value;
+      Vector3 Colour(int i, Vector3 value) => post > 0 && m[i] >= 0 && m[i] < 255 && m[i + 1] >= 0 && m[i + 1] < 255 && m[i + 2] >= 0 && m[i + 2] < 255 ? Vector3.Lerp(value, Rgb(i), post) : value;
+      float exposure = Post(32, Exposure);
+      return this with
+      {
+        AmbientAbove = Vector3.Lerp(AmbientAbove, Rgb(4), above),
+        AmbientMultiplierAbove = Mix(AmbientMultiplierAbove, m[8], above),
+        AmbientBelow = Vector3.Lerp(AmbientBelow, Rgb(9), below),
+        AmbientMultiplierBelow = Mix(AmbientMultiplierBelow, m[13], below),
+        Sun = Vector3.Lerp(Sun, Rgb(14), sun),
+        SunMultiplier = Mix(SunMultiplier, m[18], sun),
+        FarClip = Limited(FarClip, 0, 1),
+        FogStart = Limited(FogStart, 2, 3),
+        ActorAmbient = Set(19) ? Mix(ActorAmbient, m[19], s) : ActorAmbient,
+        NearFogAmount = Mix(NearFogAmount, m[27] / 255f, nearFog),
+        NearFogColor = nearFog > 0 ? Vector3.Lerp(NearFogColor ?? Vector3.Zero, Rgb(24) * SkyLightMultiplier, nearFog) : NearFogColor,
+        Exposure = post > 0 && Set(33) ? Mix(exposure, m[33] * exposure, post) : exposure,
+        BrightPass = Post(34, BrightPass),
+        MidGrey = Post(35, MidGrey),
+        Bloom = Post(36, Bloom),
+        ColorCorrect = Colour(37, ColorCorrect),
+        ColorShift = Colour(40, ColorShift),
+        Saturation = Post(43, Saturation),
+        Gamma = Post(45, Gamma),
+        AdaptedLumMin = Post(51, AdaptedLumMin),
+        AdaptedLumMax = Post(52, AdaptedLumMax),
       };
     }
 
@@ -424,8 +555,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// modifier changes it), or null for none.</param>
     /// <param name="cloudPhase">The clouds' noise Phase at the cutscene's start (rage_perlinnoise's Phase: the game's
     /// running time, of no file - known from a trace), or null for the page's own.</param>
-    public object Message(float hour, string? clouds = null, string? cloudDetail = null, object?[]? rooms = null, float? cloudPhase = null)
+    /// <param name="parts">Whose sun and light from around to send apart (colour, multiplier) for the page to ease
+    /// them as the game does (see the page's mixSky): a room's modifier blended in whole (<see cref="Blended"/>);
+    /// by default this one's.</param>
+    public object Message(float hour, string? clouds = null, string? cloudDetail = null, object?[]? rooms = null, float? cloudPhase = null, TimeCycle? parts = null)
     {
+      var p = parts ?? this;
       var sunDirection = SunDirection(hour);
       static float[] A(Vector3 v) => new[] { v.X, v.Y, v.Z };
       return new
@@ -436,6 +571,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         sun = A(Sun * SunMultiplier * Exposure),
         ambientAbove = A(AmbientAbove * AmbientMultiplierAbove * Exposure),
         ambientBelow = A(AmbientBelow * AmbientMultiplierBelow * Exposure),
+        parts = new
+        {
+          sun = A(p.Sun), sunMultiplier = p.SunMultiplier,
+          above = A(p.AmbientAbove), aboveMultiplier = p.AmbientMultiplierAbove,
+          below = A(p.AmbientBelow), belowMultiplier = p.AmbientMultiplierBelow,
+        },
         // For the lamps: their strength is in the sun's units (GTAIV.exe passes both to the lights unchanged).
         exposure = Exposure,
         waterReflection = WaterReflection,
@@ -457,6 +598,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           depthFx = new[] { DepthFx.X, DepthFx.Y, DepthFx.Z, DepthFx.W },
         },
         actorAmbient = ActorAmbient,
+        aoScale = new[] { PedAoMultiplier, AoMultiplier },
+        // How night it is for the lamps (GTAIV.exe's 0x12DDEF4): 0 from 07:00 to 19:00 (read), 1 from 20:00 to 06:00,
+        // fading between (taken as linear: where the game sets it wasn't found).
+        nightFactor = hour < 6 ? 1 : hour < 7 ? 7 - hour : hour < 19 ? 0 : hour < 20 ? hour - 19 : 1,
         directionalLightW = DirectionalLightW,
         globalScalarsW = GlobalScalarsW,
         spriteBrightness = SpriteBrightness,

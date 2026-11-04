@@ -57,6 +57,9 @@ namespace RageLib.Models
       return new Drawable(File.Data.Drawable);
     }
 
+    /// <summary>The least corner of the fragment's collision bound's box (x, y, z); null without a bound.</summary>
+    public float[] GetBoundBoxMin() => File.Data.BoundBoxMin;
+
     /// <summary>All the fragment's children (the parts that break off), with their bone, whether or not they have a model.</summary>
     public List<FragmentChild> GetChildren()
     {

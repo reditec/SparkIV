@@ -62,6 +62,15 @@ namespace RageLib.GtaIV.Pc.Models
     public float VolumeIntensity { get; private set; }
     public float VolumeSize { get; private set; }
 
+    /// <summary>
+    /// From how far from the camera it fades out, over its radius (OpenIV: _f5C, the light's +0x60 in GTAIV.exe:
+    /// Entity_AddModelLights 0xC1DB60 takes the strength x saturate((radius - (distance - this)) / radius)); -1 never.
+    /// </summary>
+    public float FadeDistance { get; private set; }
+
+    /// <summary>The same for its light volume (OpenIV: _f60, +0x64; over VolumeSize x the radius); -1 never.</summary>
+    public float VolumeFadeDistance { get; private set; }
+
     /// <summary>The bone it moves with (an id of the skeleton).</summary>
     public int BoneId { get; private set; }
 
@@ -81,6 +90,8 @@ namespace RageLib.GtaIV.Pc.Models
       Flags = attributes.Flags;
       VolumeIntensity = attributes.Unknown2C;
       VolumeSize = attributes.Unknown30;
+      FadeDistance = attributes.Unknown5C;
+      VolumeFadeDistance = attributes.Unknown60;
       BoneId = attributes.BoneId;
     }
   }

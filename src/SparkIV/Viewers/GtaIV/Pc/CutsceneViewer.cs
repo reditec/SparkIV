@@ -172,7 +172,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       bool found = scripts?.Cutscenes.TryGetValue(cutName, out entry) == true;
       log.Step("cutscene script index", found ? "played by " + entry!.Script : "no script found");
       CutsceneMessages.ApplyPaint(cut, actors, folder, Games.InstallFolder(Games.GtaIV, "Windows"),
-                                  scripts == null ? null : model => scripts.ColoursFor(cutName, model));
+                                  scripts == null ? null : model => scripts.ColoursFor(cutName, model),
+                                  scripts == null ? null : model => scripts.LightsOnFor(cutName, model));
       log.Step("cast: variations and props");
       return entry;
     }

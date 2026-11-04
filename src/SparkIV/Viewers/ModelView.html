@@ -285,7 +285,7 @@
     // A vehicle's shader (as the game's gta_vehicle_*): its dirt (texture's red x the vehicle's dirt mixes the
     // colour towards dirtColor), its shine and mirrored surroundings by the shader (see the game's file:
     // vehicleShine, vehicleSpec).
-    uniform bool vehicle; uniform bool useDirt; uniform sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
+    uniform bool vehicle; uniform bool useDirt; uniform highp sampler2D dirtTex; uniform vec3 dirtColor; uniform float dirtLevel; uniform float reflectivePower;
     uniform bool useEnv; uniform sampler2D envTex;
     // Whether the mirrored surroundings are weighted by the specular map and specularColorFactor (the shader has that
     // parameter) or by reflectivePower alone (gta_reflect, gta_normal_reflect ...).
@@ -316,13 +316,13 @@
     // all the lamps of a flat fit): place and range; the way it shines and the cosine of half its cone (-1:
     // all round); colour times strength and a lamp's cone scale (for a cutscene's own light, no inner angle
     // known: -(its room + 2), so -1 outside any room).
-    uniform bool forwardLit; uniform float actorAmbient;
-    uniform int sceneLights; uniform vec4 sceneLightAt[40]; uniform vec4 sceneLightDir[40]; uniform vec4 sceneLightColor[40];
+    uniform bool forwardLit; uniform float actorAmbient; uniform vec2 aoScale;
+    uniform int sceneLights; uniform vec4 sceneLightAt[80]; uniform vec4 sceneLightDir[80]; uniform vec4 sceneLightColor[80];
     // How the game draws a location's lamp (see below): 1 as a "filler" (its 2dfx flag 0x100000), else as a light,
     // 0 outside, 2 in an interior's room.
-    uniform float sceneLightKind[40];
+    uniform float sceneLightKind[80];
     // A cutscene's own light's inner angle's cosine (see cutLightsNow).
-    uniform float sceneLightInner[40];
+    uniform float sceneLightInner[80];
     // The interior room of what is drawn (-1: none). A cutscene's light lights only what is in its own room,
     // as the game's do (bc_1: the fill light in Bernie's living room lit the hall outside his door through the
     // wall; the walls of the flat, in none of its rooms, aren't lit by them at all).
@@ -332,7 +332,9 @@
     // gta_ped_skin's light through the skin: SubColor, and SubScatWrap, SubScatWidth (width 0: none).
     uniform vec3 subColor; uniform vec2 subScatter;
     // gta_emissivestrong: texture x vertex colour x its emissiveMultiplier (0: the texture as it is).
-    uniform float emissiveScale; uniform float emissiveGlow; uniform bool glowOnly;
+    uniform float emissiveScale; uniform float emissiveGlow; uniform bool glowOnly; uniform bool glowOver;
+    // A vehicle's lamp glass (gta_vehicle_lightsemissive): the vertex alpha picks its lamp in the dimmers.
+    uniform bool vehicleLight; uniform float lightDimmers[15];
     // Bumps (a normal map, tangent space, its y the other way round as made for Direct3D) and shine (a
     // specular map's channels in specMask, how sharp and how bright); the light comes from the camera.
     uniform bool useNormalMap; uniform sampler2D normalTex; uniform float bumpiness; uniform float parallax;
@@ -406,6 +408,13 @@
     ${GameGlsl.uniforms}
     layout(location = 0) out vec4 outColor;
     layout(location = 1) out vec4 outLight;
+    // The light on what is solid, without its colour (the game's G-buffer keeps it for what a decal draws over it).
+    layout(location = 2) out vec4 outBelow;
+    // A decal lit by the light of the surface under it (the solid pass's outBelow at its pixel, on dirtTex's unit:
+    // a decal is no vehicle, and the program has no unit left).
+    uniform bool decalBelow;
+    // A normal decal: its own normal, the surface's AO (outBelow's alpha, see the game's file: decalAoBelow).
+    uniform bool decalAoBelow;
     ${GameGlsl.functions}
     void main() {
       if (maskPass) { outColor = vec4(1.0); return; }
@@ -548,7 +557,7 @@
       vec3 lampShine = vec3(0.0);
       float lampPower = 0.0;
       if (outdoor && !vehicle && (useSpecMap || specFlat) && useTexture) lampPower = (useSpecMap ? texture(specTex, vUv).a : 1.0) * specPower * (baked ? 1.0 : 0.75);
-      for (int i = 0; i < 40; i++) {
+      for (int i = 0; i < 80; i++) {
         if (i >= sceneLights) break;
         // A cutscene's light only on the peds, whatever room it and they stand in: its pass (deferred_lighting.fxc,
         // PS 0x25d41500) lights only where the G-buffer's stencil marks a ped. Inside (TLAD trace GTAIV.3, et01_aa
@@ -556,8 +565,12 @@
         // +2.4 to Malc's arm; outside the same (GTAIV.4, et01_ba frame 9350: BoothLight_0 adds +1 to the toll
         // keeper's face, nothing to his booth); and from the next room (et01_aa's FillLight1_3, 1.2 m behind the
         // camera behind the wall) it is what lights the peds in front of the camera in the game's video.
+        // A cutscene's light named env... or shd... (GTAIV.exe 0x9CA7E0: flag 0x100) the other way round: only on
+        // the location, not the peds - the intro's galley (GTAIV.3.trace, s3 f569.75): shd_env_kit (draw 52562883)
+        // adds +0.60 to the wall behind the cook and nothing to him, rim_kit and spt_kit +3.3 to him and nothing to
+        // the wall. (Sent with its mark below -500.)
         float marked = sceneLightColor[i].w;
-        if (marked < 0.0 && baked) continue;
+        if (marked < 0.0 && (marked < -500.0) != baked) continue;
         vec3 l = sceneLightAt[i].xyz - vPosition;
         // (A lamp that casts shadows sent with its range negative, see shadowLamp below.)
         float range = abs(sceneLightAt[i].w);
@@ -636,6 +649,12 @@
           ? lampLight * clamp(dot(n, l), 0.0, 1.0) * pow(abs(dot(l, lampMirrored)), lampPower * 0.25)
           : lampLight * pow(clamp(dot(l, lampMirrored), 0.0, 1.0), lampPower);
       }
+      // A decal takes the light of the surface under it: the game blends its decals into the G-buffer's colour only
+      // (COLORWRITEENABLE 7 on GB0, nothing on GB1, red and green on GB2), the normal and the AO there staying the
+      // surface's (GTAIV.3.trace s1 f399.5: the bunk room's posters, ruskgallposts, 3679648 to 3679660, their
+      // vertex colours white, a third lighter than the game's when lit by their own).
+      if (decalBelow) lit = texelFetch(dirtTex, ivec2(gl_FragCoord.xy), 0).rgb;
+      outBelow = vec4(lit, outdoor ? ao : 1.0);
       // The shine, where the surface faces half way between the light and the camera: how bright from the
       // specular map's channels in specMask, how sharp from its alpha, as gta_spec does.
       float shine = 0.0;
@@ -650,7 +669,7 @@
       ${GameGlsl.pedShine}
       float a = alpha < 1.0 ? alpha : 1.0;
       if (textureAlpha) {
-        a = base.a * vAlpha;
+        a = base.a * (vehicleLight ? 1.0 : vAlpha);
         if (a < 0.01) discard;
         if (stipple) {
           ${GameGlsl.stipple}
@@ -670,7 +689,13 @@
       float glassShine = vehicleGlass ? (a >= 0.01 ? 1.0 / a : 100.0) : 1.0;
       vec3 rgb = emissive && !outdoor ? (emissiveScale > 0.0 ? base.rgb * vColor * emissiveScale : base.rgb) : base.rgb * lit + shine + vehicleShine * glassShine + pedShine;
       if (glowOnly) rgb = base.rgb * vColor * emissiveGlow;
+      // gta_emissive's glow pass (unlit_draw) blends over the lit surface by the texture's alpha x the vertex's
+      // (SRCALPHA / INVSRCALPHA; PS 0x2c471ea0, GTAIV.3.trace 50839436: alpha = texture.a x colour.a with
+      // globalScalars 1); the other emissives' adds (SRCALPHA / ONE).
+      else if (emissive && outdoor && glowOver) rgb = mix(rgb, base.rgb * vColor * emissiveGlow, clamp(base.a * vAlpha, 0.0, 1.0));
       else if (emissive && outdoor) rgb += base.rgb * vColor * emissiveGlow;
+      // gta_vehicle_lightsemissive (vs 1, ps 2): texture x vertex colour x dimmerSet[vertex alpha x 255] x emissiveMultiplier.
+      if (vehicleLight && outdoor && !glowOnly) rgb += base.rgb * vColor * lightDimmers[clamp(int(vAlpha * 255.0 + 0.5), 0, 14)] * emissiveGlow;
       // Outside the light itself goes out too (outLight), for the game's post effects (bloom, its tone mapping,
       // the eye's adaptation: the game's file, gamePost); the picture (outColor) for the mirrored scene.
       vec3 lightOut = vec3(0.0);
@@ -820,12 +845,18 @@
       sceneLights: gl.getUniformLocation(program, "sceneLights"),
       forwardLit: gl.getUniformLocation(program, "forwardLit"),
       actorAmbient: gl.getUniformLocation(program, "actorAmbient"),
+      aoScale: gl.getUniformLocation(program, "aoScale"),
       sceneLightAt: gl.getUniformLocation(program, "sceneLightAt"),
       sceneLightDir: gl.getUniformLocation(program, "sceneLightDir"),
       sceneLightColor: gl.getUniformLocation(program, "sceneLightColor"),
       emissive: gl.getUniformLocation(program, "emissive"),
       emissiveScale: gl.getUniformLocation(program, "emissiveScale"),
       emissiveGlow: gl.getUniformLocation(program, "emissiveGlow"),
+      glowOver: gl.getUniformLocation(program, "glowOver"),
+      decalBelow: gl.getUniformLocation(program, "decalBelow"),
+      decalAoBelow: gl.getUniformLocation(program, "decalAoBelow"),
+      vehicleLight: gl.getUniformLocation(program, "vehicleLight"),
+      lightDimmers: gl.getUniformLocation(program, "lightDimmers"),
       glowOnly: gl.getUniformLocation(program, "glowOnly"),
       zShift: gl.getUniformLocation(program, "zShift"),
       subColor: gl.getUniformLocation(program, "subColor"),
@@ -1094,7 +1125,7 @@
     // How it is drawn, from its draw bucket: opaque, cut out, see-through by its texture (blend), lying on
     // another surface (decal), or not at all (a vehicle's no-water planes).
     const material = {
-      texture: null, glass: m.glass, water: m.water === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, hidden: m.hidden === true, noWater: m.noWater === true,
+      texture: null, glass: m.glass, water: m.water === true, ped: m.ped === true, vehicleLights: m.vehicleLights === true, lightsOn: m.lightsOn === true, cutout: m.cutout === true, stipple: m.stipple === true, blend: m.blend === true, decal: m.decal === true, ownLight: m.ownLight === true, decalNormal: m.decalNormal === true, dirtModel: m.dirtModel === true, hidden: m.hidden === true, noWater: m.noWater === true,
       color: m.paint || m.color || hsl(hue, 0.25, 0.62), paint: m.paint || [1, 1, 1], layerCount, layers: [null, null, null],
       paint2Tex: null, paint2: m.paint2 || [1, 1, 1, 1],
       vehicle: m.vehicle === true, dirt: null, dirtColor: m.dirtColor || [0.23, 0.22, 0.2], dirtLevel: m.dirtLevel || 0, reflectivePower: m.reflectivePower || 0, specular2: m.specular2 || null, vehicleShine: m.vehicleShine || null,
@@ -1702,7 +1733,7 @@
   let coronaSprite = null, mapCoronas = [];
   // How bright a lamp is: its colour (0 to 1) times its strength as the game adds it to the light.
   const MapLightScale = 0.6;
-  const MaxLights = 40;
+  const MaxLights = 80;
 
   // The rooms of the location's interiors: the interior's place, the turn from the scene into it, the room's
   // box there. What is in which: a map object by the interior's list (its mesh's room), an actor and a
@@ -1734,6 +1765,8 @@
     });
     return best;
   }
+
+  const VehicleDimmers = new Float32Array([10, 10, 10, 9, 9, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
 
   // What of the light from around reaches a cutscene's ped or prop at p in room: the room's modifier's
   // AmbientDownMult (see TimeCycle.ActorAmbient), eased over the room's portals as GTAIV.exe does (0xA0D720): within
@@ -1787,7 +1820,149 @@
     if (!skyOutside) return;
     const film = filmView();
     const room = skyRooms.length ? roomOf(film ? film.eye : eye()) : -1;
-    sky = (room >= 0 && skyRooms[room]) || skyOutside;
+    if (room < 0 || !skyRooms[room]) { sky = skyOutside; return; }
+    const strength = Math.round(roomStrength(room, viewProjection().matrix) * 100) / 100;
+    if (strength >= 1) { sky = skyRooms[room]; return; }
+    const key = room + ":" + strength;
+    if (!skyMixed || skyMixed.key !== key || skyMixed.from !== skyOutside) skyMixed = { key, from: skyOutside, sky: mixSky(skyOutside, skyRooms[room], strength) };
+    sky = skyMixed.sky;
+  }
+  let skyMixed = null;
+
+  // How much of the camera's room's modifier the game takes (GTAIV.exe 0xAEE7E0 with 0xA0E3C0 and 0xA0E490): a
+  // list of the room itself (strength 1) and of each portal of it on screen, by its share of the screen (its
+  // corners' area projected, over the screen's, at most 1); one through to another room with that room's (its
+  // blend), then that room's portals once more (their share x the first's, not the way back); one outside with
+  // the outside. In the list's order the rooms ease R = s x blend + (1 - s) x R, the outside O = s + (1 - s) x O,
+  // the modifier taken by (1 - O) x R. The ship's rooms in the intro (boatcabs): 0.99 deep in a room, 0.83 by a
+  // door. Doors in a portal are taken as open; the rooms' different modifiers as the camera's room's.
+  // A portal's corner k in the scene (its corners are the interior's).
+  function portalCorner(r, c, k) {
+    const v = qmul(qmul(qconj(r.turn), [c[k * 3], c[k * 3 + 1], c[k * 3 + 2], 0]), r.turn);
+    return [v[0] + r.at[0], v[1] + r.at[1], v[2] + r.at[2]];
+  }
+  // How much of the screen a portal of room r covers through the view's matrix (0 to 1).
+  function portalShare(r, q, matrix) {
+    if (!q.corners || q.corners.length < 12) return 0;
+    let poly = [0, 1, 2, 3].map(k => {
+      const p = portalCorner(r, q.corners, k);
+      return [0, 1, 2, 3].map(i => matrix[i] * p[0] + matrix[4 + i] * p[1] + matrix[8 + i] * p[2] + matrix[12 + i]);
+    });
+    // Clipped to the view (GL clip space: -w <= x, y, z <= w).
+    for (const [axis, sign] of [[0, 1], [0, -1], [1, 1], [1, -1], [2, -1]]) {
+      const inside = c => c[3] - sign * c[axis];
+      const out = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length], da = inside(a), db = inside(b);
+        if (da >= 0) out.push(a);
+        if ((da >= 0) !== (db >= 0)) { const t = da / (da - db); out.push(a.map((v, k) => v + (b[k] - v) * t)); }
+      }
+      poly = out;
+      if (poly.length < 3) return 0;
+    }
+    let area = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      area += a[0] / a[3] * (b[1] / b[3]) - b[0] / b[3] * (a[1] / a[3]);
+    }
+    return Math.min(1, Math.abs(area) / 2 / 4);
+  }
+
+  // The rooms seen from the camera's room (and -1 when the outside is): it and those behind its portals on screen,
+  // and on through theirs. GTAIV.exe makes a lamp's light only where its room is seen (Light_Add 0xABCCD0 asks
+  // 0xA0FE70 for the light's interior and room; a cutscene's own lights, flag 0x80, are not asked). The intro's
+  // cook in the ship's galley (s3 f569.75, GTAIV.3.trace, frame 52556107 to 52564305): 13 lamps, all in the
+  // galley's room or below it; none of the ship's outside lamps a metre and a half away beyond the hull, nor the
+  // deck above's - here they lit him +2.9, the game's lamps +0.17.
+  // The outside's lamps not even through a portal on screen: in both frames of the ship traced (s3 f569.75 and
+  // f749.75, two portals outside on screen in the first) the game draws none of them, but in f749.75 a lamp of the
+  // room above (-337.19 / -1492.75 / 15.43, draw 55308098).
+  function seenRooms(room, matrix) {
+    const seen = new Set([room]);
+    const todo = [room];
+    while (todo.length) {
+      const r = rooms[todo.pop()];
+      for (const q of r.portals || []) {
+        const to = q.to >= 0 && rooms[q.to] ? q.to : -1;
+        if (to < 0 || seen.has(to) || portalShare(r, q, matrix) <= 0) continue;
+        seen.add(to);
+        if (to >= 0) todo.push(to);
+      }
+    }
+    return seen;
+  }
+
+  // The room a portal of flag 0x2 leads to: the one with a portal of that flag in the same place, in another
+  // interior (GTAIV.exe 0xC259A0 finds the interior linked there); -1 none. The intro's ship: the lower cabins'
+  // (GtaMloRoom02) to the hold (carholdrm), on the cook in s3 f569.75 the only portal on screen.
+  function portalCentre(r, q) {
+    const a = portalCorner(r, q.corners, 0), b = portalCorner(r, q.corners, 2);
+    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  }
+  function linkedRoom(r, q) {
+    if (q.linked !== undefined) return q.linked;
+    q.linked = -1;
+    const c = portalCentre(r, q);
+    rooms.forEach((other, i) => {
+      const sameInterior = other.at.every((v, k) => v === r.at[k]) && other.turn.every((v, k) => v === r.turn[k]);
+      if (sameInterior) return;
+      for (const q1 of other.portals || []) {
+        if (!q1.link || !q1.corners) continue;
+        const d = portalCentre(other, q1);
+        if (Math.hypot(d[0] - c[0], d[1] - c[1], d[2] - c[2]) < 0.1) q.linked = i;
+      }
+    });
+    return q.linked;
+  }
+
+  function roomStrength(room, matrix) {
+    const r0 = rooms[room];
+    // The list: the room itself, then each portal on screen as 0xA0E490 goes through them (a room behind one
+    // once more, its share times the first's; the portal back, in the same place as the one come through, not).
+    // A room without a modifier goes in as the outside (its modifier -1).
+    const entries = [{ outside: !skyRooms[room], blend: r0.blend ?? 1, s: 1 }];
+    const add = (to, s) => entries.push(to < 0 || !rooms[to] ? { outside: true, blend: 1, s } : { outside: !skyRooms[to], blend: rooms[to].blend ?? 1, s });
+    const walk = (r, parent, from, deep) => {
+      for (const q of r.portals || []) {
+        if (!q.corners || q.corners.length < 12) continue;
+        const centre = portalCentre(r, q);
+        if (from && Math.hypot(centre[0] - from[0], centre[1] - from[1], centre[2] - from[2]) < 0.01) continue;
+        // One linking to an interior that isn't there: nothing (0xA8F390).
+        const to = q.link ? linkedRoom(r, q) : q.to;
+        if (q.link && to < 0) continue;
+        const s = portalShare(r, q, matrix) * parent;
+        if (s <= 0.001) continue;
+        add(to, s);
+        if (!deep && to >= 0 && rooms[to]) walk(rooms[to], s, centre, true);
+      }
+    };
+    walk(r0, 1, null, false);
+    let outside = 0, inside = 0;
+    for (const e of entries) {
+      if (e.outside) outside = outside * (1 - e.s) + e.blend * e.s;
+      else inside = e.s * e.blend + (1 - e.s) * inside;
+    }
+    return Math.max(0, Math.min(1, (1 - outside) * inside));
+  }
+
+  // The sky part way from the outside's to a room's (see roomStrength): its values eased by t, the sun and the
+  // light from around as GTAIV.exe 0xAF2960 eases a modifier in (colour and multiplier apart, see TimeCycle.Blended,
+  // from the room message's parts) times the eased exposure.
+  function mixSky(a, b, t) {
+    const ease = (x, y) => typeof x === "number" && typeof y === "number" ? x + (y - x) * t
+      : Array.isArray(x) && Array.isArray(y) && x.length === y.length ? x.map((v, i) => ease(v, y[i]))
+      : x && y && typeof x === "object" && typeof y === "object" && !Array.isArray(x) && !Array.isArray(y)
+        ? Object.fromEntries(Object.keys(y).map(k => [k, k in x ? ease(x[k], y[k]) : y[k]]))
+        : t < 0.5 ? x : y;
+    const mixed = {};
+    for (const k of Object.keys(b)) mixed[k] = k === "rooms" ? null : k in a ? ease(a[k], b[k]) : b[k];
+    if (a.parts && b.parts) {
+      const p = ease(a.parts, b.parts), e = mixed.exposure;
+      mixed.sun = p.sun.map(v => v * p.sunMultiplier * e);
+      mixed.ambientAbove = p.above.map(v => v * p.aboveMultiplier * e);
+      mixed.ambientBelow = p.below.map(v => v * p.belowMultiplier * e);
+    }
+    return mixed;
   }
 
   // The sky outside, drawn behind everything: from the horizon's colour up to the top's, the sun, and the
@@ -2292,6 +2467,8 @@
       // Its light volume (flag 0x80000): [strength, size]; a spot's outer angle in degrees (0: all round).
       volume: l.volume && l.volume[0] > 0 && l.volume[1] > 0 ? l.volume : null, coneDegrees: l.cone || 0,
       tangent: l.tangent || [1, 0, 0],
+      // From how far from the camera it fades out (-1 never; see sceneLightsNow).
+      fade: l.fade ?? -1,
       // The room it is in (see sceneLightsNow).
       room: roomOf(l.position),
     }));
@@ -2302,7 +2479,7 @@
   // do; the strongest first, up to 8), then the location's lamps nearest to the camera that reach near it.
   function sceneLightsNow() {
     if (!showSceneLights) return [];
-    const now = cutLightsNow().slice(0, 8);
+    const now = cutLightsNow().slice(0, 8).concat(vehicleLightsNow());
     if (mapLights.length && visible.size) {
       const film = filmView();
       const e = film ? film.eye : eye();
@@ -2314,13 +2491,33 @@
       const camRoom = rooms.length ? roomOf(e) : -1;
       const camAt = camRoom >= 0 ? rooms[camRoom].at : null;
       const otherInterior = r => camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2]);
+      // Inside, only the lamps of the rooms seen from the camera's (see seenRooms).
+      const matrix = viewProjection().matrix;
+      const seen = camRoom >= 0 ? seenRooms(camRoom, matrix) : null;
+      const planes = frustumPlanes(matrix);
       for (const m of mapLights) {
-        if (otherInterior(m.room)) continue;
-        const l = outside ? outdoorLamp(m) : m;
+        if (otherInterior(m.room) || (seen && !seen.has(m.room))) continue;
+        let l = outside ? outdoorLamp(m) : m;
         if (!l) continue;
         const d = Math.hypot(l.at[0] - e[0], l.at[1] - e[1], l.at[2] - e[2]);
-        // Outside only as near to the camera as the game makes an object's lights (the game's file: LampReach).
-        if (outside ? d < LampReach : d < l.range + 25) near.push({ l, d });
+        if (!outside) { if (d < l.range + 25) near.push({ l, d }); continue; }
+        // Outside as GTAIV.exe's Entity_AddModelLights (0xC1DB60) makes an object's lights: an object not drawn now
+        // only within 35 m of the camera (the game's file: LampReach), one drawn at any distance - its lamp's light
+        // in view taken as its object drawn; the intro's harbour (GTAIV.3.trace, s4 f420.5, frame 85641334 to
+        // 85664925): some 150 lamps, the farthest 550 m away (floodlights on the towers over the water). Each
+        // fading out from its FadeDistance on over its radius: x saturate((radius - (d - fade)) / radius).
+        // Only one whose light reaches into the view: the game draws each lamp as a light volume, culled by the view;
+        // one beside or behind the camera lights nothing seen. In s4 f420.5 the game draws 52 lamps, all in view, of
+        // them 44 known here, of which only 13 were drawn: the nearest lamps out of view (within LampReach) had filled
+        // MaxLights first.
+        const inView = planes.every(p => p[0] * l.at[0] + p[1] * l.at[1] + p[2] * l.at[2] + p[3] >= -l.range);
+        if (!inView) continue;
+        if (m.fade >= 0 && l.range > 0) {
+          const f = Math.min(1, Math.max(0, (l.range - (d - m.fade)) / l.range));
+          if (f <= 0) continue;
+          if (f < 1) l = { ...l, color: l.color.map(c => c * f) };
+        }
+        near.push({ l, d });
       }
       near.sort((a, b) => a.d - b.d);
       for (const { l } of near) { if (now.length >= MaxLights) break; now.push(l); }
@@ -2335,7 +2532,8 @@
     const outside = !!sky && skyOn && backgroundReach > 0;
     const camRoom = rooms.length ? roomOf(vp.eye) : -1;
     const camAt = camRoom >= 0 ? rooms[camRoom].at : null;
-    const otherInterior = r => camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2]);
+    const seen = camRoom >= 0 ? seenRooms(camRoom, vp.matrix) : null;
+    const otherInterior = r => (camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2])) || (seen && !seen.has(r));
     const list = [];
     for (const m of mapLights) {
       // With flag 0x100000 the game's passes 4 and 5 of deferred_lighting's lightShafts, without it passes 0 and 1
@@ -2350,25 +2548,60 @@
     return list.length ? { list, lookup: lightVolumeLookup, matrix: vp.matrix, eye: vp.eye, near: vp.near, far: vp.far, exposure: sky ? sky.exposure || 1 : 1 } : null;
   }
 
-  // The lamps' coronas to draw now (the game's file: gameCoronas): those on by day (flag 0x20, 0xC1F9A0; the page's
-  // scenes are by day) and of the camera's interior as lightVolumesNow takes them. A lamp of an interior: 1 m towards
+  // The lamps' coronas to draw now (the game's file: gameCoronas): those on at the hour (lampOn) and of the camera's
+  // interior as lightVolumesNow takes them. A lamp of an interior: 1 m towards
   // the camera, as strong as it is; any other its size towards the camera, x SprBght (Light_FromEffect).
   function coronasNow(vp) {
     if (!showSceneLights || !coronaSprite || !mapCoronas.length || !visible.size) return null;
     const camRoom = rooms.length ? roomOf(vp.eye) : -1;
     const camAt = camRoom >= 0 ? rooms[camRoom].at : null;
-    const otherInterior = r => camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2]);
+    const seen = camRoom >= 0 ? seenRooms(camRoom, vp.matrix) : null;
+    const otherInterior = r => (camAt && r >= 0 && !(rooms[r].at[0] === camAt[0] && rooms[r].at[1] === camAt[1] && rooms[r].at[2] === camAt[2])) || (seen && !seen.has(r));
     const list = [];
     for (const m of mapCoronas) {
-      if (!(m.flags & 0x20) || otherInterior(m.room)) continue;
+      const on = lampOn(m.flags, sky ? sky.nightFactor ?? 0 : 0);
+      if (on <= 0 || otherInterior(m.room)) continue;
       const inside = m.room >= 0;
       const away = [vp.eye[0] - m.at[0], vp.eye[1] - m.at[1], vp.eye[2] - m.at[2]];
       const d = Math.hypot(away[0], away[1], away[2]);
       if (d < 1e-3) continue;
       const pull = (inside ? 1 : m.size) / d;
-      list.push({ at: [0, 1, 2].map(k => m.at[k] + away[k] * pull), rgb: m.rgb, size: m.size, strength: m.intensity * (inside || !sky ? 1 : sky.spriteBrightness ?? 1) });
+      list.push({ at: [0, 1, 2].map(k => m.at[k] + away[k] * pull), rgb: m.rgb, size: m.size, strength: on * m.intensity * (inside || !sky ? 1 : sky.spriteBrightness ?? 1) });
     }
     return list.length ? { list, sprite: coronaSprite, matrix: vp.matrix, eye: vp.eye, right: vp.right, up: vp.up, forward: vp.forward, exposure: sky ? sky.exposure || 1 : 1 } : null;
+  }
+
+  // A cutscene vehicle's tail lamps' light while its lamps are on (lightsOn): GTAIV.exe 0xA42B10 makes one spot for
+  // both, half way between them, pointing back along the car (its -y), from visualSettings.dat's car.taillight: red,
+  // strength 4 x 2.5 (0x103CCD4), reaching 4 m, from 45° to its outer 90° (kept to 89° by Light_Add), light flag
+  // 0x100 (a lamp's light, not a cutscene's). The intro's cab (GTAIV.3.trace, s6, draw 271710722): colour 1 / 0 / 0,
+  // strength 10, range 4, cone 0.017 / scale 1.45, pointing (-0.206, -0.979, -0.015) - red on Niko's hand and Roman.
+  const TailLamp = { rgb: [1, 0, 0], strength: 4 * 2.5, range: 4, inner: 45, outer: 89 };
+  function vehicleLightsNow() {
+    const list = [];
+    for (const [id, a] of cast) {
+      if (!a.lightsOn || !a.world || !a.skeleton || !a.skeleton.names) continue;
+      const names = a.skeleton.names.map(n => (n || "").toLowerCase());
+      const left = names.indexOf("taillight_l"), right = names.indexOf("taillight_r");
+      if (left < 0 || right < 0) continue;
+      const l = a.world[left], r = a.world[right], body = a.world[0];
+      const dir = norm([-body[4], -body[5], -body[6]]);
+      // Across and up half way between the lamps, along the car at its rear end: 0xA42B10 takes the y from the
+      // collision bound's box (CAutomobile's virtual +0x60, its least y; Roman's cab 0.24 m behind the lamps, its
+      // meshes' rear 0.20 m; without a bound the meshes' rear).
+      if (a.rearBehind === undefined) {
+        let rear = a.boundsMin ? a.boundsMin[1] : Infinity;
+        if (!a.boundsMin) for (const m of meshes.values()) if (m.actor === id && m.min) rear = Math.min(rear, m.min[1]);
+        const restY = i => inverseRigid(a.skeleton.inverseRest[i])[13];
+        if (Number.isFinite(rear)) a.rearBehind = Math.max(0, (restY(left) + restY(right)) / 2 - rear);
+      }
+      const at = [12, 13, 14].map((k, i) => (l[k] + r[k]) / 2 + dir[i] * (a.rearBehind || 0));
+      const exposure = sky ? sky.exposure || 1 : 1;
+      const cosOuter = Math.cos(TailLamp.outer * Math.PI / 180), cosInner = Math.cos(TailLamp.inner * Math.PI / 180);
+      list.push({ at, dir, range: TailLamp.range, color: TailLamp.rgb.map(c => c * TailLamp.strength * exposure), cone: cosOuter,
+                  coneScale: 1 / (cosInner - cosOuter), filler: false, shadows: false, room: roomOf(at) });
+    }
+    return list;
   }
 
   function cutLightsNow() {
@@ -2397,7 +2630,7 @@
       // track's angle 120°; with half of 89° its light came out a third too weak there.
       const inner = l.cone && dir ? Math.cos(Math.max(1, v1(l.cone, 89)) * 0.5 * Math.PI / 180) : 1;
       const at = v3(l.position, [0, 0, 0]);
-      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, inner, strength, actors: true, room: roomOf(at) });
+      now.push({ at, dir: dir ? norm(dir) : [0, 0, -1], color, range, cone, inner, strength, actors: true, room: roomOf(at), env: /^(env|shd)/i.test(l.name || "") });
     }
     now.sort((a, b) => b.strength - a.strength);
     return now;
@@ -2422,7 +2655,7 @@
       // The face clip's shape weights (one number a frame, by the shape's key) and the actor's meshes that have shapes.
       const face = a.face ? a.face.map(t => ({ key: t.key, values: new Float32Array(bytes(t.values).buffer) })) : null;
       const faceMeshes = face ? [...meshes.values()].filter(m => m.actor === a.id && m.face) : [];
-      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null, removed: [...removed], face, faceMeshes });
+      cast.set(a.id, { skeleton: sk, clip: cl, root: a.root ? { position: track(a.root.position), rotation: track(a.root.rotation) } : null, removed: [...removed], face, faceMeshes, lightsOn: a.lightsOn === true, boundsMin: a.boundsMin || null });
     }
     showFrame();
     // Where the actors are now (the view fitted before their clips were there looked at the origin); the
@@ -2931,7 +3164,7 @@
         const pad = f => { const a = new Float32Array(MaxLights * 4); lightsNow.forEach((l, i) => a.set(f(l), i * 4)); return a; };
         gl.uniform4fv(loc.sceneLightAt, pad(l => [...l.at, !l.actors && l.shadows ? -l.range : l.range]));
         gl.uniform4fv(loc.sceneLightDir, pad(l => [...l.dir, l.cone]));
-        gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) : (l.coneScale || 0)]));
+        gl.uniform4fv(loc.sceneLightColor, pad(l => [...l.color, l.actors ? -(l.room + 2) - (l.env ? 1000 : 0) : (l.coneScale || 0)]));
         gl.uniform1fv(loc.sceneLightInner, Float32Array.from({ length: MaxLights }, (_, i) => lightsNow[i] && lightsNow[i].inner !== undefined ? lightsNow[i].inner : 1));
         gl.uniform1fv(loc.sceneLightKind,Float32Array.from({ length: MaxLights }, (_, i) => !lightsNow[i] ? 0 : lightsNow[i].filler ? 1 : lightsNow[i].room >= 0 ? 2 : 0));
       }
@@ -3001,6 +3234,10 @@
       const waterLater = outside && !reflecting && !mapPass && !castBox && typeof gamePost === "object" && gamePost && sceneFramebuffer === gamePost.ms;
       for (const pass of ["solid", "water", "glass"]) {
         const glassPass = pass === "glass", waterPass = pass === "water";
+        // The solid pass's light without colour for the decals (see decalBelow), only in the scene's own view.
+        const belowOn = pass === "solid" && !reflecting && !mapPass && !castBox && typeof gamePostBelowOn === "function";
+        if (belowOn) gamePostBelowOn(true);
+        else if (typeof gamePostBelowOn === "function" && !reflecting && !mapPass && !castBox) gamePostBelowOn(false);
         if (glassPass && (mapPass || castBox)) continue;
         if (waterPass && !reflecting && !mapPass && !castBox && typeof gamePost === "object" && gamePost && sceneFramebuffer === gamePost.ms) gameKeepSolidDepth();
         if (waterPass) {
@@ -3021,6 +3258,8 @@
         // (The shadow map's see-through phase blended SRCALPHA / INVSRCALPHA, writing depth, as the game's wd_draw.)
         else if (castBox && castAlpha && shadowMapState && shadowMapState.blend) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(true); }
         else { gl.disable(gl.BLEND); gl.depthMask(true); }
+        // The solid scene's light without its colour, for the decals (see decalBelow).
+        const belowTex = glassPass && !reflecting && !mapPass && !castBox && typeof gamePostBelow === "function" ? gamePostBelow() : null;
         if (glassPass && waterLater) {
           gl.uniform1i(loc.waterBehindOn, false);
           gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lampMapNow ? lampMapNow.texture : null); gl.activeTexture(gl.TEXTURE0);
@@ -3036,12 +3275,23 @@
           const m = meshes.get(id), mat = m && materials.get(m.material);
           return m && mat && mat.emissive && mat.blend && (m.room >= 0 ? mat.emissiveMultiplier > 0 : outside && mat.emissiveNight) ? 1 : 0;
         };
+        // Then the dirt decals (gta_decal_dirt) before the other see-through ones, so what lies on the dirt shows over
+        // it: the intro's bunk room (GTAIV.3.trace, s1 f399.5) draws its wall dirt (3679608, PS 0x2c4326a0) before
+        // the posters of ruskgallposts (3679648 to 3679660); after them it covered them dark. (The game's decals
+        // keep the normal and AO of the surface under them - COLORWRITEENABLE 7, GB1 none, GB2 red and green only -
+        // ours their own, so those posters come out lighter than the game's.)
+        const dirtFirst = id => {
+          const m = meshes.get(id), mat = m && materials.get(m.material);
+          // (The whole model with them, in its order: the game draws an object's materials in their order - bc_1's
+          // PUB_3BShdows1, its shadow dirt after the pony skin rug, darkening it.)
+          return mat && (mat.dirtMask || mat.dirtModel) ? 1 : 0;
+        };
         // (Those first, the rest after, each in its order: what a stable sort by glowFirst gives, in one pass.)
         let order = visible;
         if (glassPass) {
-          const first = [], rest = [];
-          for (const id of visible) (glowFirst(id) ? first : rest).push(id);
-          order = first.concat(rest);
+          const first = [], dirt = [], rest = [];
+          for (const id of visible) (glowFirst(id) ? first : dirtFirst(id) ? dirt : rest).push(id);
+          order = first.concat(dirt, rest);
         }
         for (const id of order) {
           const m = meshes.get(id);
@@ -3174,6 +3424,19 @@
           // don't flicker into it either; glass stays where it is. Little by the slope: at a steep angle a whole
           // offset pulled a decal through what stands a few millimetres before it (bc_1: the shell's dark dirt
           // decal over the hall's wall panels, flickering as the camera moved).
+          // A map's decal lit by the surface under it (on the dirt texture's unit 14: a decal is no vehicle).
+          // By their shaders' write masks (tools/fxc-dump.py --states): gta_decal_glue writes its own normal and AO
+          // (COLORWRITEENABLE1 and 2 0x7), lit by its own; the normal decals their normal but not the AO (0x7, 0x3),
+          // lit by their own normal with the surface's AO (bc_1's pony skin rug in Bernie's living room,
+          // gta_normal_decal: lit by the floor's light it came out lighter than the game's).
+          const underDecal = !!belowTex && mat.decal && !mat.ownLight && !mat.glass && !m.actor;
+          const decalBelow = underDecal && !mat.decalNormal;
+          gl.uniform1i(loc.decalBelow, decalBelow);
+          gl.uniform1i(loc.decalAoBelow, underDecal && mat.decalNormal);
+          if (underDecal) {
+            gl.uniform1i(loc.dirtTex, 14);
+            gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, belowTex); gl.activeTexture(gl.TEXTURE0);
+          }
           if (mat.decal) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -4); }
           else if (mat.blend && !mat.glass) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-0.25, -2); }
           else gl.disable(gl.POLYGON_OFFSET_FILL);
@@ -3247,6 +3510,7 @@
           gl.uniform1i(loc.meshRoom, actorNow ? (actorNow.room ?? -1) : m.room);
           // A cutscene's cast takes its room's AmbientDownMult on the light from around (the map doesn't).
           gl.uniform1f(loc.actorAmbient, actorNow && actorNow.at ? actorAmbientAt(actorNow.at, actorNow.room ?? -1) : 1);
+          gl.uniform2f(loc.aoScale, sky && sky.aoScale && mat.ped ? sky.aoScale[0] : 1, sky && sky.aoScale ? sky.aoScale[1] : 1);
           // A map object without baked light (some walls): a middling one, not the view's bright light.
           if (m.baked && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45, mat.vehicle ? 1 : 0.45);
           // A part of the cast without vertex colours: nothing taken off the light from around (its AO 1).
@@ -3260,12 +3524,16 @@
           const sub = mat.subSurface;
           gl.uniform3f(loc.subColor, sub ? sub[0] : 0, sub ? sub[1] : 0, sub ? sub[2] : 0);
           gl.uniform2f(loc.subScatter, sub ? sub[3] : 0, sub ? sub[4] : 0);
-          // In an interior's room the game draws no glow for one in its G-buffer (the TLAD trace GTAIV.3, et01_aa:
-          // its solid gta_emissive lit only, program 14), but for a see-through or glass one, drawn forward (PS
-          // 0x24B6EE60: texture x vertex colour x emissiveMultiplier), whatever the hour (bc_1 by day: Bernie's fabric
-          // lamp shade dim, the glass bowl in his hall glowing white in the game's video).
+          // In an interior's room the solid emissives keep their glow pass (unlit_draw): the intro's ship
+          // (GTAIV.3.trace, s3 f470.25) draws its corridor lamps (gta_emissive, multiplier 25, bucket 4) into the
+          // G-buffer (50837756) and once more forward (50839436, PS 0x2c471ea0); Bernie's flat by day (GTAIV.trace,
+          // bc_1 s3 f994.5, 150200042 to 150200080) its lamps' (gta_emissive 5, gta_emissivestrong 12, the globe 9),
+          // the fabric shade's (5) dim only by its alpha (see glowOver). A solid gta_emissivenight beside the ship's
+          // lamps (multiplier 30) only into the G-buffer, lit. (An older trace at low settings showed et01_aa's solid
+          // gta_emissive lit only.) Whatever the hour, as see-through and glass ones (PS 0x24B6EE60).
           const inRoom = m.room >= 0;
-          const glow = sky && mat.emissive && !(inRoom && !mat.blend && !mat.glass) ? (mat.emissiveMultiplier || 0) * (sky.exposure || 1) * (mat.emissiveNight && !inRoom ? 1 - (sky.dayNight ?? 1) : 1) : 0;
+          const unlitInRoom = inRoom && !mat.blend && !mat.glass && mat.emissiveNight;
+          const glow = sky && mat.emissive && !unlitInRoom ? (mat.emissiveMultiplier || 0) * (sky.exposure || 1) * (mat.emissiveNight && !inRoom ? 1 - (sky.dayNight ?? 1) : 1) : 0;
           // A see-through one's glow (the alpha buckets) the game draws apart, forward, added (SRCALPHA / ONE) and
           // moved in depth by its vertex shader's zShift (0.0004 in the TLAD trace GTAIV.4, depth test LESSEQUAL):
           // gta_emissivestrong's pushed back (+c210, its glow stays behind a caged lamp's bars, bc_3 in GTAIV.1),
@@ -3287,6 +3555,14 @@
           const glowGlass = mat.emissive && !mat.emissiveNight && outside && (mat.glass || (mat.emissiveStrong && mat.blend));
           const glowApart = (glow > 0 || nightGlass) && (mat.blend || glowGlass) && outside;
           gl.uniform1f(loc.emissiveGlow, glowApart ? 0 : glow);
+          gl.uniform1i(loc.glowOver, !mat.emissiveStrong && !mat.emissiveNight);
+          // A vehicle's lamps, on where the mission's script turns them on (lightsOn, see CutActor.LightsOn; the intro's
+          // cab, GTAIV.3.trace at 271714054: dimmerSet 10, 10, 10, 9, 9, then 1; the car on the crane all 0).
+          gl.uniform1i(loc.vehicleLight, !!mat.vehicleLights);
+          if (mat.vehicleLights) {
+            gl.uniform1f(loc.emissiveGlow, sky && mat.lightsOn ? (mat.emissiveMultiplier || 0) * (sky.exposure || 1) : 0);
+            gl.uniform1fv(loc.lightDimmers, VehicleDimmers);
+          }
           // An emissive's vertex colour where the mesh has none: white (the game's default), not the middling light.
           if ((mat.emissiveScale > 0 || mat.emissive) && !m.hasColors && loc.vertexColor >= 0) gl.vertexAttrib3f(loc.vertexColor, 1, 1, 1);
           if (mat.dirtMask) gl.uniform3fv(loc.dirtMask, mat.dirtMask);

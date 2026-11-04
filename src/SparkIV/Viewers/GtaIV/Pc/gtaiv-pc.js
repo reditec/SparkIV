@@ -65,7 +65,7 @@ const GameGlsl = Object.freeze({
     uniform bool shadowBlend;
     // The lamps' shadows (see lampShadow, lampShadowTarget): their maps, each light's in it (its slot, -1 none),
     // whether they are there to read; drawing into a lamp's (lampShadowPass) its place and radius.
-    uniform highp sampler2D lampShadowMap; uniform float sceneLightShadow[40]; uniform bool lampShadowOn;
+    uniform highp sampler2D lampShadowMap; uniform float sceneLightShadow[80]; uniform bool lampShadowOn;
     uniform bool lampShadowPass; uniform vec3 lampShadowAt; uniform float lampShadowRange;
   `,
   // The vertex shader drawing into the sun's shadow map (sets gl_Position from p).
@@ -169,6 +169,12 @@ const GameGlsl = Object.freeze({
       float ao = (tree ? 0.5 : emissive && !textureAlpha ? 1.0
                 : vehicle ? clamp(dot(vColor, vec3(0.2125, 0.7154, 0.0721)), 0.0, 1.0)
                 : clamp(baked ? dayNight * vColor.r + (1.0 - dayNight) * vColor.g : vColor.r, 0.0, 1.0)) * actorAmbient;
+      // How much of it counts: 1 + gs2.z (AO - 1), for a ped 1 + gs2.y gs2.z (AO - 1) (see TimeCycle.AoMultiplier; the
+      // vertex programs of gta_ped and the map's shaders, GTAIV.3.trace 0x2ca6a8a0, 0x2c287000).
+      if (!tree && !vehicle && !(emissive && !textureAlpha)) ao = 1.0 + aoScale.x * aoScale.y * (ao - 1.0);
+      // A normal decal's the surface's under it (gta_normal_decal and the like keep GB2.z: COLORWRITEENABLE2 0x3;
+      // the page's decalAoBelow, the solid pass's AO at the pixel, see its outBelow).
+      if (decalAoBelow) ao = texelFetch(dirtTex, ivec2(gl_FragCoord.xy), 0).a;
       // A ped's rim on top, as its G-buffer pass writes it (gta_ped's PS 0x25ee22a0 in the TLAD trace GTAIV.3, Malc's
       // body at 102287002, and gta_ped_skin's): of v.n (the camera's view to the point, the normal after the normal
       // map) rim = 1 + 2 v.n where v.n <= 0 (else 1), x the vertex shader's gs2.w x green, at least 0; GB2.z (the AO
@@ -939,14 +945,24 @@ const GameGlsl = Object.freeze({
     gl.enable(gl.DEPTH_TEST);
   }
 
-// A location's lamp (its model's light) as GTAIV.exe lights it outside by day (0xC1E200 → 0xABCCD0 →
-// deferred_lighting.fxc): colour × strength in the same units as the sun (both times the time cycle's exposure),
-// out to its radius; by day only with flag 0x20 (0x40 alone: a night light, not made at all; 0xC1F9A0 with the
-// night factor 0 from 07:00 to 19:00). Null when it isn't on then or reaches nothing.
+const LampFadeEnd = 0.999;
+// How much a lamp is on at the hour, by its flags and the night factor (GTAIV.exe 0xC1F9A0): 0x20 and 0x40 both: always;
+// flag 1 fades it in: 0x20 by 1 - night, 0x40 by night; else 0x20 alone while night < 0.25, 0x40 alone from then on.
+function lampOn(flags, night) {
+  const day = (flags & 0x20) !== 0, dark = (flags & 0x40) !== 0;
+  if (day && dark) return 1;
+  if (flags & 1) return day && night <= LampFadeEnd ? 1 - night : dark && night >= 0.001 ? night : 0;
+  return (day && night < 0.25) || (dark && night >= 0.25) ? 1 : 0;
+}
+
+// A location's lamp (its model's light) as GTAIV.exe lights it outside (0xC1E200 → 0xABCCD0 → deferred_lighting.fxc):
+// colour × strength in the same units as the sun (both times the time cycle's exposure), out to its radius, when it
+// is on (lampOn). Null when it isn't on then or reaches nothing.
 function outdoorLamp(l) {
-  if ((l.flags & 0x20) === 0 || !(l.radius > 0.001) || !(l.strength >= 0.001)) return null;
+  const on = lampOn(l.flags, sky.nightFactor ?? 0);
+  if (on <= 0 || !(l.radius > 0.001) || !(l.strength >= 0.001)) return null;
   const exposure = sky.exposure || 1;
-  return { ...l, range: l.radius, color: l.rgb.map(c => c * l.strength * exposure) };
+  return { ...l, range: l.radius, color: l.rgb.map(c => c * l.strength * on * exposure) };
 }
 
 // The game makes an object's lights only within 35 m of the camera (0xC1DB60).
@@ -1357,15 +1373,22 @@ function gamePostBegin(w, h) {
   }
   const post = gamePost;
   if (post.w !== w || post.h !== h) {
-    for (const t of [post.picture, post.light, post.depth, post.solidDepth, post.quarter, post.blurred]) if (t) gl.deleteTexture(t);
-    for (const r of [post.msPicture, post.msLight, post.msDepth]) if (r) gl.deleteRenderbuffer(r);
+    for (const t of [post.picture, post.light, post.below, post.depth, post.solidDepth, post.quarter, post.blurred]) if (t) gl.deleteTexture(t);
+    for (const r of [post.msPicture, post.msLight, post.msBelow, post.msDepth]) if (r) gl.deleteRenderbuffer(r);
     const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
     const rb = format => { const r = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, r); gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, format, w, h); return r; };
-    post.msPicture = rb(gl.RGBA8); post.msLight = rb(gl.RGBA16F); post.msDepth = rb(gl.DEPTH24_STENCIL8);
+    post.msPicture = rb(gl.RGBA8); post.msLight = rb(gl.RGBA16F); post.msBelow = rb(gl.RGBA16F); post.msDepth = rb(gl.DEPTH24_STENCIL8);
     post.ms = post.ms || gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, post.ms);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, post.msPicture);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.RENDERBUFFER, post.msLight);
+    // The light on the solid scene without its colour (the page's outBelow), for the decals drawn over it.
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.RENDERBUFFER, post.msBelow);
+    post.below = gamePostTarget(w, h, gl.RGBA16F, gl.HALF_FLOAT, gl.NEAREST);
+    post.belowFrame = post.belowFrame || gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, post.belowFrame);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, post.below, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, post.ms);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, post.msDepth);
     post.picture = gamePostTarget(w, h, gl.RGBA8, gl.UNSIGNED_BYTE, gl.LINEAR);
     post.light = gamePostTarget(w, h, gl.RGBA16F, gl.HALF_FLOAT, gl.LINEAR);
@@ -1407,6 +1430,27 @@ function gamePostBegin(w, h) {
 // Only the picture drawn to (the sky, markers: no light of their own), or both again.
 function gamePostLight(on) {
   if (sceneFramebuffer) gl.drawBuffers(on ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1] : [gl.COLOR_ATTACHMENT0, gl.NONE]);
+}
+
+// The solid light without colour (outBelow) drawn too, or not: only while the page's meshes are drawn solid (a
+// program without that output, the sky's, drew nothing with it on).
+function gamePostBelowOn(on) {
+  if (gamePost && sceneFramebuffer === gamePost.ms) gl.drawBuffers(on ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2] : [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+}
+
+// The solid scene's light without its colour (outBelow) resolved into gamePost.below, for the decals (see the
+// page's decalBelow); the scene's framebuffer bound again.
+function gamePostBelow() {
+  if (!gamePost || sceneFramebuffer !== gamePost.ms) return null;
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, gamePost.ms);
+  gl.readBuffer(gl.COLOR_ATTACHMENT2);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, gamePost.belowFrame);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  gl.blitFramebuffer(0, 0, gamePost.w, gamePost.h, 0, 0, gamePost.w, gamePost.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, gamePost.ms);
+  gl.readBuffer(gl.COLOR_ATTACHMENT0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, gamePost.ms);
+  return gamePost.below;
 }
 
 function gamePostUniforms(u) {

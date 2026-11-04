@@ -97,6 +97,8 @@ namespace RageLib.Models.Resource
 
     public DrawableModel Drawable { get; set; }
     public FragTypeChild[] Children { get; set; }
+    /// <summary>The least corner of its collision bound's box (x, y, z); null without a bound.</summary>
+    public float[] BoundBoxMin { get; set; }
 
     #region Implementation of IFileAccess
 
@@ -113,6 +115,16 @@ namespace RageLib.Models.Resource
       else
       {
         throw new Exception("No model in FragType");
+      }
+
+      // Its collision bound (phBound, at +0xEC): the box's least corner at the bound's +0x20, as GTAIV.exe gives a
+      // vehicle's box (CAutomobile's virtual +0x60, 0xB11830).
+      br.BaseStream.Seek(0xEC, SeekOrigin.Begin);
+      uint boundOffset = ResourceUtil.ReadOffset(br);
+      if (boundOffset != 0 && boundOffset + 0x30 <= br.BaseStream.Length)
+      {
+        br.BaseStream.Seek(boundOffset + 0x20, SeekOrigin.Begin);
+        BoundBoxMin = new[] { br.ReadSingle(), br.ReadSingle(), br.ReadSingle() };
       }
 
       br.BaseStream.Seek(0x1F3, SeekOrigin.Begin);

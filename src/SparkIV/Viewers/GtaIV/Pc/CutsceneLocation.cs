@@ -54,16 +54,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// <summary>
   /// A room of an interior placed around a cutscene: its box in the interior (Min, Max), the interior's place
   /// in the scene (At) and the turn from the scene into the interior (Turn: local = Turn applied to scene - At);
-  /// Modifier: the hash of its time cycle modifier's name (0: none).
+  /// Modifier: the hash of its time cycle modifier's name (0: none); Blend: how much of it the room takes.
   /// </summary>
-  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max, uint Modifier = 0)
+  public sealed record LocationRoom(string Name, Vector3 At, Quaternion Turn, Vector3 Min, Vector3 Max, uint Modifier = 0, float Blend = 1f)
   {
     /// <summary>
     /// Its portals as GTAIV.exe eases a ped's light from around over them (0xA0D720): the sphere through two
     /// opposite corners (0xB20EC0: centre half way, radius half the diagonal; in the interior, as Min and Max),
-    /// and the room on the other side (the index in the location's list; -1 outside or none, limbo).
+    /// the room on the other side (the index in the location's list; -1 outside or none, limbo), and its four
+    /// corners (in the interior), whose share of the screen mixes the rooms' modifiers (0xA0E490); Link: one of
+    /// flag 0x2, joining another interior where it has a portal of its own (0xA8F750).
     /// </summary>
-    public IReadOnlyList<(Vector3 Centre, float Radius, int To)> Portals { get; init; } = Array.Empty<(Vector3, float, int)>();
+    public IReadOnlyList<(Vector3 Centre, float Radius, int To, Vector3[] Corners, bool Link)> Portals { get; init; } = Array.Empty<(Vector3, float, int, Vector3[], bool)>();
   }
 
   /// <summary>
@@ -92,6 +94,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>Whether the scene's origin is in none of the interiors' rooms: a scene outside.</summary>
     public bool Outdoors { get; private set; }
+
+    /// <summary>The map's time cycle modifier boxes (all of them: they work wherever the camera goes).</summary>
+    public IReadOnlyList<ModifierBox> ModifierBoxes { get; private set; } = Array.Empty<ModifierBox>();
 
     /// <summary>The floating litter placed, by model and count (for the load log).</summary>
     public string LitterModels { get; private set; } = "";
@@ -209,6 +214,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       /// version's one of the same loose file (its district's "slod"). A name not known is empty.
       /// </summary>
       public List<(string Name, Vector3 Position, Quaternion Rotation, int Parent)> Placements { get; } = new List<(string, Vector3, Quaternion, int)>();
+
+      /// <summary>The map's time cycle modifier boxes.</summary>
+      public List<ModifierBox> ModifierBoxes { get; } = new List<ModifierBox>();
       /// <summary>
       /// The placements whose instance flags have 0x100 (the .wpl entry's +32): GTAIV.exe lets their lamps cast
       /// shadows (0x9D76C0: entity +0x28 |= 8; 0xC1DB60 → 0xC1E200 passes it, with the lamp's own flag 0x8000).
@@ -248,11 +256,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       public List<(string Name, Vector3 Position, Quaternion Rotation, bool Lod, int Room)> Objects { get; } =
         new List<(string, Vector3, Quaternion, bool, int)>();
-      public List<(string Name, Vector3 Min, Vector3 Max, uint Modifier)> Rooms { get; } = new List<(string, Vector3, Vector3, uint)>();
+      public List<(string Name, Vector3 Min, Vector3 Max, uint Modifier, float Blend)> Rooms { get; } = new List<(string, Vector3, Vector3, uint, float)>();
       /// <summary>Its objects (their numbers in Objects) whose instance flags have 0x100 (see MapIndex.LampShadows).</summary>
       public HashSet<int> LampShadows { get; } = new HashSet<int>();
-      /// <summary>Its portals: the rooms on either side (their numbers in Rooms, 0 limbo), the sphere through two opposite corners.</summary>
-      public List<(int From, int To, Vector3 Centre, float Radius)> Portals { get; } = new List<(int, int, Vector3, float)>();
+      /// <summary>
+      /// Its portals: the rooms on either side (their numbers in Rooms, 0 limbo), the sphere through two opposite
+      /// corners, its four corners, and whether it links to another interior (flag 0x2).
+      /// </summary>
+      public List<(int From, int To, Vector3 Centre, float Radius, Vector3[] Corners, bool Link)> Portals { get; } = new List<(int, int, Vector3, float, Vector3[], bool)>();
     }
 
     private static readonly object Gate = new object();
@@ -315,7 +326,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
           roomOf[r] = location.Rooms.Count;
           // (The room's turn from the scene into the interior: the other way.)
-          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, Quaternion.Conjugate(turn), room.Min, room.Max, room.Modifier));
+          location.Rooms.Add(new LocationRoom(room.Name, p.Position - origin, Quaternion.Conjugate(turn), room.Min, room.Max, room.Modifier, room.Blend));
         }
         for (int r = 0; r < interior.Rooms.Count; r++)
         {
@@ -324,7 +335,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             continue;
           }
           var portals = interior.Portals.Where(q => q.From == r || q.To == r)
-                                        .Select(q => (q.Centre, q.Radius, To: (q.From == r ? q.To : q.From) is int other && other > 0 && other < roomOf.Length ? roomOf[other] : -1))
+                                        .Select(q => (q.Centre, q.Radius, To: (q.From == r ? q.To : q.From) is int other && other > 0 && other < roomOf.Length ? roomOf[other] : -1, q.Corners, q.Link))
                                         .ToList();
           location.Rooms[roomOf[r]] = location.Rooms[roomOf[r]] with { Portals = portals };
         }
@@ -371,6 +382,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // Or a camera of the scene outside every room (exactly): the intro's second section plays on the ship's deck,
       // its origin in the ship's hold; taken for a scene inside, it had no far versions, no skyline (#87).
       location.Outdoors = !InRoom(Vector3.Zero, 5) || (cameras ?? Array.Empty<Vector3>()).Any(c => !InRoom(c, 0));
+      location.ModifierBoxes = index.ModifierBoxes;
       if (!location.Outdoors || farRadius <= radius)
       {
         foreach (int i in world)
@@ -1013,7 +1025,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             try
             {
               looseStart[Path.GetFileNameWithoutExtension(path)] = index.Placements.Count;
-              ReadPlacements(System.IO.File.ReadAllBytes(path), nameOf, index.Placements, index.Placements.Count, index.LampShadows);
+              ReadPlacements(System.IO.File.ReadAllBytes(path), nameOf, index.Placements, index.Placements.Count, index.LampShadows, index.ModifierBoxes);
             }
             catch (Exception)
             {
@@ -1047,7 +1059,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                 else if (extension.Equals(".wpl", StringComparison.OrdinalIgnoreCase) && placementFiles.Add(file.Name))
                 {
                   ReadPlacements(file.GetData(), nameOf, index.Placements,
-                             looseStart.TryGetValue(Path.GetFileNameWithoutExtension(path), out int parents) ? parents : -1, index.LampShadows);
+                             looseStart.TryGetValue(Path.GetFileNameWithoutExtension(path), out int parents) ? parents : -1, index.LampShadows, index.ModifierBoxes);
                 }
               }
             }
@@ -1160,12 +1172,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           try
           {
             int flags = int.TryParse(fields[18], NumberStyles.Integer, CultureInfo.InvariantCulture, out int fl) ? fl : 0;
-            var first = new Vector3(F(fields[2]), F(fields[3]), F(fields[4]));
-            var third = new Vector3(F(fields[8]), F(fields[9]), F(fields[10]));
+            var corners = Enumerable.Range(0, 4).Select(c => new Vector3(F(fields[2 + c * 3]), F(fields[3 + c * 3]), F(fields[4 + c * 3]))).ToArray();
             if ((flags & 0x14) == 0 && int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int from) &&
                 int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int to))
             {
-              interior.Portals.Add((from, to, (first + third) / 2, Vector3.Distance(first, third) / 2));
+              interior.Portals.Add((from, to, (corners[0] + corners[2]) / 2, Vector3.Distance(corners[0], corners[2]) / 2, corners, (flags & 0x2) != 0));
             }
           }
           catch (FormatException)
@@ -1186,17 +1197,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           if (fields.Length >= 9 && !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
           {
             // A room's own line: its name and box; its 11th number the hash of its time cycle modifier's name
-            // (Bernie's rooms 1720238244, "BernieCrane" in timecyclemodifiers3.dat; 0 none, limbo).
+            // (Bernie's rooms 1720238244, "BernieCrane" in timecyclemodifiers3.dat; 0 none, limbo), its 10th how
+            // much of it the room takes (1 in the ship's rooms; GTAIV.exe keeps it at the room's +0x4C, 0xA0E3C0).
             uint modifier = fields.Length > 10 && uint.TryParse(fields[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint m) ? m : 0;
+            float blend = fields.Length > 9 && float.TryParse(fields[9], NumberStyles.Float, CultureInfo.InvariantCulture, out float bl) ? bl : 1f;
             try
             {
               var a = new Vector3(F(fields[3]), F(fields[4]), F(fields[5]));
               var b = new Vector3(F(fields[6]), F(fields[7]), F(fields[8]));
-              interior.Rooms.Add((fields[0], Vector3.Min(a, b), Vector3.Max(a, b), modifier));
+              interior.Rooms.Add((fields[0], Vector3.Min(a, b), Vector3.Max(a, b), modifier, blend));
             }
             catch (FormatException)
             {
-              interior.Rooms.Add((fields[0], Vector3.Zero, Vector3.Zero, modifier));
+              interior.Rooms.Add((fields[0], Vector3.Zero, Vector3.Zero, modifier, blend));
             }
           }
           else if (interior.Rooms.Count > 0)
@@ -1249,13 +1262,25 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// known empty, so the indexes stay right.
     /// </summary>
     private static void ReadPlacements(byte[] d, Dictionary<uint, string> nameOf, List<(string, Vector3, Quaternion, int)> placements, int parents,
-                                       HashSet<int>? lampShadows = null)
+                                       HashSet<int>? lampShadows = null, List<ModifierBox>? modifierBoxes = null)
     {
       if (d.Length < 68 || BitConverter.ToUInt32(d, 0) != 3)
       {
         return;
       }
       int count = (int)BitConverter.ToUInt32(d, 4);
+      if (modifierBoxes != null)
+      {
+        // The time cycle modifier boxes, after the placements and three more kinds of record: 44 bytes each.
+        int at = 68 + count * 48 + BitConverter.ToInt32(d, 8) * 0x44 + BitConverter.ToInt32(d, 12) * 0x30 + BitConverter.ToInt32(d, 16) * 0x38;
+        int boxes = BitConverter.ToInt32(d, 20);
+        for (int i = 0; i < boxes && at + 44 <= d.Length; i++, at += 44)
+        {
+          float F(int k) => BitConverter.ToSingle(d, at + 4 * k);
+          modifierBoxes.Add(new ModifierBox(new Vector3(F(0), F(1), F(2)), new Vector3(F(3), F(4), F(5)), F(7),
+                                            BitConverter.ToInt32(d, at + 32), BitConverter.ToInt32(d, at + 36), BitConverter.ToUInt32(d, at + 40)));
+        }
+      }
       for (int i = 0; i < count && 68 + i * 48 + 40 <= d.Length; i++)
       {
         int o = 68 + i * 48;
@@ -1304,6 +1329,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           int model = m;
           var node = JsonSerializer.SerializeToNode(material.ToMessage(key => Named(TextureKey(model, key))))!.AsObject();
           node["id"] = materialStart[m] + material.Id;
+          // A decal of a model with dirt decals: the whole model's decals drawn first, in the model's order (see the
+          // page's dirtFirst; bc_1's PUB_3BShdows1, the pony skin rug, then its shadow dirt over it).
+          if (material.Decal && Models[m].Materials.Any(x => x.Decal && x.DirtMask != null))
+          {
+            node["dirtModel"] = true;
+          }
           materials.Add(node);
           nextMaterial = Math.Max(nextMaterial, materialStart[m] + material.Id + 1);
         }
@@ -1475,6 +1506,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
               : null,
             // Its second axis (the volume's mesh is turned by it: gDeferredLightTangent).
             tangent = new[] { across.X, across.Y, across.Z },
+            // From how far from the camera it fades out (-1 never; see the page's lampFade).
+            fade = light.FadeDistance,
           });
         }
       }
@@ -1485,7 +1518,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         turn = new[] { r.Turn.X, r.Turn.Y, r.Turn.Z, r.Turn.W },
         min = new[] { r.Min.X, r.Min.Y, r.Min.Z },
         max = new[] { r.Max.X, r.Max.Y, r.Max.Z },
-        portals = r.Portals.Select(q => new { centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To }).ToList(),
+        blend = r.Blend,
+        portals = r.Portals.Select(q => new
+        {
+          centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To,
+          corners = q.Corners.SelectMany(c => new[] { c.X, c.Y, c.Z }).ToArray(), link = q.Link,
+        }).ToList(),
       }).ToList();
       return new { type = "mapLights", lights, rooms, volumeTexture, coronaTexture };
     }
