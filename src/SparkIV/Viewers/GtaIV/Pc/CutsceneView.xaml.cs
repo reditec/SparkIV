@@ -334,6 +334,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private uint? _dragPointer;
     private Windows.Foundation.Point _dragAt;
     private int _dragButton;
+    private bool _dragMouse;
     private readonly HashSet<Windows.System.VirtualKey> _held = new HashSet<Windows.System.VirtualKey>();
     private bool _shiftDown;
 
@@ -370,8 +371,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _dragButton = kind == Microsoft.UI.Input.PointerUpdateKind.MiddleButtonPressed ? 1 : kind == Microsoft.UI.Input.PointerUpdateKind.RightButtonPressed ? 2 : 0;
       _dragAt = point.Position;
       _dragPointer = e.Pointer.PointerId;
+      _dragMouse = e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse;
       // Looking round by hand leaves the cutscene's camera.
       _player.LeaveCamera();
+      // A mouse's moves are read by the render thread right before each frame (CursorDrag); touch and pen by their events.
+      if (_dragMouse)
+      {
+        _player.BeginDrag(_dragButton, XamlRoot?.RasterizationScale ?? 1, (float)Native.ActualHeight);
+      }
       Native.CapturePointer(e.Pointer);
       Focus(FocusState.Pointer);
       e.Handled = true;
@@ -381,6 +388,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       if (_player == null || _dragPointer != e.Pointer.PointerId)
       {
+        return;
+      }
+      if (_dragMouse)
+      {
+        // (Taken by the render thread from the cursor.)
+        e.Handled = true;
         return;
       }
       var at = e.GetCurrentPoint(Native).Position;
@@ -402,6 +415,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (_dragPointer == e.Pointer.PointerId)
       {
         _dragPointer = null;
+        if (_dragMouse)
+        {
+          _player?.EndDrag();
+        }
         Native.ReleasePointerCapture(e.Pointer);
       }
     }
@@ -413,8 +430,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      // (The page's deltaY is positive turning the wheel towards oneself, WinUI's delta then negative.)
-      _player.Zoom(-Math.Sign(properties.MouseWheelDelta));
+      // (The page's deltaY is positive turning the wheel towards oneself, WinUI's delta then negative; summed per frame.)
+      _player.Wheel(properties.MouseWheelDelta);
       e.Handled = true;
     }
 

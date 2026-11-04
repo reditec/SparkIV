@@ -121,6 +121,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
       _device = new D3D12Device();
       _swapChain = new PanelSwapChain(_device, panel, _width, _height, _scaleX, _scaleY);
+      D3D12Device.Log("swap chain: at most " + _swapChain.MaximumFrameLatency + " frame(s) queued");
       _renderer = new MeshRenderer(_device, ToneMapper.LightFormat);
       _toneMapper = new ToneMapper(_device, PanelSwapChain.BackBufferFormat);
 
@@ -165,7 +166,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       {
         while (!_stop)
         {
-          // At most two frames queued: wait until the swap chain takes the next one.
+          // At most MaximumFrameLatency frames queued (1): wait until the swap chain takes the next one.
           WaitForSingleObjectEx(_swapChain.WaitableObject, 1000, true);
           if (_stop)
           {

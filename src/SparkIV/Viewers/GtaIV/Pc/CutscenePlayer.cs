@@ -248,8 +248,57 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>Middle or right drag (Shift + left) by (dx, dy) pixels of a view <paramref name="viewHeight"/> pixels high.</summary>
     public void Pan(float dx, float dy, float viewHeight) => Order(() => _free.Pan(dx, dy, viewHeight));
 
-    /// <summary>The wheel: the sign of the page's deltaY (positive farther).</summary>
-    public void Zoom(int deltaSign) => Order(() => _free.Zoom(deltaSign));
+    // A mouse drag, its moves read on the render thread at each frame (CursorDrag), and the view's height in DIPs.
+    private readonly CursorDrag _drag = new CursorDrag();
+    private float _dragHeight = 1;
+
+    /// <summary>
+    /// A mouse press in the view (UI thread): its button (0 left, 1 middle, 2 right), the screen's pixels per DIP and the
+    /// view's height in DIPs. From then on each frame turns or moves by the cursor's move since the last (the page's
+    /// pointermove, sampled as late as possible) until <see cref="EndDrag"/>.
+    /// </summary>
+    public void BeginDrag(int button, double scale, float viewHeight)
+    {
+      var at = CursorDrag.Cursor();
+      Order(() =>
+      {
+        _drag.Begin(button, scale, at);
+        _dragHeight = viewHeight;
+      });
+    }
+
+    /// <summary>The mouse released (UI thread): the move up to the cursor now is still taken.</summary>
+    public void EndDrag()
+    {
+      var at = CursorDrag.Cursor();
+      Order(() => _drag.End(at));
+    }
+
+    // The drag's move since the last frame (the page's pointermove: left without Shift turns, else moves).
+    private void ApplyDrag()
+    {
+      if (!_drag.Take(out float dx, out float dy, out int button) || (dx == 0 && dy == 0))
+      {
+        return;
+      }
+      if (button == 0 && !CursorDrag.ShiftDown)
+      {
+        _free.Turn(dx, dy, _camera != null);
+      }
+      else
+      {
+        _free.Pan(dx, dy, _dragHeight);
+      }
+    }
+
+    /// <summary>
+    /// The wheel: WinUI's MouseWheelDelta (positive nearer). The deltas of a frame are summed and taken as one step of
+    /// the page's deltaY sign, as the browser hands the page at most one coalesced wheel event a frame (a high-resolution
+    /// wheel or a touchpad gives WinUI many small ones, each a whole 1.15 step otherwise).
+    /// </summary>
+    public void Wheel(int mouseWheelDelta) => Order(() => _wheel += mouseWheelDelta);
+
+    private int _wheel;
 
     /// <summary>The free view looks at the cast where it is now (the page's fit: double-click, the Fit button).</summary>
     public void Fit() => Order(() => _fitWanted = true);
@@ -289,6 +338,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
       }
       _free.LookFrom(eye, forward, fov, Math.Min(float.IsPositiveInfinity(distance) ? 3 : distance, 15));
+      // A first fit still waiting for the cast (it fits once the cast is posed) would throw the view left here away later.
+      _fitWanted = false;
     }
 
     // The page's fit for a cutscene: the actors where they are now (their bones, and 0.3 m round them for the body);
@@ -632,6 +683,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         order();
       }
+      // The mouse's move since the last frame, read now (after a press's leaving of the cutscene's camera above).
+      ApplyDrag();
+      if (_wheel != 0)
+      {
+        _free.Zoom(-Math.Sign(_wheel));
+        _wheel = 0;
+      }
 
       // The clock, as the page's tick: on by the time passed, stopping at the section's end.
       if (_playing)
@@ -673,20 +731,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
       float aspect = width / (float)Math.Max(1, height);
       // The free view: fitted once the actors are posed (their bones' places now), walking by the keys held (the page's
-      // walk: by the time passed, at most 0.1 s a step).
+      // walk: by the time passed, at most 0.1 s a step; its speed easing in and out), then what is shown eased towards
+      // the goal (OrbitCamera.Settle: native only, not the page's), every frame, also while stopped.
       if (_fitWanted && FitToCast(aspect))
       {
         _fitWanted = false;
       }
-      if (_walking.Count > 0)
-      {
-        _free.Walk(_walking, _walkLast < 0 ? 0 : now - _walkLast, _walkFast);
-        _walkLast = now;
-      }
-      else
-      {
-        _walkLast = -1;
-      }
+      double sinceLast = _walkLast < 0 ? 0 : now - _walkLast;
+      _walkLast = now;
+      _free.PivotAtEye = _camera != null;
+      _free.Walk(_walking, sinceLast, _walkFast);
+      _free.Settle(sinceLast);
       Matrix4x4 viewProjection;
       Vector3 eyeAt, toLight;
       // The camera's axes and opening (for the sun's shadow cascades).
@@ -717,7 +772,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         // Without the cutscene's camera: the free view (the page's own camera; no depth of field, no fades). Its far plane
         // the location's as through the camera (and beyond the scene), its near one as the page's free view.
-        float far = Math.Max(_far, _free.Distance + _free.SceneRadius * 4);
+        float far = Math.Max(_far, _free.ShownDistance + _free.SceneRadius * 4);
         eyeAt = _free.Eye;
         viewProjection = _free.ViewProjection(aspect, _free.NearClip(far, _visibleLocation != null), far);
         toLight = _free.HeadLight();

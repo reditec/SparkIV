@@ -73,7 +73,10 @@ namespace SparkIV.WinUI.Rendering.D3D12
       {
         _swapChain = swapChain1.QueryInterface<IDXGISwapChain3>();
       }
-      _swapChain.MaximumFrameLatency = 2;
+      // One frame queued at most (the mouse's turn on screen a frame sooner than with two); SPARKIV_D3D12_LATENCY=2 for
+      // the earlier two.
+      MaximumFrameLatency = Environment.GetEnvironmentVariable("SPARKIV_D3D12_LATENCY") is string latency && uint.TryParse(latency, out uint frames) && frames is >= 1 and <= 16 ? frames : 1;
+      _swapChain.MaximumFrameLatency = MaximumFrameLatency;
       WaitableObject = _swapChain.FrameLatencyWaitableObject;
       SetScale(scaleX, scaleY);
       SetOnPanel(panel, _swapChain.NativePointer);
@@ -97,6 +100,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     /// <summary>Signalled when the swap chain takes the next frame (wait on it before drawing one).</summary>
     public IntPtr WaitableObject { get; }
+
+    /// <summary>How many frames may be queued at most (1 unless SPARKIV_D3D12_LATENCY says otherwise).</summary>
+    public uint MaximumFrameLatency { get; }
 
     public int BufferIndex => (int)_swapChain.CurrentBackBufferIndex;
     public ID3D12Resource BackBuffer => _buffers[BufferIndex]!;

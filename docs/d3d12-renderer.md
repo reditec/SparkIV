@@ -111,7 +111,28 @@ round from the eye), middle or right drag (Shift + left) moves the target in the
 at the first section), W/S/A/D/Q/E walk (3 m/s or the scene's radius if smaller, Shift x 4, steps of at most 0.1 s).
 `CutsceneView` takes the panel's pointer events (captured) and its own keys (the view takes the focus on a press in the
 panel; keys cleared when it loses the focus or the window is left; Ctrl/Alt/Win combinations ignored) and orders them to
-the player (`Turn`, `Pan`, `Zoom`, `Fit`, `Walk`). A press or a walking key through the cutscene's camera leaves it from
+the player (`BeginDrag`/`EndDrag`, `Wheel`, `Fit`, `Walk`). A mouse drag's moves are not taken from the UI thread's
+pointer events (they come in bursts and a frame late): `CursorDrag` (`Rendering/D3D12`) reads the cursor (GetCursorPos,
+physical pixels / RasterizationScale = DIPs, the page's CSS pixels) and Shift on the render thread right before each
+frame's view is built, so each frame turns by the mouse's whole move since the last (touch and pen still by their
+events). The wheel's deltas of a frame are summed into one 1.15 step, as the browser coalesces wheel events per frame.
+The swap chain queues at most one frame (`PanelSwapChain.MaximumFrameLatency`, was 2; `SPARKIV_D3D12_LATENCY=2` for the
+old value; logged at start), a frame less from mouse to screen.
+
+**Deliberate departure from the page: smooth damping** (2026-11-04, the user's choice; native only, the page keeps its
+direct feel). The controls are the page's, but they change `OrbitCamera`'s goal (yaw, pitch, distance, target), and what
+is drawn follows it each frame (`OrbitCamera.Settle`, called by the player every frame, also while stopped; the render
+loop draws every frame anyway) with frame-rate-independent exponential damping, a = 1 - exp(-dt / tau):
+- turning: yaw and pitch, `TurnTau` 70 ms (half the turn shown after 50 ms, 94 % after 200 ms). Looking round from the
+  eye keeps the shown eye still (the damped state keeps the eye, not the target, when the section has a camera;
+  `PivotAtEye`), orbiting keeps the target;
+- moving and zooming: the kept point and the distance (in log space, so the wheel's 1.15 steps ease evenly),
+  `MoveTau` 90 ms;
+- walking: the speed eases towards the keys' (3 m/s or the scene's radius, Shift x 4) with `WalkTau` 110 ms, in and
+  out; released it stops under 7 % of the walking speed, about 0.3 s later (some 0.29 m run-out from 3 m/s).
+Not damped: leaving the cutscene's camera (`LookFrom` snaps, so the free view starts exactly at the camera's view),
+Fit (snaps), section changes (the free camera isn't touched). `SPARKIV_CAMERA_SMOOTH=<ms>` sets the turn's tau, the
+others in proportion (e.g. 140: twice as soft); 0 turns it off, the page's direct behaviour. A press or a walking key through the cutscene's camera leaves it from
 its eye and direction (the page's `leaveFilmCamera`, also when the camera button goes off) and the button goes off
 (`CameraLeft`, the page's "filmCamera" message). Near clip as the page's free view (a 1000th of the distance, with a
 location at least far / 2000 up to 10 cm), far plane the location's; no depth of field, fades or draw distance; the
