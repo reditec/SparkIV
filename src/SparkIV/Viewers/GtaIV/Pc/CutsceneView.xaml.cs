@@ -292,6 +292,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           FpsBelow = OnFpsBelow,
           Loaded = () => Working.IsActive = _locationLoading || _castLoading,
         };
+        _player.ShowLights(s_lights);
         _native = new D3D12View(Native, _player, text =>
         {
           Message.Text = text;
@@ -1090,7 +1091,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         // (Made ahead on another thread as a rule; else now.)
         var (motions, camera) = NativeSectionOf(index).GetAwaiter().GetResult();
-        _player.SetSection(motions, camera, _fps, _frames, _frame, play, s_camera && camera != null);
+        _player.SetSection(motions, camera, _fps, _frames, _frame, play, s_camera && camera != null,
+                           CutsceneLights.TracksOf(_document.Cut.Sections[index], _document.Sections[index]));
       }
       ShowFrame();
       PrepareNextSection();
@@ -1473,6 +1475,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       s_lights = LightsButton.IsChecked == true;
       Post(new { type = "sceneLights", on = s_lights });
+      _player?.ShowLights(s_lights);
     }
 
     private void VolumeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)

@@ -140,9 +140,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// The room a place is in (the page's roomOf): the first room in the list whose box holds it; where the boxes of two
     /// interiors hold it, the one whose floor it is nearest above. -1 for none.
     /// </summary>
-    public int RoomOf(Vector3 p)
+    public int RoomOf(Vector3 p) => RoomOf(_location?.Rooms, p);
+
+    /// <summary>The room of a list a place is in (see <see cref="RoomOf(Vector3)"/>); -1 for none.</summary>
+    public static int RoomOf(IReadOnlyList<LocationRoom>? rooms, Vector3 p)
     {
-      var rooms = _location?.Rooms;
       if (rooms == null)
       {
         return -1;

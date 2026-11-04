@@ -53,6 +53,50 @@ namespace SparkIV.WinUI.Rendering.D3D12
     };
   }
 
+  /// <summary>Which of the deferred light's formulas a light takes (see <see cref="DeferredLight"/>).</summary>
+  public enum DeferredLightModel
+  {
+    /// <summary>GTA IV's "light family" (deferred_lighting.fxc lightVolumePoint, ps06-ps09; with a shadow ps14).</summary>
+    Lamp = 0,
+    /// <summary>GTA IV's "filler" family (fillerVolumePoint, ps10-ps12; with a shadow ps15).</summary>
+    Filler = 1,
+    /// <summary>A cutscene's own light (ps09 / program 29): no AO factor.</summary>
+    Cut = 2,
+  }
+
+  /// <summary>Which pixels a light reaches, by whether their light is baked into vertex colours (the game's stencil).</summary>
+  public enum DeferredLightMask
+  {
+    All = 0,
+    /// <summary>Only peds and vehicles (a cutscene's own light).</summary>
+    NotBaked = 1,
+    /// <summary>Only the location and the cast's props (a cutscene's env*/shd* light).</summary>
+    BakedOnly = 2,
+  }
+
+  /// <summary>
+  /// A light added over the G-buffer by its own light volume (#112 step 5): the location's lamps, a cutscene's own lights,
+  /// a vehicle's tail lamps - as many as there are (no cap: the game draws each lamp as a volume). Its colour already
+  /// includes its strength and the exposure; a spot fades from <see cref="CosOuter"/> by <see cref="ConeScale"/>
+  /// (saturate((cos - CosOuter) x ConeScale)), CosOuter -1 lights all round. A game's module makes the list (GTA IV
+  /// (PC): CutsceneLights).
+  /// </summary>
+  public struct DeferredLight
+  {
+    public Vector3 Position;
+    public float Range;
+    public Vector3 Direction;
+    public float CosOuter;
+    public Vector3 Color;
+    public float ConeScale;
+    public DeferredLightModel Model;
+    public DeferredLightMask Mask;
+    /// <summary>A lamp in an interior's room: no AO factor (GTA IV's ps07); outside saturate(AO² + 0.5) (ps06/ps08).</summary>
+    public bool InRoom;
+    /// <summary>Drawn by the shadow programs (GTA IV's ps14/ps15; the shadow map itself not yet: fully lit).</summary>
+    public bool Shadowed;
+  }
+
   /// <summary>
   /// How the light of a frame becomes its picture (#112 step 4c), as GTA IV's post effects do it (the page's composite):
   /// the scale MidGrey / the adapted luminance, saturation, colour shift, colour correction (x 2) and gamma on the

@@ -144,7 +144,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       public int Group;
       public int[] Instances = Array.Empty<int>();
       public bool Registered;
+      // Its lamps (#112 step 5), made on the loading thread.
+      public CutsceneLights? Lights;
     }
+
+    // The section's own lights' tracks, and whether lights are shown at all (the view's light button, the page's
+    // "sceneLights").
+    private List<CutsceneLights.CutLight> _cutLights = new List<CutsceneLights.CutLight>();
+    private bool _showLights = true;
+
+    /// <summary>The cutscene's lights and the location's lamps shown or not (the view's light button).</summary>
+    public void ShowLights(bool on) => Order(() => _showLights = on);
     private readonly Dictionary<string, LocationGroup> _locations = new Dictionary<string, LocationGroup>();
     private string? _shownLocation;
     private int _nextGroup = 2;
@@ -264,6 +274,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Load(renderer =>
       {
         var prepared = renderer.Prepare(models.Select(m => ModelSource.Shown(m, false, baked: true)).ToList());
+        var lamps = new CutsceneLights(location);
         return () =>
         {
           // Dropped (or another load for the key) meanwhile: not wanted any more.
@@ -274,6 +285,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
           var numbers = renderer.Register(prepared, group.Group);
           group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0)).ToArray();
+          group.Lights = lamps;
           group.Registered = true;
           ShowLocations();
           LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
@@ -351,6 +363,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     private string? _visibleLocation;
+    private readonly CutsceneLights _noLamps = new CutsceneLights(null);
 
     private static void LogScene(MeshRenderer renderer, string what)
     {
@@ -360,15 +373,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>
     /// A section: its actors' motions, its camera (null: none), its frames a second and frames; at a frame, playing or
-    /// not; through the camera or not.
+    /// not; through the camera or not; its own lights (CutsceneLights.TracksOf).
     /// </summary>
     public void SetSection(IReadOnlyList<CutsceneMessages.CastMotion> motions, CutsceneCamera? camera, float fps, int frames,
-                           int frame, bool play, bool useCamera)
+                           int frame, bool play, bool useCamera, List<CutsceneLights.CutLight>? lights = null)
     {
       var poses = motions.ToDictionary(m => m.Actor, m => new CutscenePose(m));
       Order(() =>
       {
         _poses = poses;
+        _cutLights = lights ?? new List<CutsceneLights.CutLight>();
         _camera = camera;
         _useCamera = useCamera;
         _fps = fps > 0 ? fps : 30;
@@ -511,7 +525,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         toLight = new Vector3(0.4f, -0.5f, 0.8f);
       }
       var (light, tone) = _lighting?.At(eyeAt) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
-      return new SceneView(viewProjection, eyeAt, light, tone, _playing);
+      // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
+      List<DeferredLight>? lights = null;
+      if (_showLights && _lighting != null)
+      {
+        var lamps = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var shown) ? shown.Lights : null;
+        lamps ??= _noLamps;
+        lamps.SetSection(_cutLights);
+        lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values);
+      }
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights };
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).

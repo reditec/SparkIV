@@ -160,6 +160,19 @@ made on the CPU), Fresnel, the sun's glint and foam, the game's fog. Not yet: th
 sky only, so the sea comes out a little light), seeing through to the ground, the sun's shadow on it. Its simulation
 warms up over the first frames; inside, where the sea isn't simulated, there is nothing to warm up.
 
+### Lights and lamps (step 5, first version)
+
+The solid pass and the decals also write a G-buffer (albedo, normal + AO, place + whether baked; a decal blends only
+the albedo, as the game's decals write GB0's colour only); the lights are then added over it, one light volume each
+(a box round its sphere, its faces turned away from the camera only, depth test "greater or equal", one instanced
+draw), before the water and the see-through materials, which stay forward without lamp light for now. No cap: the
+page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `CutsceneLights` (GTA IV PC) picks them
+per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; env*/shd* only on baked
+surfaces, the others only on peds and vehicles), the tail lamps of vehicles whose lamps the script turns on, the
+location's lamps on at the hour, of the rooms seen, in view, faded by FadeDistance - with the page's formulas (light
+and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Not yet: the lamps'
+shine, the lamp shadow maps (shadow lamps fully lit), light volumes' visible cones and coronas.
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

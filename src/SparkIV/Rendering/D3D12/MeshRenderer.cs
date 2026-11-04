@@ -141,7 +141,12 @@ VsOut VSSkinned(VsSkinIn input)
   return Finish(p, n, input.uv, input.alpha, input.color);
 }
 
-float4 PSMain(VsOut input) : SV_Target
+// The light target and the G-buffer the lamps are added over (#112 step 5): what the lamps' light is multiplied by
+// (the albedo; a glowing material laid over by its alpha only by the rest), the normal and AO the light was made with,
+// the place (w: 1 written, 2 written and baked: the game's stencil for its cutscene lights).
+struct PsOut { float4 light : SV_Target0; float4 albedo : SV_Target1; float4 normal : SV_Target2; float4 place : SV_Target3; };
+
+PsOut Shade(VsOut input)
 {
   uint kind = (uint)(d.Material.z + 0.5);
   bool baked = (kind & Baked) != 0, ped = (kind & Ped) != 0, vehicle = (kind & Vehicle) != 0, tree = (kind & Tree) != 0;
@@ -183,6 +188,7 @@ float4 PSMain(VsOut input) : SV_Target
   float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
   float sunLit = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
   float3 rgb = albedo * (around * ao + f.Sun.rgb * sunLit);
+  float3 lampAlbedo = albedo;
   if (emissive)
   {
     // gta_emissive*: texture x vertex colour x its multiplier x the exposure (night ones only at night, not in a room);
@@ -192,14 +198,129 @@ float4 PSMain(VsOut input) : SV_Target
     float3 lightOf = texel.rgb * d.Tint.rgb * vc * glow;
     if (!night && (kind & Strong) == 0)
     {
-      rgb = lerp(rgb, lightOf, saturate(texel.a * input.alpha));
+      float over = saturate(texel.a * input.alpha);
+      rgb = lerp(rgb, lightOf, over);
+      // (The page's mix(base x lit, glow, a): the lamps' light too only by 1 - a.)
+      lampAlbedo *= 1 - over;
     }
     else
     {
       rgb += lightOf;
     }
   }
-  return float4(rgb, alpha);
+  PsOut o;
+  o.light = float4(rgb, alpha);
+  // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
+  // game's decals write GB0's colour only, the page's outBelow.)
+  o.albedo = float4(lampAlbedo, alpha);
+  o.normal = float4(n, ao);
+  o.place = float4(input.world, baked ? 2 : 1);
+  return o;
+}
+
+PsOut PSMain(VsOut input)
+{
+  return Shade(input);
+}
+
+// The see-through materials: the light target only (no lamps on them yet: the game lights them forward, its
+// lamps over 4 m only; not ported).
+float4 PSBlend(VsOut input) : SV_Target
+{
+  return Shade(input).light;
+}
+
+// The lamps (#112 step 5): one light volume per light, a box round its sphere drawn over the solid scene (its faces
+// turned away from the camera only, with the depth test 'greater or equal': each pixel whose surface lies inside the
+// box once), adding albedo x its light from the G-buffer - as GTA IV draws its lamps (deferred_lighting.fxc over its
+// G-buffer, a volume per light; the page lit them forward, at most 80, issue #106). The formulas the page's solid
+// shader has (ModelView.html, the light loop; gtaiv-pc.js lightFalloff): a = saturate(1 - d²/r²);
+//  light family (ps06-ps09): (a⁴ - 0.1) / 0.9 x spot x saturate(n.l), a lamp outside x saturate(AO² + 0.5), past a
+//    shadow (ps14) x saturate(0.5 AO⁴ + AO²), in a room no AO; a cutscene's light no AO, max(n.l, 0);
+//  filler (ps10-ps12): 1.5 (a² - 1/3) x spot x saturate((n.l - 0.2) x 1.25), past a shadow (ps15) saturate(1.5 (n.l - 1/3)).
+// Not yet: the lamps' shine (no specular maps here yet), the lamp shadow maps (shadow lamps fully lit).
+struct Light { float4 At; float4 Dir; float4 Color; float4 Kind; };
+StructuredBuffer<Light> Lights : register(t3);
+Texture2D<float4> GAlbedo : register(t4);
+Texture2D<float4> GNormal : register(t5);
+Texture2D<float4> GPlace : register(t6);
+
+struct LvOut { float4 position : SV_Position; nointerpolation uint light : LIGHT; };
+
+static const float2 Quad[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
+
+LvOut VSLight(uint vertex : SV_VertexID, uint instance : SV_InstanceID)
+{
+  Light l = Lights[instance];
+  uint face = vertex / 6, axis = face >> 1;
+  float side = (face & 1) ? 1 : -1;
+  float2 q = Quad[vertex % 6];
+  float3 c = axis == 0 ? float3(side, q.x, q.y) : axis == 1 ? float3(q.y, side, q.x) : float3(q.x, q.y, side);
+  float3 n = axis == 0 ? float3(side, 0, 0) : axis == 1 ? float3(0, side, 0) : float3(0, 0, side);
+  float r = l.At.w * 1.01;
+  LvOut o;
+  o.position = mul(float4(l.At.xyz + c * r, 1), f.ViewProjection);
+  // A face turned towards the camera: dropped (all its corners on one point), so either winding works.
+  if (dot(n, l.At.xyz + n * r - f.Eye.xyz) <= 0)
+  {
+    o.position = float4(0, 0, 0.5, 1);
+  }
+  o.light = instance;
+  return o;
+}
+
+float4 PSLight(LvOut input) : SV_Target
+{
+  int3 px = int3(input.position.xy, 0);
+  float4 place = GPlace.Load(px);
+  if (place.w < 0.5)
+  {
+    discard;
+  }
+  Light l = Lights[input.light];
+  bool baked = place.w > 1.5;
+  uint mask = (uint)(l.Kind.w + 0.5);
+  if ((mask == 1 && baked) || (mask == 2 && !baked))
+  {
+    discard;
+  }
+  float3 L = l.At.xyz - place.xyz;
+  float range = l.At.w;
+  float d = length(L);
+  if (d >= range || d < 1e-4)
+  {
+    discard;
+  }
+  L /= d;
+  float4 nao = GNormal.Load(px);
+  float3 n = normalize(nao.xyz + 1e-6);
+  float ao = nao.w;
+  float a = saturate(1 - d * d / (range * range));
+  float spot = 1;
+  if (l.Dir.w > -1)
+  {
+    spot = saturate((dot(-L, l.Dir.xyz) - l.Dir.w) * l.Color.w);
+  }
+  uint model = (uint)(l.Kind.x + 0.5);
+  bool inRoom = l.Kind.y > 0.5, shadowed = l.Kind.z > 0.5;
+  float nl = dot(n, L);
+  float3 lit;
+  if (model == 1)
+  {
+    float nearBy = max(1.5 * (a * a - 1.0 / 3.0), 0);
+    lit = l.Color.rgb * nearBy * spot * (shadowed ? saturate(1.5 * (nl - 1.0 / 3.0)) : saturate((nl - 0.2) * 1.25));
+  }
+  else
+  {
+    float reach = max((a * a * a * a - 0.1) / 0.9, 0);
+    float3 lampLight = l.Color.rgb * reach * spot;
+    if (model == 0 && !inRoom)
+    {
+      lampLight *= shadowed ? saturate(0.5 * ao * ao * ao * ao + ao * ao) : saturate(ao * ao + 0.5);
+    }
+    lit = lampLight * saturate(nl);
+  }
+  return float4(GAlbedo.Load(px).rgb * lit, 0);
 }
 ";
 
@@ -212,6 +333,12 @@ float4 PSMain(VsOut input) : SV_Target
     // Bone matrices a frame (for all skinned instances), and how many frames' worth are kept (frames in flight).
     private const int PaletteCapacity = 65536;
     private const int PaletteSlots = 4;
+
+    // The G-buffer the lamps are added over (#112 step 5): albedo, normal + AO, place + kind (see the shader's PsOut).
+    private static readonly Format[] GBufferFormats = { Format.R16G16B16A16_Float, Format.R16G16B16A16_Float, Format.R32G32B32A32_Float };
+    // Lights a frame (no cap of the game's or the page's kind; the harbour has some 150 lamps in view), 64 bytes each.
+    private const int LightCapacity = 16384;
+    private const int LightBytes = 64;
 
     internal enum Pass : byte { Solid, Blend, Decal }
 
@@ -320,6 +447,19 @@ float4 PSMain(VsOut input) : SV_Target
     private readonly unsafe Matrix4x4* _paletteMapped;
     private int _paletteSlot;
 
+    // The lamps' pass: its root signature (frame b1, lights t3, the G-buffer t4-t6), pipeline, light buffer, G-buffer.
+    private readonly ID3D12RootSignature _lightSignature;
+    private readonly ID3D12PipelineState _lightPipeline;
+    private readonly ID3D12Resource _lights;
+    private readonly unsafe byte* _lightsMapped;
+    private readonly ID3D12DescriptorHeap _gBufferRtvs;
+    private readonly ID3D12DescriptorHeap _gBufferSrvs;
+    private readonly ID3D12Resource?[] _gBuffer = new ID3D12Resource?[3];
+    private int _gWidth, _gHeight;
+
+    /// <summary>The lights added last frame.</summary>
+    public int LightsDrawn { get; private set; }
+
     public unsafe MeshRenderer(D3D12Device device, Format targetFormat)
     {
       _device = device;
@@ -350,6 +490,7 @@ float4 PSMain(VsOut input) : SV_Target
       var vertexShader = Compile(DxcShaderStage.Vertex, "VSMain");
       var skinnedShader = Compile(DxcShaderStage.Vertex, "VSSkinned");
       var pixelShader = Compile(DxcShaderStage.Pixel, "PSMain");
+      var blendShader = Compile(DxcShaderStage.Pixel, "PSBlend");
       var input = new[]
       {
         new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
@@ -363,21 +504,29 @@ float4 PSMain(VsOut input) : SV_Target
         new InputElementDescription("BLENDINDICES", 0, Format.R32G32B32A32_Float, 0, 1),
         new InputElementDescription("BLENDWEIGHT", 0, Format.R32G32B32A32_Float, 16, 1),
       }).ToArray();
-      GraphicsPipelineStateDescription Pipeline(bool skinned, BlendDescription blend, DepthStencilDescription depth, RasterizerDescription rasterizer) => new GraphicsPipelineStateDescription
+      // Solid and decals also write the G-buffer (step 5); the see-through materials the light target only.
+      var withGBuffer = new[] { targetFormat }.Concat(GBufferFormats).ToArray();
+      GraphicsPipelineStateDescription Pipeline(bool skinned, BlendDescription blend, DepthStencilDescription depth, RasterizerDescription rasterizer, bool gBuffer) => new GraphicsPipelineStateDescription
       {
         RootSignature = _rootSignature,
         VertexShader = skinned ? skinnedShader : vertexShader,
-        PixelShader = pixelShader,
+        PixelShader = gBuffer ? pixelShader : blendShader,
         InputLayout = new InputLayoutDescription(skinned ? skinnedInput : input),
         SampleMask = uint.MaxValue,
         PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
         RasterizerState = rasterizer,
         BlendState = blend,
         DepthStencilState = depth,
-        RenderTargetFormats = new[] { targetFormat },
+        RenderTargetFormats = gBuffer ? withGBuffer : new[] { targetFormat },
         DepthStencilFormat = PanelSwapChainFormats.Depth,
         SampleDescription = new SampleDescription(1, 0),
       };
+      // A decal: blended into the light and into the G-buffer's albedo (colour only), the normal, AO and place left.
+      var decalBlend = BlendDescription.NonPremultiplied;
+      decalBlend.IndependentBlendEnable = true;
+      decalBlend.RenderTarget[1] = decalBlend.RenderTarget[0] with { RenderTargetWriteMask = ColorWriteEnable.Red | ColorWriteEnable.Green | ColorWriteEnable.Blue };
+      decalBlend.RenderTarget[2] = decalBlend.RenderTarget[0] with { BlendEnable = false, RenderTargetWriteMask = 0 };
+      decalBlend.RenderTarget[3] = decalBlend.RenderTarget[2];
       // Both faces, or the back ones culled: the page's front faces wind counter-clockwise (GL's default), and so they
       // do here (checked: with Direct3D's default, clockwise, bc_1's hall showed the next room's wallpaper through
       // its walls).
@@ -390,11 +539,41 @@ float4 PSMain(VsOut input) : SV_Target
         for (int cull = 0; cull < 2; cull++)
         {
           int at = Pipe(s == 1, Pass.Solid, cull == 1);
-          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, cull == 1 ? front : both));
-          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front : both));
-          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled));
+          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, DepthStencilDescription.Default, cull == 1 ? front : both, true));
+          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, DepthStencilDescription.Read, cull == 1 ? front : both, false));
+          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, decalBlend, DepthStencilDescription.Read, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled, true));
         }
       }
+
+      // The lamps' pass (step 5): the frame's constants, the lights, the G-buffer.
+      _lightSignature = d3d.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, new[]
+      {
+        new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.All),
+        new RootParameter1(RootParameterType.ShaderResourceView, new RootDescriptor1(3, 0), ShaderVisibility.All),
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 4, 0, 0)), ShaderVisibility.Pixel),
+      }));
+      _lightPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _lightSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSLight"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSLight"),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        // (The faces towards the camera are dropped in the vertex shader; not clipped at the far plane.)
+        RasterizerState = RasterizerDescription.CullNone with { DepthClipEnable = false },
+        BlendState = AddedLight(),
+        DepthStencilState = new DepthStencilDescription(true, DepthWriteMask.Zero, ComparisonFunction.GreaterEqual),
+        RenderTargetFormats = new[] { targetFormat },
+        DepthStencilFormat = PanelSwapChainFormats.Depth,
+        SampleDescription = new SampleDescription(1, 0),
+      });
+      _lights = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
+                                            ResourceDescription.Buffer((ulong)PaletteSlots * LightCapacity * LightBytes), ResourceStates.GenericRead);
+      void* lightsMapped;
+      _lights.Map(0, null, &lightsMapped).CheckError();
+      _lightsMapped = (byte*)lightsMapped;
+      _gBufferRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
+      _gBufferSrvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
       // The frame's constants (camera, light), a slot per frame in flight.
       _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
                                            ResourceDescription.Buffer((ulong)PaletteSlots * FrameSlotBytes), ResourceStates.GenericRead);
@@ -409,6 +588,42 @@ float4 PSMain(VsOut input) : SV_Target
       _palette.Map(0, null, &mapped).CheckError();
       _paletteMapped = (Matrix4x4*)mapped;
     }
+
+    // A light added onto the light target's colour (one + one), its alpha left.
+    private static BlendDescription AddedLight()
+    {
+      var blend = new BlendDescription(Blend.One, Blend.One);
+      blend.RenderTarget[0] = blend.RenderTarget[0] with { RenderTargetWriteMask = ColorWriteEnable.Red | ColorWriteEnable.Green | ColorWriteEnable.Blue };
+      return blend;
+    }
+
+    // The G-buffer at the target's size (made again when it changes; the GPU done with the old one first).
+    private void SizeGBuffer(int width, int height)
+    {
+      if (width == _gWidth && height == _gHeight && _gBuffer[0] != null)
+      {
+        return;
+      }
+      _device.WaitIdle();
+      var d3d = _device.Device;
+      uint rtvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      uint srvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
+      for (int i = 0; i < _gBuffer.Length; i++)
+      {
+        _gBuffer[i]?.Dispose();
+        var clear = new ClearValue(GBufferFormats[i], new Vortice.Mathematics.Color4(0, 0, 0, 0));
+        _gBuffer[i] = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+          ResourceDescription.Texture2D(GBufferFormats[i], (uint)Math.Max(1, width), (uint)Math.Max(1, height), 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+          ResourceStates.RenderTarget, clear);
+        d3d.CreateRenderTargetView(_gBuffer[i], null, _gBufferRtvs.GetCPUDescriptorHandleForHeapStart() + i * (int)rtvSize);
+        d3d.CreateShaderResourceView(_gBuffer[i], null, _gBufferSrvs.GetCPUDescriptorHandleForHeapStart() + i * (int)srvSize);
+      }
+      _gWidth = width;
+      _gHeight = height;
+    }
+
+    private CpuDescriptorHandle GBufferView(int i) =>
+      _gBufferRtvs.GetCPUDescriptorHandleForHeapStart() + i * (int)_device.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
 
     private static int Pipe(bool skinned, Pass pass, bool culled) => (skinned ? 6 : 0) + (int)pass * 2 + (culled ? 1 : 0);
 
@@ -726,20 +941,29 @@ float4 PSMain(VsOut input) : SV_Target
 
     /// <summary>
     /// Draws every instance into the light target (cleared by the caller) as seen from <paramref name="eye"/> with the
-    /// view-projection, in the frame's light: solid, then decals and see-through materials. Clears the depth.
+    /// view-projection, in the frame's light: solid (also into the G-buffer), decals, the <paramref name="lights"/>
+    /// over them (a light volume each), what <paramref name="afterSolid"/> draws (water), then the see-through
+    /// materials. Clears the depth.
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light,
-                            Action<ID3D12GraphicsCommandList>? afterSolid = null)
+                            Action<ID3D12GraphicsCommandList>? afterSolid = null, IReadOnlyList<DeferredLight>? lights = null)
     {
       list.OMSetRenderTargets(renderTarget, depth);
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
       list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
       list.RSSetScissorRect(width, height);
       DrawCalls = 0;
+      LightsDrawn = 0;
       if (_instances.Count == 0)
       {
         return;
+      }
+      SizeGBuffer(width, height);
+      var gTargets = new[] { renderTarget, GBufferView(0), GBufferView(1), GBufferView(2) };
+      for (int i = 1; i < gTargets.Length; i++)
+      {
+        list.ClearRenderTargetView(gTargets[i], new Vortice.Mathematics.Color4(0, 0, 0, 0));
       }
 
       // The skinned instances' bones into this frame's slot of the palette buffer.
@@ -784,26 +1008,99 @@ float4 PSMain(VsOut input) : SV_Target
       frame[38] = light.PedAoScale;
       frame[39] = light.AoScale;
 
-      void Bind()
+      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
+      void Bind(bool gBuffer)
       {
-        list.OMSetRenderTargets(renderTarget, depth);
+        if (gBuffer)
+        {
+          list.OMSetRenderTargets(gTargets, depth);
+        }
+        else
+        {
+          list.OMSetRenderTargets(renderTarget, depth);
+        }
         list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
         list.RSSetScissorRect(width, height);
         list.SetGraphicsRootSignature(_rootSignature);
         list.SetDescriptorHeaps(_textures.Heap);
-        list.SetGraphicsRootConstantBufferView(3, _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes));
+        list.SetGraphicsRootConstantBufferView(3, frameAddress);
         list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
-      Bind();
+      Bind(true);
       DrawPass(list, Pass.Solid);
       DrawPass(list, Pass.Decal);
-      // What goes between the solid scene and the see-through materials (the water), with its own states.
-      if (afterSolid != null)
+      // The lamps over the solid scene and its decals (step 5); the water and see-through materials come after
+      // (forward, without them for now).
+      if (lights != null && lights.Count > 0)
       {
-        afterSolid(list);
-        Bind();
+        DrawLights(list, renderTarget, depth, width, height, lights, frameAddress);
       }
+      // What goes between the solid scene and the see-through materials (the water), with its own states.
+      afterSolid?.Invoke(list);
+      Bind(false);
       DrawPass(list, Pass.Blend);
+    }
+
+    // The lights into this frame's slot of the light buffer, then a box each (instanced) over the G-buffer.
+    private unsafe void DrawLights(ID3D12GraphicsCommandList list, CpuDescriptorHandle renderTarget, CpuDescriptorHandle depth,
+                                   int width, int height, IReadOnlyList<DeferredLight> lights, ulong frameAddress)
+    {
+      int count = 0;
+      var into = (float*)(_lightsMapped + (long)_paletteSlot * LightCapacity * LightBytes);
+      foreach (var l in lights)
+      {
+        if (count >= LightCapacity)
+        {
+          break;
+        }
+        if (!(l.Range > 0) || l.Color == Vector3.Zero)
+        {
+          continue;
+        }
+        var p = into + count * (LightBytes / 4);
+        p[0] = l.Position.X;
+        p[1] = l.Position.Y;
+        p[2] = l.Position.Z;
+        p[3] = l.Range;
+        p[4] = l.Direction.X;
+        p[5] = l.Direction.Y;
+        p[6] = l.Direction.Z;
+        p[7] = l.CosOuter;
+        p[8] = l.Color.X;
+        p[9] = l.Color.Y;
+        p[10] = l.Color.Z;
+        p[11] = l.ConeScale;
+        p[12] = (float)l.Model;
+        p[13] = l.InRoom ? 1 : 0;
+        p[14] = l.Shadowed ? 1 : 0;
+        p[15] = (float)l.Mask;
+        count++;
+      }
+      LightsDrawn = count;
+      if (count == 0)
+      {
+        return;
+      }
+      foreach (var g in _gBuffer)
+      {
+        list.ResourceBarrierTransition(g!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+      }
+      list.OMSetRenderTargets(renderTarget, depth);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
+      list.RSSetScissorRect(width, height);
+      list.SetGraphicsRootSignature(_lightSignature);
+      list.SetPipelineState(_lightPipeline);
+      list.SetDescriptorHeaps(_gBufferSrvs);
+      list.SetGraphicsRootConstantBufferView(0, frameAddress);
+      list.SetGraphicsRootShaderResourceView(1, _lights.GPUVirtualAddress + (ulong)((long)_paletteSlot * LightCapacity * LightBytes));
+      list.SetGraphicsRootDescriptorTable(2, _gBufferSrvs.GetGPUDescriptorHandleForHeapStart());
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      list.DrawInstanced(36, (uint)count, 0, 0);
+      DrawCalls++;
+      foreach (var g in _gBuffer)
+      {
+        list.ResourceBarrierTransition(g!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      }
     }
 
     private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
@@ -876,6 +1173,16 @@ float4 PSMain(VsOut input) : SV_Target
       _palette.Dispose();
       _frame.Unmap(0);
       _frame.Dispose();
+      _lights.Unmap(0);
+      _lights.Dispose();
+      foreach (var g in _gBuffer)
+      {
+        g?.Dispose();
+      }
+      _gBufferRtvs.Dispose();
+      _gBufferSrvs.Dispose();
+      _lightPipeline.Dispose();
+      _lightSignature.Dispose();
       foreach (var pipeline in _pipelines)
       {
         pipeline.Dispose();

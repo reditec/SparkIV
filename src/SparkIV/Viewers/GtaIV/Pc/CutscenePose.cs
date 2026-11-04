@@ -88,6 +88,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     public int BoneCount => _parent.Length;
 
+    /// <summary>The actor posed.</summary>
+    public CutActor Actor => _motion.Actor;
+
+    /// <summary>Its bones' places in the scene at the frame last posed (<see cref="SkinAt"/>; the page's a.world), or null before.</summary>
+    public Matrix4x4[]? LastWorld { get; private set; }
+
+    /// <summary>A bone's number by its name (any case), -1 if none.</summary>
+    public int Bone(string name) => BoneNamed(name);
+
+    /// <summary>A bone's place in the model at rest (the page's inverseRigid(inverseRest[i]) translation).</summary>
+    public Vector3 RestPlace(int bone) => Matrix4x4.Invert(_inverseRest[bone], out var rest) ? rest.Translation : Vector3.Zero;
+
     /// <summary>Where the actor is at the frame last posed (<see cref="SkinAt"/>): its model tracks' place, else its root bone's.</summary>
     public Vector3 Place { get; private set; }
 
@@ -276,6 +288,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         // A prop without model tracks: where its root bone puts it (the page's poseCast).
         Place = world.Length > 0 ? world[0].Translation : Vector3.Zero;
       }
+      LastWorld = world;
       var skin = new Matrix4x4[world.Length];
       for (int i = 0; i < world.Length; i++)
       {

@@ -62,7 +62,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
   }
 
   /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
-  public readonly record struct SceneView(Matrix4x4 ViewProjection, Vector3 Eye, FrameLight Light, ToneParams Tone, bool Playing);
+  public readonly record struct SceneView(Matrix4x4 ViewProjection, Vector3 Eye, FrameLight Light, ToneParams Tone, bool Playing)
+  {
+    /// <summary>The lights added over the solid scene (lamps, a cutscene's own; see <see cref="DeferredLight"/>), or null.</summary>
+    public System.Collections.Generic.IReadOnlyList<DeferredLight>? Lights { get; init; }
+  }
 
   /// <summary>
   /// The native renderer in a <see cref="SwapChainPanel"/> (#112): device, swap chain and renderer, drawing an
@@ -180,7 +184,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
           _toneMapper.BeginLight(list);
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
-                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view));
+                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view),
+                         view.Lights);
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
           bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);
