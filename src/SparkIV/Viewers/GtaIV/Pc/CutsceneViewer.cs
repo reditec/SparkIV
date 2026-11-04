@@ -38,6 +38,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public CutFile Cut { get; init; } = null!;
     public List<CutActor> Actors { get; init; } = new List<CutActor>();
 
+    /// <summary>The .cut file's name (intro.cut), for the logs.</summary>
+    public string Name { get; init; } = "";
+
     /// <summary>Each section's animation dictionary, or null where it isn't beside the file.</summary>
     public List<AnimationFile?> Sections { get; init; } = new List<AnimationFile?>();
 
@@ -132,7 +135,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var document = new CutsceneDocument
       {
         Cut = cut, Actors = actors, Sections = sections, Texts = texts, Game = game.Name, GameFolder = game.Folder,
-        AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote, Log = log,
+        AudioFile = audioFile, AudioTrack = audioTrack, AudioNote = audioNote, Log = log, Name = file.Name,
       };
       document.LoadCast = () => document.Script = LoadCast(file.Name, cut, actors, folder, player, install, log);
       return document;

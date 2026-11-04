@@ -20,9 +20,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using Vector3 = System.Numerics.Vector3;
 using Microsoft.UI.Xaml;
@@ -319,8 +321,27 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           Working.IsActive = _locationLoading;
           break;
         case "fps":
-          // The page's frames per second while playing (once a second); cleared when playing stops.
+          // The page's frames per second while playing (once a second); cleared when playing stops. With it the lowest
+          // and highest rate since the page began playing (its section), kept here across the sections.
           FpsText.Text = _playing && root.TryGetProperty("fps", out var fps) ? $"{fps.GetInt32()} fps" : "";
+          if (_playing)
+          {
+            if (root.TryGetProperty("min", out var low) && low.ValueKind == JsonValueKind.Object &&
+                (_fpsMin == null || low.GetProperty("fps").GetDouble() < _fpsMin.Value.Fps))
+            {
+              _fpsMin = (low.GetProperty("fps").GetDouble(), _section, low.GetProperty("frame").GetInt32());
+            }
+            if (root.TryGetProperty("max", out var high) && high.ValueKind == JsonValueKind.Object &&
+                (_fpsMax == null || high.GetProperty("fps").GetDouble() > _fpsMax.Value.Fps))
+            {
+              _fpsMax = (high.GetProperty("fps").GetDouble(), _section, high.GetProperty("frame").GetInt32());
+            }
+          }
+          break;
+        case "fpsBelow":
+          // The rate fell below 30 frames a second, or is back at 30 or more (over the last half second).
+          FpsLog((root.GetProperty("below").GetBoolean() ? "below 30 fps" : "back at 30 fps or more").PadRight(24) +
+                 $"{root.GetProperty("fps").GetDouble().ToString("0.0", CultureInfo.InvariantCulture),6} fps   section {_section + 1}, frame {root.GetProperty("frame").GetInt32() + 1}");
           break;
         case "frame":
           _frame = root.GetProperty("frame").GetInt32();
@@ -1182,12 +1203,58 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     private bool _settingStart;
 
+    // The frame rate while playing, for SparkIV-fps.log beside SparkIV.exe: when it falls below 30 and when it is back,
+    // and on stopping the lowest and highest rate with their section and frame (from the page, see its countFrame).
+    private (double Fps, int Section, int Frame)? _fpsMin, _fpsMax;
+    private bool _fpsHeader;
+
+    private void FpsLog(string line)
+    {
+      try
+      {
+        var text = new StringBuilder();
+        if (!_fpsHeader)
+        {
+          _fpsHeader = true;
+          text.AppendLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "  " + _document.Name + "  playing");
+        }
+        text.AppendLine("  " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "  " + line);
+        File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "SparkIV-fps.log"), text.ToString());
+      }
+      catch (Exception)
+      {
+        // A folder not to be written in: no log.
+      }
+    }
+
+    private void FpsSummary()
+    {
+      if (_fpsMin is { } low && _fpsMax is { } high)
+      {
+        FpsLog("lowest  " + low.Fps.ToString("0.0", CultureInfo.InvariantCulture).PadLeft(6) + $" fps   section {low.Section + 1}, frame {low.Frame + 1}");
+        FpsLog("highest " + high.Fps.ToString("0.0", CultureInfo.InvariantCulture).PadLeft(6) + $" fps   section {high.Section + 1}, frame {high.Frame + 1}");
+      }
+      if (_fpsHeader)
+      {
+        try
+        {
+          File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "SparkIV-fps.log"), Environment.NewLine);
+        }
+        catch (Exception)
+        {
+        }
+      }
+      _fpsMin = _fpsMax = null;
+      _fpsHeader = false;
+    }
+
     private void ShowFrame()
     {
       double now = Now;
       if (!_playing)
       {
         FpsText.Text = "";
+        FpsSummary();
       }
       FrameText.Text = TimeSpan.FromSeconds(now).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(Length).ToString(@"m\:ss\.f");
       SectionText.Text = "Section " + (_section + 1) + " of " + _document.Cut.Sections.Count + "   ·   frame " + (_frame + 1) + " / " + _frames;
