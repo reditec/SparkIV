@@ -321,6 +321,7 @@ float4 PSSky(VsOut i) : SV_Target
     private readonly ID3D12RootSignature _rootSignature;
     private readonly ID3D12PipelineState _perlinPipeline;
     private readonly ID3D12PipelineState _skyPipeline;
+    private readonly ID3D12PipelineState _mirrorSkyPipeline;
     private readonly ID3D12DescriptorHeap _srvHeap;
     private readonly ID3D12DescriptorHeap _rtvHeap;
     private readonly uint _srvSize;
@@ -361,7 +362,7 @@ float4 PSSky(VsOut i) : SV_Target
       };
       _rootSignature = d3d.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters, samplers));
       var vs = Compile(DxcShaderStage.Vertex, "VSMain");
-      GraphicsPipelineStateDescription Pipeline(string ps, Format format) => new GraphicsPipelineStateDescription
+      GraphicsPipelineStateDescription Pipeline(string ps, Format format, uint samples = 1) => new GraphicsPipelineStateDescription
       {
         RootSignature = _rootSignature,
         VertexShader = vs,
@@ -372,10 +373,12 @@ float4 PSSky(VsOut i) : SV_Target
         BlendState = BlendDescription.Opaque,
         DepthStencilState = DepthStencilDescription.None,
         RenderTargetFormats = new[] { format },
-        SampleDescription = new SampleDescription(1, 0),
+        SampleDescription = new SampleDescription(samples, 0),
       };
       _perlinPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline("PSPerlin", PerlinFormat));
       _skyPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline("PSSky", lightFormat));
+      // (Into the water's mirror: its target has MeshRenderer.MirrorSamples samples a pixel.)
+      _mirrorSkyPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline("PSSky", lightFormat, (uint)MeshRenderer.MirrorSamples));
 
       _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
       _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 1));
@@ -573,7 +576,7 @@ float4 PSSky(VsOut i) : SV_Target
     /// picture, no near fog) and the mirrored view for the water (the mirrored view-projection and eye, near fog 0).
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle lightTarget, int width, int height,
-                            Matrix4x4 viewProjection, Vector3 eye, SkyParams p)
+                            Matrix4x4 viewProjection, Vector3 eye, SkyParams p, bool mirror = false)
     {
       if (!(p.HdrExposure > 0) || !Matrix4x4.Invert(viewProjection, out var inverse))
       {
@@ -612,7 +615,7 @@ float4 PSSky(VsOut i) : SV_Target
       list.OMSetRenderTargets(lightTarget);
       list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
       list.RSSetScissorRect(width, height);
-      list.SetPipelineState(_skyPipeline);
+      list.SetPipelineState(mirror ? _mirrorSkyPipeline : _skyPipeline);
       list.SetGraphicsRootConstantBufferView(1, _constants.GPUVirtualAddress + (ulong)(_constantSlot * ConstantSlotBytes));
       list.SetGraphicsRootDescriptorTable(2, gpu);
       list.SetGraphicsRootDescriptorTable(3, gpu + 2 * (int)_srvSize);
@@ -639,6 +642,7 @@ float4 PSSky(VsOut i) : SV_Target
       _rtvHeap.Dispose();
       _perlinPipeline.Dispose();
       _skyPipeline.Dispose();
+      _mirrorSkyPipeline.Dispose();
       _rootSignature.Dispose();
     }
   }

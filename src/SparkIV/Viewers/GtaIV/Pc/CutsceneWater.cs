@@ -183,7 +183,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     // Each frame's slot of the upload ring: the constants, the grid's vertices, the swell's heights, the mask.
-    private const int ConstantBytes = 512;
+    private const int ConstantBytes = 768;
     private const int GridBytes = GridSide * GridSide * GridVertexFloats * 4;
     private const int SwellBytes = SwellCells * 4;
     private const int GridOffset = ConstantBytes;
@@ -226,11 +226,13 @@ struct Water
   float4 SunForward;
   float4 SunSplits;
   float4 SunBox[4];
-  float4 Mirror;       // xy: the picture's size in pixels, z: the mirror drawn this frame (1)
+  float4 Mirror;       // xy: the picture's size in pixels, z: the mirror drawn this frame (1), w: the scene's depth behind (1)
+  row_major float4x4 InverseViewProjection;
 };
 ConstantBuffer<Water> w : register(b1);
 Texture2D<float> SunMap : register(t4);   // the sun's shadow map (MeshRenderer.SunShadowMap)
 Texture2D MirrorTex : register(t5);       // the mirrored view's light (premultiplied, alpha what was drawn)
+Texture2D<float> Behind : register(t6);   // the scene's depth before the water (a copy)
 Texture2D Sim : register(t0);             // the wave texture: r height, g speed, ba slope
 Texture2D Noise : register(t3);           // the wave step's random bytes
 StructuredBuffer<float> Swell : register(t1);  // the swell's heights, [ring y][ring x]
@@ -461,10 +463,22 @@ float4 PSWater(VsOut i) : SV_Target
     mirrorNormal = normalize(float3(mirrorSlope, 1.00001));
   }
 
-  // TODO: the scene's depth behind the water (its linear depth less the water's: z = n f / (f - d (f - n)) for a
-  // 0..1 depth buffer). Without it 1 m, as the page without its depth copy.
-  float behindDepth = 1;
+  // How much water lies in front of what is behind it (the page's waterBehind, gtaiv-pc.js ~531-537): the view depth of
+  // the scene's point at the pixel (its depth copied before the water, taken back through the inverse view-projection)
+  // less the water's; 1 where the scene is nearer, and 1 m without the copy.
   float viewDepth = max(dot(p - eye, w.Forward.xyz), 1e-3);    // clip w, not distance
+  float behindDepth = 1;
+  if (w.Mirror.w > 0.5)
+  {
+    float depthBehind = Behind.Load(int3(i.position.xy, 0));
+    float2 ndc = float2(i.position.x / w.Mirror.x * 2 - 1, 1 - i.position.y / w.Mirror.y * 2);
+    float4 q = mul(float4(ndc, depthBehind, 1), w.InverseViewProjection);
+    behindDepth = dot(q.xyz / q.w - eye, w.Forward.xyz) - dot(p - eye, w.Forward.xyz);
+    if (behindDepth < 0)
+    {
+      behindDepth = 1;
+    }
+  }
   float shore = 1 - saturate(behindDepth / (saturate(pow(viewDepth, 1.125) * 0.02) + 0.05));
   shore *= shore;
   float3 gentleNormal = waves
@@ -517,8 +531,9 @@ float4 PSWater(VsOut i) : SV_Target
     waterLight = lerp(waterLight, 3 * (foamSun * f.x + foamAround * f.y), nearField);
   }
   float3 light = GameFog(waterLight, length(eye - p));   // the distance from the unlifted point
-  // TODO: with the scene's depth a = saturate(pow(behindDepth x waterAlpha x 0.25, 0.25) + 0.125); opaque without.
-  float alpha = 1;
+  // See-through by how much water lies in front (the page's, gtaiv-pc.js ~606: water.fxc's alpha, blended over the lit
+  // scene): saturate((d x waterColour.w x 0.25)^0.25 + 0.125); opaque without the scene's depth.
+  float alpha = w.Mirror.w > 0.5 ? saturate(pow(max(behindDepth * w.AmbientAbove.w * 0.25, 0), 0.25) + 0.125) : 1;
   return float4(light * alpha, alpha);
 }
 ";
@@ -581,13 +596,21 @@ float4 PSWater(VsOut i) : SV_Target
     // The sun's shadow map whose view is in the heap's fourth slot.
     private ID3D12Resource? _sunMapSeen;
 
-    // The mirror (the page's reflectionTarget: half the picture's size, the light's format), its state, and whether it
-    // was drawn for the coming Draw.
+    // The mirror (the page's reflectionTarget: half the picture's size, the light's format): drawn into with
+    // MeshRenderer.MirrorSamples samples a pixel (its own depth), resolved into the texture the water reads; that one's
+    // state, and whether it was drawn for the coming Draw.
     private readonly Format _lightFormat;
+    private readonly Format _depthFormat;
     private ID3D12Resource? _mirror;
+    private ID3D12Resource? _mirrorSamples;
+    private ID3D12Resource? _mirrorDepth;
+    private readonly ID3D12DescriptorHeap _mirrorDsv;
     private int _mirrorWidth, _mirrorHeight;
     private ResourceStates _mirrorState;
     private bool _mirrorDrawn;
+    // The scene's depth before the water (a copy of the depth buffer, the page's gameKeepSolidDepth), its size.
+    private ID3D12Resource? _behind;
+    private int _behindWidth, _behindHeight;
 
     public unsafe CutsceneWater(D3D12Device device, Format lightFormat, Format depthFormat)
     {
@@ -607,6 +630,8 @@ float4 PSWater(VsOut i) : SV_Target
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 4, 0, 0)), ShaderVisibility.Pixel),
         // t5: the mirror (its view in the heap's fifth slot).
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 5, 0, 0)), ShaderVisibility.Pixel),
+        // t6: the scene's depth before the water (its view in the heap's sixth slot).
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 6, 0, 0)), ShaderVisibility.Pixel),
       };
       // The page's wave texture: LINEAR, REPEAT, one level (the game reads one level: far specks).
       var samplers = new[]
@@ -658,7 +683,9 @@ float4 PSWater(VsOut i) : SV_Target
       });
 
       _lightFormat = lightFormat;
-      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 5, DescriptorHeapFlags.ShaderVisible));
+      _depthFormat = depthFormat;
+      _mirrorDsv = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.DepthStencilView, 1));
+      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 6, DescriptorHeapFlags.ShaderVisible));
       // (The third render target view: the mirror's.)
       _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 3));
       _srvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
@@ -695,6 +722,14 @@ float4 PSWater(VsOut i) : SV_Target
         Shader4ComponentMapping = ShaderComponentMapping.Default,
         Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
       }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 4 * (int)_srvSize);
+      // The depth copy's slot: empty until it is made (never read before: Mirror.w 0).
+      d3d.CreateShaderResourceView(null, new ShaderResourceViewDescription
+      {
+        Format = Format.R32_Float,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 5 * (int)_srvSize);
 
       // The sea grid's indices: per cell a = j*101+i, b = a+1, c = a+101, d = c+1: (a, b, c), (b, d, c); 16-bit.
       var indices = new ushort[GridIndexCount];
@@ -1238,47 +1273,59 @@ float4 PSWater(VsOut i) : SV_Target
 
     /// <summary>
     /// The mirror made ready to draw into (the page's reflectionTarget: max(1, width / 2) x max(1, height / 2) of the
-    /// picture's, the light's format, cleared to nothing): its render target view and size. What is drawn into it (the
-    /// mirrored sky first, see <see cref="MirrorOf"/>) the water shows; <see cref="EndMirror"/> after.
+    /// picture's, the light's format, cleared to nothing): the view and depth to draw into, with
+    /// <see cref="MeshRenderer.MirrorSamples"/> samples a pixel as the page's (both in RENDER_TARGET / DEPTH_WRITE
+    /// state), and its size. What is drawn into it (the mirrored sky first, then MeshRenderer.DrawMirror; see
+    /// <see cref="MirrorOf"/>) the water shows; <see cref="EndMirror"/> after resolves it.
     /// </summary>
-    public (CpuDescriptorHandle Target, int Width, int Height) BeginMirror(ID3D12GraphicsCommandList list, int width, int height)
+    public (CpuDescriptorHandle Target, CpuDescriptorHandle Depth, int Width, int Height) BeginMirror(ID3D12GraphicsCommandList list, int width, int height)
     {
       int mw = Math.Max(1, width >> 1), mh = Math.Max(1, height >> 1);
       var rtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
+      var dsv = _mirrorDsv.GetCPUDescriptorHandleForHeapStart();
       if (_mirror == null || _mirrorWidth != mw || _mirrorHeight != mh)
       {
         if (_mirror != null)
         {
           _device.WaitIdle();
           _mirror.Dispose();
+          _mirrorSamples?.Dispose();
+          _mirrorDepth?.Dispose();
         }
         var d3d = _device.Device;
+        uint samples = MeshRenderer.MirrorSamples;
         _mirror = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
-          ResourceDescription.Texture2D(_lightFormat, (uint)mw, (uint)mh, 1, 1, 1, 0, ResourceFlags.AllowRenderTarget),
+          ResourceDescription.Texture2D(_lightFormat, (uint)mw, (uint)mh, 1, 1), ResourceStates.PixelShaderResource);
+        _mirrorState = ResourceStates.PixelShaderResource;
+        _mirrorSamples = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+          ResourceDescription.Texture2D(_lightFormat, (uint)mw, (uint)mh, 1, 1, samples, 0, ResourceFlags.AllowRenderTarget),
           ResourceStates.RenderTarget, new ClearValue(_lightFormat, new Vortice.Mathematics.Color4(0, 0, 0, 0)));
-        _mirrorState = ResourceStates.RenderTarget;
+        _mirrorDepth = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+          ResourceDescription.Texture2D(_depthFormat, (uint)mw, (uint)mh, 1, 1, samples, 0, ResourceFlags.AllowDepthStencil),
+          ResourceStates.DepthWrite, new ClearValue(_depthFormat, 1.0f, 0));
         _mirrorWidth = mw;
         _mirrorHeight = mh;
-        d3d.CreateRenderTargetView(_mirror, null, rtv);
+        d3d.CreateRenderTargetView(_mirrorSamples, null, rtv);
+        d3d.CreateDepthStencilView(_mirrorDepth, null, dsv);
         d3d.CreateShaderResourceView(_mirror, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 4 * (int)_srvSize);
       }
-      if (_mirrorState != ResourceStates.RenderTarget)
-      {
-        list.ResourceBarrierTransition(_mirror, _mirrorState, ResourceStates.RenderTarget);
-        _mirrorState = ResourceStates.RenderTarget;
-      }
       list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 0));
-      return (rtv, mw, mh);
+      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+      return (rtv, dsv, mw, mh);
     }
 
-    /// <summary>The mirror drawn: made readable, shown by the next <see cref="Draw"/>.</summary>
+    /// <summary>The mirror drawn: its samples resolved into the texture the water reads, shown by the next <see cref="Draw"/>.</summary>
     public void EndMirror(ID3D12GraphicsCommandList list)
     {
-      if (_mirror == null)
+      if (_mirror == null || _mirrorSamples == null)
       {
         return;
       }
-      list.ResourceBarrierTransition(_mirror, _mirrorState, ResourceStates.PixelShaderResource);
+      list.ResourceBarrierTransition(_mirrorSamples, ResourceStates.RenderTarget, ResourceStates.ResolveSource);
+      list.ResourceBarrierTransition(_mirror, _mirrorState, ResourceStates.ResolveDest);
+      list.ResolveSubresource(_mirror, 0, _mirrorSamples, 0, _lightFormat);
+      list.ResourceBarrierTransition(_mirror, ResourceStates.ResolveDest, ResourceStates.PixelShaderResource);
+      list.ResourceBarrierTransition(_mirrorSamples, ResourceStates.ResolveSource, ResourceStates.RenderTarget);
       _mirrorState = ResourceStates.PixelShaderResource;
       _mirrorDrawn = true;
     }
@@ -1295,11 +1342,48 @@ float4 PSWater(VsOut i) : SV_Target
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle lightTarget, CpuDescriptorHandle depth,
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light, WaterParams p,
-                            double seconds, ID3D12Resource? sunShadowMap = null, bool exact = true)
+                            double seconds, ID3D12Resource? sunShadowMap = null, bool exact = true, ID3D12Resource? depthBuffer = null)
     {
       if (_quadIndexCount == 0 || _quadVertices == null)
       {
         return;
+      }
+      // Outside, the scene's depth copied first (the page's water pass: gameKeepSolidDepth, then waterBehind; only with its
+      // post effects, outside): <paramref name="depthBuffer"/> (D32, DEPTH_WRITE, the size of the picture) into a copy the
+      // water reads, so it is see-through by how much water lies in front of the scene.
+      bool behindOn = false;
+      if (depthBuffer != null && _outdoors && Environment.GetEnvironmentVariable("D3D12NOWATERBEHIND") != "1")
+      {
+        var d3d = _device.Device;
+        if (_behind == null || _behindWidth != width || _behindHeight != height)
+        {
+          if (_behind != null)
+          {
+            _device.WaitIdle();
+            _behind.Dispose();
+          }
+          _behind = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+            ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+            ResourceStates.CopyDest, new ClearValue(Format.D32_Float, 1.0f, 0));
+          _behindWidth = width;
+          _behindHeight = height;
+          d3d.CreateShaderResourceView(_behind, new ShaderResourceViewDescription
+          {
+            Format = Format.R32_Float,
+            ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+            Shader4ComponentMapping = ShaderComponentMapping.Default,
+            Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+          }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 5 * (int)_srvSize);
+        }
+        else
+        {
+          list.ResourceBarrierTransition(_behind, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
+        }
+        list.ResourceBarrierTransition(depthBuffer, ResourceStates.DepthWrite, ResourceStates.CopySource);
+        list.CopyResource(_behind, depthBuffer);
+        list.ResourceBarrierTransition(depthBuffer, ResourceStates.CopySource, ResourceStates.DepthWrite);
+        list.ResourceBarrierTransition(_behind, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
+        behindOn = true;
       }
       // The page's seaOn (outside and a water level): the sea grid, the swell and the mask.
       bool seaOn = _outdoors && _level.HasValue;
@@ -1401,8 +1485,10 @@ float4 PSWater(VsOut i) : SV_Target
         }
       }
       // The mirror, when drawn for this Draw (BeginMirror / EndMirror).
-      Put(f, 120, new Vector3(width, height, _mirrorDrawn ? 1 : 0), 0);
+      Put(f, 120, new Vector3(width, height, _mirrorDrawn ? 1 : 0), behindOn ? 1 : 0);
       _mirrorDrawn = false;
+      // (The view-projection's inverse: the scene's depth behind taken back to its point.)
+      *(Matrix4x4*)(f + 124) = Matrix4x4.Invert(viewProjection, out var inverse) ? inverse : Matrix4x4.Identity;
 
       var gpu = _srvHeap.GetGPUDescriptorHandleForHeapStart();
       list.OMSetRenderTargets(lightTarget, depth);
@@ -1416,6 +1502,7 @@ float4 PSWater(VsOut i) : SV_Target
       list.SetGraphicsRootShaderResourceView(5, gpuSlot + MaskOffset);
       list.SetGraphicsRootDescriptorTable(6, gpu + 3 * (int)_srvSize);
       list.SetGraphicsRootDescriptorTable(7, gpu + 4 * (int)_srvSize);
+      list.SetGraphicsRootDescriptorTable(8, gpu + 5 * (int)_srvSize);
 
       var constants = stackalloc float[4];
       constants[0] = 0;
@@ -1453,6 +1540,10 @@ float4 PSWater(VsOut i) : SV_Target
       _quadIndices?.Dispose();
       _noise?.Dispose();
       _mirror?.Dispose();
+      _mirrorSamples?.Dispose();
+      _mirrorDepth?.Dispose();
+      _mirrorDsv.Dispose();
+      _behind?.Dispose();
       _sim[0].Dispose();
       _sim[1].Dispose();
       _simBase.Dispose();

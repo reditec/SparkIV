@@ -93,7 +93,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     });
 
     public void DrawAfterSolid(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
-                               Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view)
+                               Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view,
+                               Vortice.Direct3D12.ID3D12Resource? depthBuffer)
     {
       if (_lighting == null || _waterLocation == null || _waterLocation.Water.Count < 4)
       {
@@ -123,14 +124,25 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         var mirroredSky = sky;
         mirroredSky.NearFogAmount = 0;
-        var (mirrorTarget, mirrorWidth, mirrorHeight) = _water.BeginMirror(list, width, height);
-        _sky.Draw(list, mirrorTarget, mirrorWidth, mirrorHeight, mirroredViewProjection, mirroredEye, mirroredSky);
+        var (mirrorTarget, mirrorDepth, mirrorWidth, mirrorHeight) = _water.BeginMirror(list, width, height);
+        _sky.Draw(list, mirrorTarget, mirrorWidth, mirrorHeight, mirroredViewProjection, mirroredEye, mirroredSky, mirror: true);
+        // Then the far versions mirrored (ModelView.html drawMeshes(true, ...)): 0.515 m under the level clipped, as far
+        // as the haze (the light's fog end, or nearer the location's reach) and the shot's draw distance (along the
+        // camera's own forward).
+        if (_renderer != null)
+        {
+          var forward = new Vector3(view.ViewProjection.M14, view.ViewProjection.M24, view.ViewProjection.M34);
+          forward = forward.LengthSquared() > 0 ? Vector3.Normalize(forward) : Vector3.UnitY;
+          float locationReach = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var shown) ? shown.Reach : float.PositiveInfinity;
+          _renderer.DrawMirror(list, mirrorTarget, mirrorDepth, mirrorWidth, mirrorHeight, mirroredViewProjection, mirroredEye, forward,
+                               (_water.Level ?? 0) - 0.515f, CutsceneSunShadow.CasterReach(view.Light.FogEnd, locationReach, null, 0), view.Light.DrawReach);
+        }
         _water.EndMirror(list);
       }
       // (Its simulation warms up and catches up over the first frames by itself; exact while still: the water a pure
       // function of the section's time, while playing a small nudge back of the sync held.)
       _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time,
-                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null, exact: !view.Playing);
+                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null, exact: !view.Playing, depthBuffer: depthBuffer);
     }
 
     public void Dispose()
@@ -302,7 +314,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       var group = new LocationGroup { Group = _nextGroup++ };
       _locations[key] = group;
-      var objects = CutsceneDrawing.DrawnObjects(location).ToList();
+      // All its objects: the far versions also into the water's mirror, those only for the mirror (and the page's map
+      // of the surroundings) drawn there alone (see MeshRenderer.DrawMirror).
+      var objects = location.Objects.ToList();
       var models = location.Models.ToList();
       Load(renderer =>
       {
@@ -318,7 +332,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           }
           var numbers = renderer.Register(prepared, group.Group);
           // (Floating litter casts no sun shadow, as the page's.)
-          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0, castsSunShadow: o.FloatAt == null)).ToArray();
+          group.Instances = objects.Select(o => renderer.AddInstance(numbers[o.Model], o.Place, inRoom: o.Room >= 0, castsSunShadow: o.FloatAt == null,
+                                                                     mirrored: o.Far, mainView: !o.MirrorOnly)).ToArray();
           group.Lights = lamps;
           group.Reach = CutsceneSunShadow.LocationReach(location, m => renderer.Bounds(numbers[m]));
           group.Registered = true;

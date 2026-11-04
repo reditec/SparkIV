@@ -710,6 +710,92 @@ float4 PSBlend(VsOut input) : SV_Target
   return light;
 }
 
+// Into the water's mirror (DrawMirror; the page's reflection pass, ModelView.html ~423-505): the view mirrored in the
+// water's level (f.Eye the mirrored eye), nothing under f.FogParams.w (the level less 0.515 m), nothing beyond the
+// shot's draw distance f.FogParams.z along the camera's own forward f.Params2.yzw from the mirrored eye (the page's
+// drawReach with its eyeAt mirrored, toEye not). The surface as the main pass takes it (texture x tint, layers, a dirt
+// decal's alpha, the cut-out test), then lit as the game's ReflectTexture pass (GTAIV.1, PS 0x1A3F8A40): the texture x
+// (the light from around x AO + the sun x saturate((n.l - 0.25) x 4/3)) by the vertex normal, AO from the vertex
+// colours alone (a map object's red by day, green at night; else red), no shadow, no shine, no lamps, the far fog over
+// it by the distance from the mirrored eye; premultiplied by texture alpha x vertex alpha (nothing where that is 0).
+float4 PSMirror(VsOut input) : SV_Target
+{
+  if (input.world.z < f.FogParams.w)
+  {
+    discard;
+  }
+  if (f.FogParams.z > 0 && dot(input.world - f.Eye.xyz, f.Params2.yzw) > f.FogParams.z)
+  {
+    discard;
+  }
+  PartData p = Parts[(uint)d.Part.x];
+  uint bits = p.Bits.x;
+  uint kind = (uint)(d.Material.z + 0.5);
+  bool baked = (kind & Baked) != 0, tree = (kind & Tree) != 0;
+  bool normalMap = (bits & FNormal) != 0;
+  float2 uvP = input.uv;
+  if (p.Spec.w > 0 && normalMap && dot(input.tangent.xyz, input.tangent.xyz) > 0.25)
+  {
+    float3 pn = normalize(input.normal), pt = normalize(input.tangent.xyz), pe = f.Eye.xyz - input.world;
+    float3 pv = float3(dot(pt, pe), dot(cross(pt, pn) * input.tangent.w, pe), dot(pn, pe));
+    uvP += (Tex[p.Tex.y].Sample(Linear, input.uv).a * p.Spec.w - 0.5 * p.Spec.w) * pv.xy / max(length(pv), 1e-5);
+  }
+  float4 texel = Tex[p.Tex.x].Sample(Linear, uvP);
+  float3 albedo = texel.rgb * d.Tint.rgb;
+  float baseA = texel.a;
+  if ((bits & FPaint2) != 0)
+  {
+    float4 l = Tex[p.Tex2.x].Sample(Linear, input.layerUv.xy) * p.Paint2;
+    albedo = lerp(albedo, l.rgb, saturate(l.a));
+  }
+  uint layers = p.Bits.y;
+  if (layers > 1)
+  {
+    if ((p.Bits.z & 1) != 0)
+    {
+      float4 l = Tex[p.Tex2.x].Sample(Linear, input.layerUv.xy);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.y));
+    }
+    if (layers > 2 && (p.Bits.z & 2) != 0)
+    {
+      float4 l = Tex[p.Tex2.y].Sample(Linear, input.layerUv.zw);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.z));
+    }
+    if (layers > 3 && (p.Bits.z & 4) != 0)
+    {
+      float4 l = Tex[p.Tex2.z].Sample(Linear, input.layerUv3);
+      albedo = lerp(albedo, l.rgb, saturate(l.a * input.weights.w));
+    }
+    baseA = 1;
+  }
+  float alpha = baseA * input.alpha;
+  if (d.Material.y > 0.5)
+  {
+    alpha = dot(texel.rgb, d.DirtMask.rgb) * input.alpha;
+    albedo = input.color;
+  }
+  if (d.Material.x > 0.5)
+  {
+    clip(alpha - (tree ? 0.5 : 0.17648));
+  }
+  // The vertex normal (the page's n before any bump), or the face's without one (Direct3D's screen y down: the
+  // page's cross(dFdx, dFdy) turned round).
+  float3 n = dot(input.normal, input.normal) > 1e-12 ? normalize(input.normal) : normalize(cross(ddy(input.world), ddx(input.world)));
+  float3 around = lerp(f.AmbientAbove.rgb, f.AmbientBelow.rgb, saturate(0.5 - 0.5 * n.z));
+  float sunM = saturate((dot(n, f.SunDirection.xyz) - 0.25) * 1.3333333);
+  float dayNight = f.Params.x;
+  float3 vc = input.color;
+  float ao = saturate(baked ? dayNight * vc.r + (1 - dayNight) * vc.g : vc.r);
+  float farM = saturate((length(input.world - f.Eye.xyz) - f.FogNear.w) / max(f.FogFar.w - f.FogNear.w, 1));
+  float3 lit = lerp(albedo * (around * ao + f.Sun.rgb * sunM), f.FogFar.rgb, farM);
+  float a = saturate(alpha);
+  if (a <= 0)
+  {
+    discard;
+  }
+  return float4(lit * a, a);
+}
+
 // The lamps (#112 step 5): one light volume per light, a box round its sphere drawn over the solid scene (its faces
 // turned away from the camera only, with the depth test 'greater or equal': each pixel whose surface lies inside the
 // box once), adding albedo x its light from the G-buffer - as GTA IV draws its lamps (deferred_lighting.fxc over its
@@ -969,6 +1055,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       /// </summary>
       public bool AlphaShadow { get; init; }
 
+      /// <summary>Layered terrain (its mesh has layer coordinates and its material more than one layer): not in the mirror.</summary>
+      public bool Layered { get; init; }
+
       /// <summary>Its bounding sphere in the model's space (its mesh's box: the centre, half the diagonal).</summary>
       public Vector3 Center { get; init; }
       public float Radius { get; init; }
@@ -1022,6 +1111,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       public bool InRoom;
       public bool CastsShadow;
       public bool CastsSunShadow = true;
+      // Drawn into the water's mirror (DrawMirror); drawn in the main view and the shadow maps (false: the mirror only).
+      public bool Mirrored;
+      public bool MainView = true;
     }
 
     /// <summary>An actor's share of the light from around (its room's AmbientDownMult; 1 outside).</summary>
@@ -1050,6 +1142,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private readonly ID3D12RootSignature _rootSignature;
     // Skinned or not x pass x back faces culled or not.
     private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[16];
+    // The water's mirror: its solid parts, its see-through ones (see DrawMirror).
+    private readonly ID3D12PipelineState[] _mirrorPipelines = new ID3D12PipelineState[2];
+
+    /// <summary>The samples a pixel of the water's mirror (the page's reflectionTarget: 4); its target and depth must have as many.</summary>
+    public const int MirrorSamples = 4;
+
+    /// <summary>The mirror's draw calls in the last frame.</summary>
+    public int MirrorDrawCalls { get; private set; }
     // Zeros read as the extras of models without any (a stride of 0: every vertex the same).
     private readonly ID3D12Resource _noExtras;
     // The surface's normal and AO under the decals (a copy of the G-buffer's after the solid pass), its texture number.
@@ -1207,6 +1307,32 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
       }
 
+      // The water's mirror (DrawMirror, the page's reflection pass): into the light's format only, MirrorSamples samples
+      // a pixel (the page's reflectionTarget), every face culled but those facing the camera - mirrored, the winding
+      // turns round (the page's frontFace(CW) with cullFace(BACK), ModelView.html ~3677-3689); the solid ones opaque
+      // (writing their premultiplied light and alpha as they are, the page's blend off), the see-through ones after,
+      // ONE / ONE_MINUS_SRC_ALPHA without writing depth (the page's glass pass).
+      var mirrorPixel = Compile(DxcShaderStage.Pixel, "PSMirror");
+      var mirrorCull = new RasterizerDescription(CullMode.Back, FillMode.Solid) { FrontCounterClockwise = false, MultisampleEnable = true };
+      for (int k = 0; k < 2; k++)
+      {
+        _mirrorPipelines[k] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+        {
+          RootSignature = _rootSignature,
+          VertexShader = vertexShader,
+          PixelShader = mirrorPixel,
+          InputLayout = new InputLayoutDescription(input),
+          SampleMask = uint.MaxValue,
+          PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+          RasterizerState = mirrorCull,
+          BlendState = k == 0 ? BlendDescription.Opaque : BlendDescription.AlphaBlend,
+          DepthStencilState = k == 0 ? DepthStencilDescription.Default : DepthStencilDescription.Read,
+          RenderTargetFormats = new[] { targetFormat },
+          DepthStencilFormat = PanelSwapChainFormats.Depth,
+          SampleDescription = new SampleDescription(MirrorSamples, 0),
+        });
+      }
+
       // The lamps' pass (step 5): the frame's constants, the lights, the G-buffer.
       _lightSignature = d3d.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, new[]
       {
@@ -1348,9 +1474,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         RenderTargetFormats = new[] { Format.R16_Float },
         SampleDescription = new SampleDescription(1, 0),
       });
-      // The frame's constants (camera, light), a slot per frame in flight.
+      // The frame's constants (camera, light), a slot per frame in flight; after them as many for the mirror's view.
       _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
-                                           ResourceDescription.Buffer((ulong)PaletteSlots * FrameSlotBytes), ResourceStates.GenericRead);
+                                           ResourceDescription.Buffer((ulong)PaletteSlots * 2 * FrameSlotBytes), ResourceStates.GenericRead);
       void* frameMapped;
       _frame.Map(0, null, &frameMapped).CheckError();
       _frameMapped = (byte*)frameMapped;
@@ -1826,6 +1952,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           Index = partIndex,
           SeeThrough = material.Glass || (material.Blend && textured),
           AlphaShadow = material.ShadowByAlpha,
+          Layered = layerUvs && material.LayerCount > 1,
           Center = count > 0 ? (meshMin + meshMax) * 0.5f : Vector3.Zero,
           Radius = count > 0 ? (meshMax - meshMin).Length() * 0.5f : float.PositiveInfinity,
         });
@@ -1904,11 +2031,17 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     /// A model drawn with a model-to-scene matrix (and, skinned, its bones' matrices); its instance's number.
     /// <paramref name="castsShadow"/>: its solid parts drawn into the lights' shadow maps (while visible);
     /// <paramref name="castsSunShadow"/>: drawn into the sun's shadow map (while visible; see <see cref="SunShadow"/>).
+    /// <paramref name="mirrored"/>: drawn into the water's mirror (see <see cref="DrawMirror"/>); <paramref name="mainView"/>
+    /// false: only there (not in the main view nor any shadow map).
     /// </summary>
     public int AddInstance(int model, Matrix4x4 world, Matrix4x4[]? palette = null, bool inRoom = false, bool castsShadow = false,
-                           bool castsSunShadow = true)
+                           bool castsSunShadow = true, bool mirrored = false, bool mainView = true)
     {
-      _instances.Add(new Instance { Model = model, World = world, Palette = palette, InRoom = inRoom, CastsShadow = castsShadow, CastsSunShadow = castsSunShadow });
+      _instances.Add(new Instance
+      {
+        Model = model, World = world, Palette = palette, InRoom = inRoom, CastsShadow = castsShadow && mainView,
+        CastsSunShadow = castsSunShadow && mainView, Mirrored = mirrored, MainView = mainView,
+      });
       return _instances.Count - 1;
     }
 
@@ -2459,7 +2592,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       var draw = stackalloc float[DrawConstants];
       foreach (var instance in _instances)
       {
-        if (instance == null || !instance.Visible || _models[instance.Model] is not Model model || !model.Parts.Any(p => Drawn(p.Pass, pass)))
+        if (instance == null || !instance.Visible || !instance.MainView || _models[instance.Model] is not Model model || !model.Parts.Any(p => Drawn(p.Pass, pass)))
         {
           continue;
         }
@@ -2516,9 +2649,120 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
+    /// <summary>
+    /// The instances marked <c>mirrored</c> drawn into the water's mirror (the page's reflection pass, ModelView.html
+    /// drawMeshes(true, mirrored, mirroredEye): the target and depth with <see cref="MirrorSamples"/> samples, in
+    /// RENDER_TARGET / DEPTH_WRITE state, the sky already in it). Only while <see cref="Draw"/> runs (from its
+    /// afterSolid): the frame's constants are this frame's, taken over with the mirrored view-projection and eye.
+    /// <paramref name="viewForward"/>: the camera's own forward (the draw distance is measured along it from the mirrored
+    /// eye, as the page's); <paramref name="clipBelow"/>: nothing lower (the level less the game's 0.515 m);
+    /// <paramref name="hazeReach"/>: a part wholly farther than it is left out (the page's hazeEnd(): the light's fog
+    /// end, or nearer the location's reach). Per part as the page's <c>seen</c> per mesh: not layered terrain, not wholly
+    /// under <paramref name="clipBelow"/>, not under 1 % of its distance across, not wholly beyond the haze or the draw
+    /// distance (all from the mirrored eye). The solid parts first, then the see-through and decal ones over them.
+    /// </summary>
+    public unsafe void DrawMirror(ID3D12GraphicsCommandList list, CpuDescriptorHandle target, CpuDescriptorHandle depth, int width, int height,
+                                  Matrix4x4 viewProjection, Vector3 eye, Vector3 viewForward, float clipBelow, float hazeReach, float drawReach)
+    {
+      MirrorDrawCalls = 0;
+      // The frame's constants, this frame's taken over: the mirrored view, the forward, the draw distance, the clip.
+      var main = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
+      var frame = (float*)(_frameMapped + (PaletteSlots + _paletteSlot) * FrameSlotBytes);
+      Buffer.MemoryCopy(main, frame, FrameSlotBytes, FrameFloats * 4);
+      *(Matrix4x4*)frame = viewProjection;
+      frame[16] = eye.X;
+      frame[17] = eye.Y;
+      frame[18] = eye.Z;
+      frame[45] = viewForward.X;
+      frame[46] = viewForward.Y;
+      frame[47] = viewForward.Z;
+      bool reachOn = drawReach > 0 && float.IsFinite(drawReach);
+      frame[58] = reachOn ? drawReach : 0;
+      frame[59] = clipBelow;
+      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)((PaletteSlots + _paletteSlot) * FrameSlotBytes);
+
+      list.OMSetRenderTargets(target, depth);
+      list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
+      list.RSSetScissorRect(width, height);
+      list.SetGraphicsRootSignature(_rootSignature);
+      list.SetDescriptorHeaps(_textures.Heap);
+      list.SetGraphicsRootConstantBufferView(3, frameAddress);
+      list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+
+      float farthest = MathF.Min(hazeReach > 0 ? hazeReach : float.PositiveInfinity, reachOn ? drawReach : float.PositiveInfinity);
+      var draw = stackalloc float[DrawConstants];
+      for (int phase = 0; phase < 2; phase++)
+      {
+        list.SetPipelineState(_mirrorPipelines[phase]);
+        foreach (var instance in _instances)
+        {
+          if (instance == null || !instance.Visible || !instance.Mirrored || _models[instance.Model] is not Model model || model.Skin != null)
+          {
+            continue;
+          }
+          float scale = MathF.Max(new Vector3(instance.World.M11, instance.World.M12, instance.World.M13).Length(),
+                        MathF.Max(new Vector3(instance.World.M21, instance.World.M22, instance.World.M23).Length(),
+                                  new Vector3(instance.World.M31, instance.World.M32, instance.World.M33).Length()));
+          bool bound = false;
+          foreach (var part in model.Parts)
+          {
+            if ((part.Pass == Pass.Solid) != (phase == 0) || part.Layered)
+            {
+              continue;
+            }
+            var center = Vector3.Transform(part.Center, instance.World);
+            float radius = part.Radius * scale;
+            float distance = Vector3.Distance(center, eye);
+            if (center.Z + radius < clipBelow || radius / MathF.Max(distance, 1e-3f) < 0.01f || distance - radius > farthest)
+            {
+              continue;
+            }
+            if (!bound)
+            {
+              bound = true;
+              list.IASetVertexBuffers(0, model.VertexView);
+              list.IASetVertexBuffers(2, model.ExtrasView);
+              list.SetGraphicsRootShaderResourceView(4, model.PartData.GPUVirtualAddress);
+              list.IASetIndexBuffer(model.IndexView);
+              new Span<float>(draw, DrawConstants).Clear();
+              *(Matrix4x4*)draw = instance.World;
+              draw[16] = 1;
+              list.SetGraphicsRoot32BitConstants(0, 20, draw, 0);
+            }
+            var mask = part.DirtMask ?? Vector3.Zero;
+            draw[20] = part.Cutout ? 1 : 0;
+            draw[21] = part.DirtMask != null ? 1 : 0;
+            draw[22] = part.Kind;
+            draw[23] = part.Glow;
+            draw[24] = mask.X;
+            draw[25] = mask.Y;
+            draw[26] = mask.Z;
+            draw[27] = 0;
+            draw[28] = part.Tint.X;
+            draw[29] = part.Tint.Y;
+            draw[30] = part.Tint.Z;
+            draw[31] = 1;
+            draw[32] = part.Index;
+            draw[33] = 0;
+            draw[34] = 0;
+            draw[35] = 0;
+            list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
+            list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+            MirrorDrawCalls++;
+          }
+        }
+      }
+    }
+
     public void Dispose()
     {
       Clear();
+      foreach (var p in _mirrorPipelines)
+      {
+        p?.Dispose();
+      }
       _textures.Dispose();
       _palette.Unmap(0);
       _palette.Dispose();

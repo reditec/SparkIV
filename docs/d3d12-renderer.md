@@ -58,7 +58,7 @@ before and, with `D3D12CAP=<frames>` (`D3D12SIZE=WxH`, `D3D12TAG`, `D3D12FOV` fo
 field of view), draws those frames into an `OffscreenTarget` at the reference's size and saves them as PNG. The
 comparison with the game's picture is the same as for the page; the values are kept apart from the page's.
 
-Drawn so far: the location (all placed objects but mirror-only far versions, their checked meshes only) through the
+Drawn so far: the location (all placed objects but mirror-only far versions, which only the water's mirror shows; their checked meshes only) through the
 cutscene's camera, with its first texture layer (step 3), and the cast posed at the frame with its worn props (step
 4a; `D3D12NOCAST=1` leaves it out), vehicles in their paint (`ModelSource.Tints`: a material's paint slot takes the
 actor's colour, as the page's `paint` uniform). Until 4a every level of detail of the location's models was drawn at
@@ -162,9 +162,8 @@ surroundings map not yet. In the app the player draws it through `IRenderScene.D
 colours, and outside the sea grid round the mission's marker (the script's, as the page's "water" message: else round
 the camera) with the page's swell and ripple simulation and the wind the mission script forces (bc_3: 0; else the
 page's breeze), the near field taken from a mask of the quads (their boxes, made on the CPU), Fresnel, the sun's glint
-and foam, the game's fog. Not yet: the mirrored meshes (the mirror shows the mirrored sky only, see "The water's
-mirror"), seeing through to the ground (the page's `waterBehind`, gtaiv-pc.js ~531-537 and ~606: the water is opaque
-and its depth behind taken as 1 m).
+and foam, the game's fog, the mirror (below, "The water's mirror") and, outside, seeing through to what lies behind
+(below, "Seeing through the water").
 
 **The sea grid's colour is 0 0 0** (2026-11-04). The near field's foam is weighted by the vertex colour's blue
 (`nearWeight = vColor.b x 0.25`, gtaiv-pc.js ~496). The page's grid has no colour attribute (`seaGridVao`, gtaiv-pc.js
@@ -174,27 +173,85 @@ in both the game's picture and the page's, the far water equal in all three; wit
 difference 13.52 -> 7.28). So native now follows the page. The game's real grid colour is still open (spec open
 question 9). The water.dat quads keep their own corner colours, as on the page.
 
-### The water's mirror (2026-11-04, first part)
+### The water's mirror (2026-11-04)
 
 As the page's reflection pass (ModelView.html ~3896-3916; read in gtaiv-pc.js ~554-570 and ~583): outside, with a
 water level, `CutsceneWater.MirrorOf` gives the view mirrored in the water's level (p' = (x, y, 2 level - z): the
 mirror matrix times the view-projection, the eye mirrored likewise). `BeginMirror` makes the mirror ready, the page's
-`reflectionTarget`: max(1, width / 2) x max(1, height / 2) of the picture, the light's format, cleared to 0. Into it
-`CutsceneSky.Draw` draws the sky from the mirrored view without the near fog (the page's `drawSky(mirrored)`,
-`skyNearFog` 0, ModelView.html ~2265). `EndMirror` makes it readable (its SRV, t5). The water then reads the mirror at
+`reflectionTarget`: max(1, width / 2) x max(1, height / 2) of the picture, the light's format, drawn with
+`MeshRenderer.MirrorSamples` (4) samples a pixel and a depth of its own (the page's, ModelView.html ~2404-2421),
+cleared to 0. Into it `CutsceneSky.Draw` (`mirror: true`, its 4-sample pipeline) draws the sky from the mirrored view
+without the near fog (the page's `drawSky(mirrored)`, `skyNearFog` 0, ModelView.html ~2265), then
+`MeshRenderer.DrawMirror` the mirrored meshes (below). `EndMirror` resolves the samples into the texture the water
+reads (its SRV, t5). The water then reads the mirror at
 its own pixel shifted by the waves' slope (across and up the picture) x min(0.5 / (0.03 x view depth), 2), kept on
 the water's side of the horizon (the point 2000 m ahead on the water's plane, + 0.05 x near + 0.005; Direct3D's v
 grows downwards, so the page's up-shift and its "at most" turn round), and takes sky light x (1 - alpha) + the
 mirror's light. The player draws it in `DrawAfterSolid`, cutgen in `WaterOf` (`D3D12NOMIRROR=1`: none, the sky's light
 in the bounced direction as before). bc_3 s3 f140.5: 8.18 without, 7.28 with.
 
-Still missing (the page has them):
-- the mirrored meshes: the far versions only, no actors and no layered terrain, clipped 0.515 m under the water,
-  nothing smaller than 1 % of its distance, lit by the light from around and the sun without shadow, with the far
-  fog, culled the other way round (ModelView.html ~3272-3306 and ~494-505). Without them the shore's dark
-  reflection is missing: bc_3 s3 f357.25 is 11.73 natively against the page's 6.69;
-- the page draws its mirror with 4 samples a pixel (MSAA, ModelView.html ~2404); native's has one;
-- seeing through to the ground (`waterBehind`, above).
+**The mirrored meshes** (`MeshRenderer.DrawMirror`, called between the sky and `EndMirror`; the page's
+`drawMeshes(true, mirrored, mirroredEye)`):
+- *What:* the instances added with `mirrored: true`, which are the location's far versions (`LocationObject.Far`, the page's
+  `m.far`). The mirror-only far versions (`LocationObject.MirrorOnly`) are now instances too, with `mainView: false`:
+  drawn only there, not in the main view nor any shadow map. No actors (skinned models are left out; actors are never
+  far). Per part, as the page's `seen` per mesh (ModelView.html ~3272-3312): not layered terrain (`Part.Layered`: layer
+  coordinates and a material with more than one layer), not wholly under the clip (the part's sphere top under it),
+  not under 1 % of its distance across (radius / distance < 0.01), not wholly beyond the haze (the light's fog end, or
+  nearer the location's reach: the page's `hazeEnd()`) nor beyond the shot's draw distance, all from the mirrored eye.
+  The page's frustum test is left out (it only saves work: nothing outside the view lands in the picture).
+- *Pixels* (`PSMirror`, the page's ModelView.html ~423-429 and ~494-505): nothing under the level less 0.515 m (the
+  game's clip plane, `MirrorClipDepth`), nothing beyond the draw distance measured along the camera's own forward from
+  the mirrored eye (the page's `drawReach` test with `eyeAt` mirrored and `toEye` not; that forward in the frame's
+  `Params2.yzw`, the clip in `FogParams.w`). The surface as the main pass takes it (texture x tint, parallax, layers, a
+  dirt decal's alpha, the cut-out test). Then lit as the game's ReflectTexture pass: the texture x (the light from
+  around x AO + the sun x saturate((n.l - 0.25) x 4/3)) by the vertex normal, with AO from the vertex colours alone (a
+  map object's red by day, green at night). No shadow, no shine, no lamps. The far fog over it by the distance from
+  the mirrored eye. Written premultiplied by texture alpha x vertex alpha (nothing where that is 0).
+- *States:* the solid parts first, opaque with depth. Then the see-through and decal parts, ONE / ONE_MINUS_SRC_ALPHA
+  without writing depth (the page's glass pass). All with the back faces culled and the winding turned round (the
+  page's `frontFace(CW)`, ModelView.html ~3677-3689: `FrontCounterClockwise = false`).
+- *Constants:* a frame slot of their own, after the main ones (this frame's constants taken over), so it only runs
+  inside `MeshRenderer.Draw` (its `afterSolid`).
+- *Callers:* the player from `DrawAfterSolid`, cutgen from `WaterOf`. `D3D12NOMIRRORMESH=1` leaves the meshes out (and the
+  mirror-only instances); `D3D12NOMIRROR=1` leaves out the whole mirror.
+
+| Reference | page | sky mirror only | with the meshes (and see-through) |
+|---|---|---|---|
+| bc_3 s3 f357.25 | 6.69 | 11.73 | 7.42 |
+| bc_3 s1 f78.75 | 8.28 | 7.87 | 6.97 |
+| bc_3 s3 f140.5 | 5.65 | 7.28 | 7.29 |
+| bc_3 s3 f829.5 | 8.65 | 10.54 | 10.54 |
+
+The guards et01_aa s3 f49.75 (2.66), intro s4 f420.5 (3.83) and bc_1 s1 f144 (0.99) are unchanged.
+
+Cost (bc_3 s3, cutgen D3D12BENCH=1, Release, debug layer off, 1038 frames, the water drawn as while playing:
+`exact: false`):
+
+| Run | mean | median |
+|---|---|---|
+| no water (`D3D12BENCHNOWATER=1`, the earlier bench) | 8.52 ms | 7.98 ms |
+| water + sky mirror (`D3D12NOMIRRORMESH=1`) | 10.18 ms | 8.49 ms |
+| + mirrored meshes | 10.47 ms | 8.62 ms |
+| + seeing through | 10.63 ms | 8.70 ms |
+
+So the mirrored meshes cost about 0.3 ms and the see-through about 0.15 ms. The water's ~10 frames over 33 ms are its
+warm-up (20000 wave steps, 2000 per list). With `exact: true` (a still frame) the bench had 147 frames of ~145 ms: the swell
+starting again whenever its window moves.
+
+### Seeing through the water (2026-11-04)
+
+As the page's water pass outside (ModelView.html ~3319-3340: `gameKeepSolidDepth`, then `waterBehind`; gtaiv-pc.js
+~531-537 and ~606):
+- *The copy:* before the water, `CutsceneWater.Draw` copies the scene's depth (`depthBuffer`: the depth resource,
+  which `IRenderScene.DrawAfterSolid` and cutgen's `WaterOf` now pass) into a D32 texture of its own (read as R32F,
+  t6). Outside only (`D3D12NOWATERBEHIND=1`: none).
+- *How deep:* per pixel the scene's point there is taken back through the inverse view-projection (in the constants
+  after `Mirror`). The water in front of it is its view depth less the water's (the page's linear depths; 1 where the
+  scene is nearer or not known). That depth feeds the shore's normal bend (already there).
+- *Alpha:* saturate((d x waterColour.w x 0.25)^0.25 + 0.125), premultiplied over the lit scene.
+
+bc_3's harbour is deep: only the far shore line changes (f357.25 0.00, f78.75 +0.03, f140.5 +0.01).
 
 Deterministic: the water at a section time t is a pure function of t, so a frame drawn alone holds the same water as
 one drawn after others (cutgen's D3D12CAP lists in any order give byte-identical pictures). The wave texture is a
@@ -232,7 +289,8 @@ out), and not wholly farther from the camera than `SunShadow.CasterReach` - the 
 `hazeEnd()` (the time cycle's FarClip, here the light's FogEnd, or nearer the farthest location object across the
 ground from the origin: `CutsceneSunShadow.LocationReach`, the page's `hazeReach`) nor beyond `drawDistanceNow()` (the
 .cut's draw distance steps of the section, `CutFile.DrawDistanceSteps`; the app passes them with `SetSection`). The
-page's other caster rules hold already: mirror-only far versions aren't instances (`CutsceneDrawing.DrawnObjects`),
+page's other caster rules hold already: mirror-only far versions cast nothing (instances only for the water's mirror,
+`mainView: false`),
 floating litter casts none, hidden materials aren't in the models' parts (the page's skipping of water materials isn't
 ported: the sea is `CutsceneWater`'s quads, not checked whether a map model has a water material). Its main pass's same distance
 culling of whole objects isn't ported; beyond the draw distance the main pass cuts per pixel instead (below, "The

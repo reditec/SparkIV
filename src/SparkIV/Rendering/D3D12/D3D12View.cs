@@ -53,10 +53,12 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     /// <summary>
     /// Draws what goes between the solid meshes and the see-through ones (water; render thread, with its own states).
-    /// Nothing by default.
+    /// <paramref name="depthBuffer"/>: the depth's resource (DEPTH_WRITE; e.g. to copy the solid scene's depth). Nothing
+    /// by default.
     /// </summary>
     void DrawAfterSolid(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
-                        Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view)
+                        Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view,
+                        Vortice.Direct3D12.ID3D12Resource? depthBuffer)
     {
     }
   }
@@ -187,7 +189,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
           _toneMapper.BeginLight(list);
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
-                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view),
+                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view, _swapChain.DepthBuffer),
                          view.Lights);
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
