@@ -61,6 +61,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
                         Vortice.Direct3D12.ID3D12Resource? depthBuffer)
     {
     }
+
+    /// <summary>
+    /// Draws the sky into the mirrored surroundings' map (its target, RENDER_TARGET, size x size; render thread, before
+    /// the meshes): only when the view asks for the map (<see cref="SceneView.ParabolicHaze"/>). Nothing by default.
+    /// </summary>
+    void DrawParabolicSky(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle target,
+                          int size, SceneView view)
+    {
+    }
   }
 
   /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
@@ -74,6 +83,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     /// <summary>The lamps' visible light volumes added after the scene (see <see cref="LightVolume"/>), or null.</summary>
     public System.Collections.Generic.IReadOnlyList<LightVolume>? Volumes { get; init; }
+
+    /// <summary>
+    /// The mirrored surroundings' map wanted (outside): how far its objects are taken (the haze's end); null: no map.
+    /// </summary>
+    public float? ParabolicHaze { get; init; }
 
     /// <summary>The frame's depth of field and fade (#112 step 4h); none by default.</summary>
     public PostParams Post { get; init; }
@@ -197,7 +211,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
                          l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view, _swapChain.DepthBuffer),
-                         view.Lights, _toneMapper.LightTexture, view.Coronas, _swapChain.DepthBuffer, view.Volumes);
+                         view.Lights, _toneMapper.LightTexture, view.Coronas, _swapChain.DepthBuffer, view.Volumes,
+                         view.ParabolicHaze != null ? (l, t, n) => _scene.DrawParabolicSky(_device, l, t, n, view) : null, view.ParabolicHaze ?? 0);
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
           bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);

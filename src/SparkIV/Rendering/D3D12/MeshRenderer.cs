@@ -433,6 +433,26 @@ float SunShadow(float3 P)
   return saturate(lit / 12 + f.SunU.w * away * away);
 }
 
+// The mirrored surroundings in the direction r (the page's mirroredAround, gtaiv-pc.js ~324-342): the map (texture
+// f.Params2.z; 0: none, nothing) at 0.5 + r.xy / (2 (1 + saturate(r.z))) - the page's GL rows from the bottom, here
+// turned over -, level lod (0 to 3), x the game's darkening of its smaller levels (1, 0.8409, 0.6389, 0.4518 between
+// them). Not ported: the page's + (1 - map alpha) x the sky's colour where the map has no alpha (only at its rim's
+// blurred levels; the map's circle is the sky's, alpha 1).
+SamplerState LinearClamp : register(s1);
+float3 MirroredAround(float3 r, float lod)
+{
+  uint map = (uint)(f.Params2.z + 0.5);
+  if (map == 0)
+  {
+    return 0;
+  }
+  float level = clamp(lod, 0, 3);
+  float2 at = r.xy / (2 * (1 + saturate(r.z)));
+  float4 m = Tex[map].SampleLevel(LinearClamp, float2(0.5 + at.x, 0.5 - at.y), level);
+  float darker = level < 1 ? lerp(1.0, 0.8409, level) : level < 2 ? lerp(0.8409, 0.6389, level - 1) : lerp(0.6389, 0.4518, level - 2);
+  return m.rgb * darker;
+}
+
 // The light of a surface (no albedo): the light from around by the normal's z x AO + the sun past n.l 0.25, x its
 // shadow (the page's outsideLight: sunColor x sunLit x sunShadow).
 float3 LitBy(float3 n, float ao, float sunShadow)
@@ -615,15 +635,25 @@ PsOut Shade(VsOut input, bool deferred)
     }
     float power = vs.a * p.VShine.y * reflective;
     float3 sunShine = f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4);
+    // The mirrored surroundings (the page's vehicleShine, gtaiv-pc.js ~399-453): x the vertex colour's luminance,
+    // globalScalars.w (f.Params2.y).
+    float vehicleAo = dot(vc, float3(0.2125, 0.7154, 0.0721));
     if (vehicleGlassShader || p.VShine.z > 2.5)
     {
       float fr = pow(1 - abs(dot(view, n)), 4);
       float s = min(strength, 1) * (1 - dirtAmount) * saturate(0.5 * fr + 0.5);
-      vehicleShine = s * (vehicleGlassShader ? 4 : 1) * shineScale * sunShine;
+      vehicleShine = s * (vehicleGlassShader ? 4 : 1) * shineScale * sunShine
+                   + s * s * vehicleAo * MirroredAround(R, 0) * saturate(R.z * 5) * (1.6 * fr + 0.4)
+                     * (vehicleGlassShader ? 36 * f.Params2.y : 18) * reflective;
     }
     else
     {
-      vehicleShine = strength * (1 - dirtAmount) * sunShine * 2 * shineScale;
+      float away = length(input.world - f.Eye.xyz);
+      float3 mapDir = normalize(R + view * saturate(away * 0.02));
+      float fresnel = 0.75 * pow(1 - abs(dot(view, n)), 4) + 0.25;
+      vehicleShine = strength * (1 - dirtAmount) * (sunShine * 2 * shineScale
+                   + 10 * f.Params2.y * vehicleAo * fresnel * MirroredAround(mapDir, 4 - 4 * saturate(power / 230))
+                     * saturate(mapDir.z * 5) * (1 - saturate(away * 0.01)));
     }
     // gta_vehicle_paint2's second shine, into the colour (lit with it).
     if (p.Misc.x > 0)
@@ -645,7 +675,14 @@ PsOut Shade(VsOut input, bool deferred)
     {
       // The G-buffer's (deferred_lighting's sun pass): 2 x GB2.x x the sun x 2 gDirectionalLight.w.
       float power = spec.a * p.Spec.x * (baked ? 1 : 0.75);
-      shine = 2 * (baked ? 0.5 : 0.25) * amount * f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale;
+      // + the mirrored surroundings (the page's pedShine, gtaiv-pc.js ~215-235): 10 x globalScalars.w x AO x Fresnel x
+      // the map along R + v x saturate(distance x 0.02), blurred by the power, x saturate(5 R'.z) x (1 - saturate(d / 100)).
+      float away = length(input.world - f.Eye.xyz);
+      float3 mapDir = normalize(R + view * saturate(away * 0.02));
+      float fresnel = 0.75 * pow(1 - abs(dot(view, n)), 4) + 0.25;
+      shine = 2 * (baked ? 0.5 : 0.25) * amount * (f.Sun.rgb * sunShadow * pow(sunR + 1e-4, power + 1e-4) * 2 * shineScale
+            + 10 * f.Params2.y * ao * fresnel * MirroredAround(mapDir, 4 - 4 * saturate(power / 230)) * saturate(mapDir.z * 5)
+              * (1 - saturate(away * 0.01)));
     }
   }
   // A map's see-through material drawn forward (the page's forwardLit, ModelView.html ~558-660 and ~3497-3508): the
@@ -981,13 +1018,16 @@ float4 PSGlow(VsOut input) : SV_Target
 // (the light from around x AO + the sun x saturate((n.l - 0.25) x 4/3)) by the vertex normal, AO from the vertex
 // colours alone (a map object's red by day, green at night; else red), no shadow, no shine, no lamps, the far fog over
 // it by the distance from the mirrored eye; premultiplied by texture alpha x vertex alpha (nothing where that is 0).
-float4 PSMirror(VsOut input) : SV_Target
+// toMap: into the mirrored surroundings' map instead (the page's parabolicFragment, gtaiv-pc.js ~126-145): nothing
+// below the camera (f.FogParams.w its height), no draw distance, the same light and far fog, and as alpha the texture's
+// x the vertex's x saturate((64 - distance) x 0.25), not premultiplied (blended SRCALPHA / INVSRCALPHA over the sky).
+float4 MirrorSurface(VsOut input, bool toMap)
 {
   if (input.world.z < f.FogParams.w)
   {
     discard;
   }
-  if (f.FogParams.z > 0 && dot(input.world - f.Eye.xyz, f.Params2.yzw) > f.FogParams.z)
+  if (!toMap && f.FogParams.z > 0 && dot(input.world - f.Eye.xyz, f.Params2.yzw) > f.FogParams.z)
   {
     discard;
   }
@@ -1052,11 +1092,52 @@ float4 PSMirror(VsOut input) : SV_Target
   float farM = saturate((length(input.world - f.Eye.xyz) - f.FogNear.w) / max(f.FogFar.w - f.FogNear.w, 1));
   float3 lit = lerp(albedo * (around * ao + f.Sun.rgb * sunM), f.FogFar.rgb, farM);
   float a = saturate(alpha);
+  if (toMap)
+  {
+    a *= saturate((64 - length(input.world - f.Eye.xyz)) * 0.25);
+  }
   if (a <= 0)
   {
     discard;
   }
-  return float4(lit * a, a);
+  return toMap ? float4(lit, a) : float4(lit * a, a);
+}
+
+float4 PSMirror(VsOut input) : SV_Target
+{
+  return MirrorSurface(input, false);
+}
+
+// The mirrored surroundings' map (the page's parabolicVertex, gtaiv-pc.js ~115-125; the game's VS 0x22EC8A80): of a
+// point's direction d from the camera (f.Eye) and its distance len, the place d.xy / (len + d.z), the depth 1 - 1 / (len
+// + 1) (GL's 1 - 2 / (len + 1) on -1..1).
+VsOut VSParabolic(VsIn input)
+{
+  VsOut o = VSMain(input);
+  float3 dd = o.world - f.Eye.xyz;
+  float len = length(dd);
+  o.position = float4(dd.xy / max(len + dd.z, 1e-4), 1 - 1 / (len + 1), 1);
+  return o;
+}
+
+float4 PSParabolic(VsOut input) : SV_Target
+{
+  return MirrorSurface(input, true);
+}
+
+// A level of the map from the one above (the page's generateMipmap): each texel the mean of its 2 x 2 (texture d.Part.x).
+float4 VSFull(uint id : SV_VertexID) : SV_Position
+{
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+float4 PSHalve(float4 position : SV_Position) : SV_Target
+{
+  int2 at = int2(position.xy) * 2;
+  uint src = (uint)d.Part.x;
+  return (Tex[src].Load(int3(at, 0)) + Tex[src].Load(int3(at + int2(1, 0), 0)) +
+          Tex[src].Load(int3(at + int2(0, 1), 0)) + Tex[src].Load(int3(at + int2(1, 1), 0))) * 0.25;
 }
 
 // The lamps (#112 step 5): one light volume per light, a box round its sphere drawn over the solid scene (its faces
@@ -1455,6 +1536,15 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private ID3D12Resource? _fullDepth;
     private int _fullDepthWidth, _fullDepthHeight;
     private int _volumeLookupSlot;
+    // The mirrored surroundings' map (see DrawParabolic): the texture, its depth, a target view per level, its number
+    // (all levels) and each level's (for the next one's halving), the pipelines; whether it was drawn this frame.
+    private const uint ParabolicSize = 1024;
+    private const int ParabolicLevels = 4;
+    private readonly ID3D12Resource _parabolic, _parabolicDepth;
+    private readonly ID3D12DescriptorHeap _parabolicRtvs, _parabolicDsv;
+    private readonly int _parabolicSlot;
+    private readonly int[] _parabolicLevelSlots = new int[ParabolicLevels];
+    private readonly ID3D12PipelineState _parabolicPipeline, _halvePipeline;
     private readonly ID3D12Resource _spotVolume, _pointVolume;
     private readonly int _spotVolumeCount, _pointVolumeCount;
     private readonly float _spotVolumeScale, _pointVolumeScale;
@@ -1552,6 +1642,15 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           AddressV = TextureAddressMode.Wrap,
           AddressW = TextureAddressMode.Wrap,
           MaxAnisotropy = 16,
+          MaxLOD = float.MaxValue,
+        },
+        // The mirrored surroundings' map as the page reads it (LINEAR_MIPMAP_LINEAR, CLAMP_TO_EDGE; gtaiv-pc.js ~1214-1218).
+        new StaticSamplerDescription(ShaderVisibility.Pixel, 1, 0)
+        {
+          Filter = Filter.MinMagMipLinear,
+          AddressU = TextureAddressMode.Clamp,
+          AddressV = TextureAddressMode.Clamp,
+          AddressW = TextureAddressMode.Clamp,
           MaxLOD = float.MaxValue,
         },
       };
@@ -1684,6 +1783,65 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         SampleDescription = new SampleDescription(1, 0),
       });
       _fullDepthSlot = _textures.Reserve();
+      // The mirrored surroundings' map (the page's parabolicTarget, gtaiv-pc.js ~1207-1233): 1024 x 1024, the light's
+      // format (A16B16G16R16F, as the game's), four levels, a depth; drawn into by DrawParabolic, each smaller level made
+      // from the one above (PSHalve); read by the shine through MirroredAround (its number in f.Params2.z).
+      _parabolic = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(targetFormat, ParabolicSize, ParabolicSize, 1, ParabolicLevels, 1, 0, ResourceFlags.AllowRenderTarget),
+        ResourceStates.PixelShaderResource, new ClearValue(targetFormat, new Vortice.Mathematics.Color4(0, 0, 0, 0)));
+      _parabolicDepth = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(PanelSwapChainFormats.Depth, ParabolicSize, ParabolicSize, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+        ResourceStates.DepthWrite, new ClearValue(PanelSwapChainFormats.Depth, 1.0f, 0));
+      _parabolicRtvs = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, ParabolicLevels));
+      _parabolicDsv = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.DepthStencilView, 1));
+      uint parabolicRtvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      _parabolicSlot = _textures.Reserve();
+      d3d.CreateShaderResourceView(_parabolic, null, _textures.CpuHandle(_parabolicSlot));
+      for (int level = 0; level < ParabolicLevels; level++)
+      {
+        d3d.CreateRenderTargetView(_parabolic, new RenderTargetViewDescription
+        {
+          Format = targetFormat,
+          ViewDimension = RenderTargetViewDimension.Texture2D,
+          Texture2D = new Texture2DRenderTargetView { MipSlice = (uint)level },
+        }, _parabolicRtvs.GetCPUDescriptorHandleForHeapStart() + level * (int)parabolicRtvSize);
+        _parabolicLevelSlots[level] = _textures.Reserve();
+        d3d.CreateShaderResourceView(_parabolic, new ShaderResourceViewDescription
+        {
+          Format = targetFormat,
+          ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+          Shader4ComponentMapping = ShaderComponentMapping.Default,
+          Texture2D = new Texture2DShaderResourceView { MostDetailedMip = (uint)level, MipLevels = 1 },
+        }, _textures.CpuHandle(_parabolicLevelSlots[level]));
+      }
+      d3d.CreateDepthStencilView(_parabolicDepth, null, _parabolicDsv.GetCPUDescriptorHandleForHeapStart());
+      // Into it: the map's solid objects, both faces, writing depth (LESS), blended SRCALPHA / INVSRCALPHA, its alpha kept
+      // (the page's blendFuncSeparate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ZERO, ONE), ModelView.html ~3775-3781).
+      var parabolicBlend = BlendDescription.Opaque;
+      parabolicBlend.RenderTarget[0] = parabolicBlend.RenderTarget[0] with
+      {
+        BlendEnable = true,
+        SourceBlend = Blend.SourceAlpha, DestinationBlend = Blend.InverseSourceAlpha, BlendOperation = BlendOperation.Add,
+        SourceBlendAlpha = Blend.Zero, DestinationBlendAlpha = Blend.One, BlendOperationAlpha = BlendOperation.Add,
+      };
+      var parabolicState = Pipeline(false, parabolicBlend, DepthStencilDescription.Default, both, false);
+      parabolicState.VertexShader = Compile(DxcShaderStage.Vertex, "VSParabolic");
+      parabolicState.PixelShader = Compile(DxcShaderStage.Pixel, "PSParabolic");
+      _parabolicPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(parabolicState);
+      _halvePipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(new GraphicsPipelineStateDescription
+      {
+        RootSignature = _rootSignature,
+        VertexShader = Compile(DxcShaderStage.Vertex, "VSFull"),
+        PixelShader = Compile(DxcShaderStage.Pixel, "PSHalve"),
+        SampleMask = uint.MaxValue,
+        PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
+        RasterizerState = RasterizerDescription.CullNone,
+        BlendState = BlendDescription.Opaque,
+        DepthStencilState = DepthStencilDescription.None,
+        RenderTargetFormats = new[] { targetFormat },
+        DepthStencilFormat = PanelSwapChainFormats.Depth,
+        SampleDescription = new SampleDescription(1, 0),
+      });
       (_spotVolume, _spotVolumeCount, _spotVolumeScale) = VolumeBuffer(d3d, LightVolumeMesh(5, 4, true));
       (_pointVolume, _pointVolumeCount, _pointVolumeScale) = VolumeBuffer(d3d, LightVolumeMesh(4, 8, false));
 
@@ -1854,9 +2012,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         RenderTargetFormats = new[] { Format.R16_Float },
         SampleDescription = new SampleDescription(1, 0),
       });
-      // The frame's constants (camera, light), a slot per frame in flight; after them as many for the mirror's view.
+      // The frame's constants (camera, light), a slot per frame in flight; after them as many for the mirror's view, and
+      // as many for the mirrored surroundings' map.
       _frame = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
-                                           ResourceDescription.Buffer((ulong)PaletteSlots * 2 * FrameSlotBytes), ResourceStates.GenericRead);
+                                           ResourceDescription.Buffer((ulong)PaletteSlots * 3 * FrameSlotBytes), ResourceStates.GenericRead);
       void* frameMapped;
       _frame.Map(0, null, &frameMapped).CheckError();
       _frameMapped = (byte*)frameMapped;
@@ -2517,7 +2676,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
                             int width, int height, Matrix4x4 viewProjection, Vector3 eye, FrameLight light,
                             Action<ID3D12GraphicsCommandList>? afterSolid = null, IReadOnlyList<DeferredLight>? lights = null,
                             ID3D12Resource? lightTexture = null, IReadOnlyList<Corona>? coronas = null, ID3D12Resource? depthTexture = null,
-                            IReadOnlyList<LightVolume>? volumes = null)
+                            IReadOnlyList<LightVolume>? volumes = null,
+                            Action<ID3D12GraphicsCommandList, CpuDescriptorHandle, int>? parabolicSky = null, float parabolicHaze = 0)
     {
       list.OMSetRenderTargets(renderTarget, depth);
       list.ClearDepthStencilView(depth, ClearFlags.Depth, 1.0f, 0);
@@ -2582,7 +2742,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       frame[40] = width;
       frame[41] = height;
       // The surface under the decals: its texture number (0: none).
-      frame[42] = _belowSlot;
+      frame[42] = NoDecalBelow ? 0 : _belowSlot;
       frame[43] = 0;
       frame[44] = light.ShineScale;
       frame[45] = 0;
@@ -2629,6 +2789,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         DrawSunShadow(list, sun!, frameAddress);
         SunShadowDrawn = true;
+      }
+      // The mirrored surroundings' map (outside: the caller hands the sky's drawing into it), read by the shine.
+      frame[45] = light.GlobalScalarsW;
+      frame[46] = 0;
+      if (parabolicSky != null && !NoParabolic)
+      {
+        DrawParabolic(list, eye, parabolicSky, parabolicHaze, light.DrawReach);
+        frame[46] = _parabolicSlot;
       }
       void Bind(bool gBuffer)
       {
@@ -3482,6 +3650,123 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
+    /// <summary>The decals lit by their own normal and AO instead of the surface's below (for comparisons).</summary>
+    public bool NoDecalBelow { get; set; }
+
+    /// <summary>The mirrored surroundings' map left out (the shine without it; for comparisons).</summary>
+    public bool NoParabolic { get; set; }
+
+    // The mirrored surroundings' map from the camera's place (the page's ModelView.html ~3750-3794 with drawMeshes'
+    // mapPass ~3287-3312 and gtaiv-pc.js parabolicVertex / parabolicFragment): cleared to 0, the sky first (the caller's
+    // sky: its target, size), then the map's far versions' solid parts reaching above the camera (the sphere's top),
+    // not under 0.003 of their distance across, within 330 m across the ground (less their radius), not wholly beyond
+    // the haze (hazeReach) nor the shot's draw distance; then each smaller level halved from the one above. Called by
+    // Draw with this frame's constants written (taken over into a slot of its own, the eye's height as the clip).
+    private unsafe void DrawParabolic(ID3D12GraphicsCommandList list, Vector3 eye, Action<ID3D12GraphicsCommandList, CpuDescriptorHandle, int> sky,
+                                      float hazeReach, float drawReach)
+    {
+      var main = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
+      var frame = (float*)(_frameMapped + (2 * PaletteSlots + _paletteSlot) * FrameSlotBytes);
+      Buffer.MemoryCopy(main, frame, FrameSlotBytes, FrameFloats * 4);
+      frame[58] = 0;
+      frame[59] = eye.Z;
+      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)((2 * PaletteSlots + _paletteSlot) * FrameSlotBytes);
+      var rtv = _parabolicRtvs.GetCPUDescriptorHandleForHeapStart();
+      uint rtvSize = _device.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      var dsv = _parabolicDsv.GetCPUDescriptorHandleForHeapStart();
+      list.ResourceBarrierTransition(_parabolic, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 0));
+      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+      sky(list, rtv, (int)ParabolicSize);
+
+      list.OMSetRenderTargets(rtv, dsv);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(ParabolicSize, ParabolicSize));
+      list.RSSetScissorRect((int)ParabolicSize, (int)ParabolicSize);
+      list.SetGraphicsRootSignature(_rootSignature);
+      list.SetDescriptorHeaps(_textures.Heap);
+      list.SetGraphicsRootConstantBufferView(3, frameAddress);
+      list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      list.SetPipelineState(_parabolicPipeline);
+      bool reachOn = drawReach > 0 && float.IsFinite(drawReach);
+      var draw = stackalloc float[DrawConstants];
+      foreach (var instance in _instances)
+      {
+        if (instance == null || !instance.Visible || !instance.Mirrored || _models[instance.Model] is not Model model || model.Skin != null)
+        {
+          continue;
+        }
+        float scale = MathF.Max(new Vector3(instance.World.M11, instance.World.M12, instance.World.M13).Length(),
+                      MathF.Max(new Vector3(instance.World.M21, instance.World.M22, instance.World.M23).Length(),
+                                new Vector3(instance.World.M31, instance.World.M32, instance.World.M33).Length()));
+        bool bound = false;
+        foreach (var part in model.Parts)
+        {
+          if (part.Pass != Pass.Solid)
+          {
+            continue;
+          }
+          var center = Vector3.Transform(part.Center, instance.World);
+          float radius = part.Radius * scale;
+          float distance = Vector3.Distance(center, eye);
+          float across = MathF.Sqrt((center.X - eye.X) * (center.X - eye.X) + (center.Y - eye.Y) * (center.Y - eye.Y));
+          float away = distance - radius;
+          if (center.Z + radius < eye.Z || radius < 0.003f * distance || across - radius > 330 ||
+              (hazeReach > 0 && away > hazeReach) || (reachOn && away > drawReach))
+          {
+            continue;
+          }
+          if (!bound)
+          {
+            bound = true;
+            list.IASetVertexBuffers(0, model.VertexView);
+            list.IASetVertexBuffers(2, model.ExtrasView);
+            list.SetGraphicsRootShaderResourceView(4, model.PartData.GPUVirtualAddress);
+            list.IASetIndexBuffer(model.IndexView);
+            new Span<float>(draw, DrawConstants).Clear();
+            *(Matrix4x4*)draw = instance.World;
+            draw[16] = 1;
+            list.SetGraphicsRoot32BitConstants(0, 20, draw, 0);
+          }
+          var mask = part.DirtMask ?? Vector3.Zero;
+          draw[20] = part.Cutout ? 1 : 0;
+          draw[21] = part.DirtMask != null ? 1 : 0;
+          draw[22] = part.Kind;
+          draw[23] = part.Glow;
+          draw[24] = mask.X;
+          draw[25] = mask.Y;
+          draw[26] = mask.Z;
+          draw[27] = 0;
+          draw[28] = part.Tint.X;
+          draw[29] = part.Tint.Y;
+          draw[30] = part.Tint.Z;
+          draw[31] = 1;
+          draw[32] = part.Index;
+          draw[33] = 0;
+          draw[34] = 0;
+          draw[35] = 0;
+          list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
+          list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
+          DrawCalls++;
+        }
+      }
+      // Each smaller level the mean of the one above (the page's generateMipmap; the game's own pass not derived).
+      list.SetPipelineState(_halvePipeline);
+      for (int level = 1; level < ParabolicLevels; level++)
+      {
+        list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, (uint)(level - 1));
+        uint size = ParabolicSize >> level;
+        list.OMSetRenderTargets(rtv + level * (int)rtvSize);
+        list.RSSetViewport(new Vortice.Mathematics.Viewport(size, size));
+        list.RSSetScissorRect((int)size, (int)size);
+        new Span<float>(draw, DrawConstants).Clear();
+        draw[32] = _parabolicLevelSlots[level - 1];
+        list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+        list.DrawInstanced(3, 1, 0, 0);
+      }
+      list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, ParabolicLevels - 1);
+    }
+
     public void Dispose()
     {
       Clear();
@@ -3508,6 +3793,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       _volumePipeline.Dispose();
       _spotVolume.Dispose();
       _pointVolume.Dispose();
+      _parabolic.Dispose();
+      _parabolicDepth.Dispose();
+      _parabolicRtvs.Dispose();
+      _parabolicDsv.Dispose();
+      _parabolicPipeline.Dispose();
+      _halvePipeline.Dispose();
       _noExtras.Dispose();
       _gBufferRtvs.Dispose();
       _gBufferSrvs.Dispose();

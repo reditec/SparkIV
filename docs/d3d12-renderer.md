@@ -188,8 +188,8 @@ normal and specular maps, shine.
 (`TimeCycle.SkySunDirection`, higher than the light's sun), the clouds from skydome.wtd's noise, made each time their
 Phase moves by a rage_perlinnoise pass into a 256 x 256 target (the Phase grows by CloudSpeed with the clock; in the
 visual tests it starts at the trace's value, `CLOUDPHASE`), below the horizon faded to the far fog colour on the game's
-dome, and the near fog's share. The main view, and the water's mirror (below, "The water's mirror"); the parabolic
-surroundings map not yet. In the app the player draws it through `IRenderScene.DrawBackground`.
+dome, and the near fog's share. The main view, the water's mirror (below, "The water's mirror") and the mirrored
+surroundings' map (`toMap`, below). In the app the player draws it through `IRenderScene.DrawBackground`.
 
 ### The water (step 4f, first version)
 
@@ -421,8 +421,8 @@ see-through parts (gta_ped, bucket 1) blended by the stipple's share of their al
 and the map's glass with vertex alpha by their texture's alpha, culled, writing depth; other glass at 0.45) and the
 map's other see-through materials (culled, writing depth, forward shine); the location's decals lit by the surface
 below (its normal and AO copied after the solid pass), normal decals taking its AO.
-Not yet: the mirrored surroundings in the shine (the parabolic map and its sky fallback), the lamps' shine on the
-G-buffer, animated textures. (Glowing see-through parts and glass, and the lamps on the forward-drawn map materials:
+Not yet: the lamps' shine on the G-buffer, animated textures. (The mirrored surroundings in the shine: below, "The
+mirrored surroundings' map".) (Glowing see-through parts and glass, and the lamps on the forward-drawn map materials:
 below.)
 
 ### Post effects (step 4h)
@@ -512,6 +512,43 @@ Measured (mean difference to the game's picture, /255; cutgen one frame at a tim
 All 72: sum -61.6 against 2026-11-04_20-14. Worse by more than 0.05 only bc_3 s3 f506.5 (+0.13, a pier lamp's corona
 at the picture's right edge, near the camera: drawn by the page's rules, kept) ; intro s3 f569.75 +0.04 (the depth
 effect), et01_ba f402 +0.02.
+
+### The mirrored surroundings' map (2026-11-04)
+
+The game's parabolic map of the surroundings (EnvironmentSampler / ParabSampler), as the page builds and reads it
+(ModelView.html ~3750-3794 and drawMeshes' mapPass ~3287-3312; gtaiv-pc.js `parabolicTarget` ~1207-1233,
+`parabolicVertex` / `parabolicFragment` ~115-145, `mirroredAround` ~324-342):
+
+- *The map* (`MeshRenderer.DrawParabolic`, from `Draw` after the sun's shadow, before the G-buffer, when the caller
+  hands the sky's drawing: `Draw`'s `parabolicSky` and `parabolicHaze`; in the app `SceneView.ParabolicHaze` and
+  `IRenderScene.DrawParabolicSky`, outside = wherever the game's light is): 1024 x 1024, the light's format
+  (A16B16G16R16F), four levels, cleared to 0. The sky first (`CutsceneSky.Draw(toMap: true)`: the direction back from the
+  map's place p = d.xy / (1 + d.z), nothing outside its circle, no near fog), then the location's far versions'
+  (`mirrored` instances) solid parts reaching above the camera, not under 0.003 of their distance across, within 330 m
+  across the ground less their radius, not wholly beyond the haze or the shot's draw distance; both faces, writing
+  depth, blended SRCALPHA / INVSRCALPHA with the map's alpha kept (`VSParabolic`: d.xy / (len + d.z), depth
+  1 - 1 / (len + 1); `PSParabolic` = `MirrorSurface(toMap)`: nothing below the camera, the texture lit by the light
+  from around x AO and the sun, the far fog, alpha x saturate((64 - distance) x 0.25)). Each smaller level the mean
+  of the 2 x 2 above (`PSHalve`, the page's generateMipmap). The part tests use the parts' spheres: the page's mesh
+  boxes' tops only decide which parts are drawn, and what lies below the camera is cut per pixel anyway.
+- *Reading it* (`MirroredAround` in the shader, texture number in `Params2.z`, `GlobalScalarsW` = globalScalars.w in
+  `Params2.y`, the clamped trilinear sampler s1): at 0.5 + r.xy / (2 (1 + saturate(r.z))), the page's GL rows turned
+  over, level lod x the game's darkening (1, 0.8409, 0.6389, 0.4518). Added as the page's pedShine (map materials with a
+  spec map or flat spec, peds: 10 x globalScalars.w x AO x Fresnel x the map along R + v x saturate(d x 0.02) at lod
+  4 - 4 saturate(power / 230) x saturate(5 R'.z) x (1 - saturate(d / 100))) and vehicleShine (paint the same with the
+  vertex colour's luminance; vehicle glass s² x lum x the map at lod 0 x saturate(5 R.z) x (1.6 f + 0.4) x 36 x
+  globalScalars.w x reflectivity; badges and lamp glass x 18).
+- Not ported: the page's (1 - map alpha) x the sky's colour (its `skyColor`/`skyTopColor` in picture units, unmapped)
+  where the map's alpha is under 1 - only at the circle's blurred rim -, and its caching of the map (drawn every frame
+  here). cutgen: `D3D12NOPARABOLIC=1`.
+
+Measured (all 72, against the run with the glows, coronas and forward lamps): sum -19.3; e.g. bc_3 s1 f292.5 7.10 ->
+5.20 (page 5.15), s2 f1307 7.45 -> 5.94 (5.92), s1 f854.75 5.17 -> 3.74 (3.66), s3 f829.5 10.13 -> 8.71 (8.65), et01_ba
+f468 6.00 -> 4.80 (4.86) and every et01_ba reference -0.2 to -0.64 (the car paint and the booth's panels mirror the
+lamps and the sky). Worse: intro s6 f712.5 +0.27, s3 f749.75 +0.18, s6 f469.75 +0.13 - each now at the page's value
+(3.96, 2.18, 3.15 vs page 3.96, 2.17, 3.21): native was better than the page there without the map; bc_1 s1 f940 +0.14
+(a small even lift; that frame's larger gap is Bernie's TV screen, white natively, dark on the page - not found),
+bc_1 s1 f144 +0.04. Guards: et01_aa s3 f49.75 2.55, intro s4 f420.5 2.95, bc_1 s1 f144 1.03, bc_3 s3 f357.25 6.35.
 
 ## Next steps (#112)
 

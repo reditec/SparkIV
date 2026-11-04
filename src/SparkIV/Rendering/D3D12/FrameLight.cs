@@ -65,6 +65,12 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// </summary>
     public Vector4 DepthFx;
 
+    /// <summary>
+    /// globalScalars.w (GTA IV: 0.6 x the time cycle's 64th number): the strength of the mirrored surroundings in the
+    /// shine (the page's pedShineScale.y).
+    /// </summary>
+    public float GlobalScalarsW;
+
     /// <summary>The sun's shadow (cascaded maps; see the class SunShadow); null: none (the sun everywhere).</summary>
     public SunShadow? SunShadow;
 

@@ -250,6 +250,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       AoScale = c.AoMultiplier,
       // gDirectionalLight.w (the page's pedShineScale.x).
       ShineScale = c.DirectionalLightW,
+      // globalScalars.w (the page's pedShineScale.y, gtaiv-pc.js ~989): the mirrored surroundings' strength in the shine.
+      GlobalScalarsW = c.GlobalScalarsW,
       // The fog (#112, the page's gameFog with TimeCycle.Message's fog): globalFogColorN = the modifier's near fog colour
       // or the sky bottom x SkyLightMult; globalFogColor = (SkyColor + AzimuthStrength x AzimuthColor) x SkyLightMult
       // (the page's farFogLight; without the sky's columns its haze's colour, here the near colour); FogStart; FarClip;

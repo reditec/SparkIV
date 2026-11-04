@@ -259,9 +259,25 @@ float Pow32(float a)
 // gta_atmoscatt_clouds program 8 (GTAIV.1 PS 0x246411a0, TLAD's GTAIV.4 PS 0x23CFA160), in light.
 float4 PSSky(VsOut i) : SV_Target
 {
-  // The direction through the pixel: its point on the far plane (Direct3D's depth 1) less the eye.
-  float4 farPoint = mul(float4(i.ndc, 1, 1), s.InverseViewProjection);
-  float3 dir = normalize(farPoint.xyz / farPoint.w - s.Eye.xyz);
+  // The direction through the pixel: its point on the far plane (Direct3D's depth 1) less the eye. Into the mirrored
+  // surroundings' map (s.SunDir.w 1; the page's toMap, ModelView.html ~2038-2048): back from the map's place p =
+  // d.xy / (1 + d.z), nothing outside its circle.
+  float3 dir;
+  if (s.SunDir.w > 0.5)
+  {
+    float qq = dot(i.ndc, i.ndc);
+    if (qq > 1)
+    {
+      discard;
+    }
+    float zz = (1 - qq) / (1 + qq);
+    dir = normalize(float3(i.ndc * (1 + zz), zz));
+  }
+  else
+  {
+    float4 farPoint = mul(float4(i.ndc, 1, 1), s.InverseViewProjection);
+    dir = normalize(farPoint.xyz / farPoint.w - s.Eye.xyz);
+  }
   float3 sunDir = s.SunDir.xyz;
 
   float3 skyV = s.SkyColor.rgb + lerp(s.AzimuthEast.rgb, s.Azimuth.rgb, 0.5 * dir.x + 0.5)
@@ -572,11 +588,12 @@ float4 PSSky(VsOut i) : SV_Target
     /// The sky into the light target (in RENDER_TARGET state, cleared; drawn first, before the meshes), as the page's
     /// main view; the perlin noise made again first when the Phase moved. Nothing without the game's sky columns
     /// (HDRExposure 0: the page masks the light off for its picture-only sky). Leaves the light target bound without
-    /// depth. Not yet: the parabolic surroundings map (toMap: the direction from the map's ndc, the result also as its
-    /// picture, no near fog) and the mirrored view for the water (the mirrored view-projection and eye, near fog 0).
+    /// depth. <paramref name="mirror"/>: into the water's mirror (its multisampled target). <paramref name="toMap"/>: into
+    /// the mirrored surroundings' map (the page's drawSky toMap: the direction from the map's place, nothing outside its
+    /// circle; the caller passes the near fog's amount 0).
     /// </summary>
     public unsafe void Draw(ID3D12GraphicsCommandList list, CpuDescriptorHandle lightTarget, int width, int height,
-                            Matrix4x4 viewProjection, Vector3 eye, SkyParams p, bool mirror = false)
+                            Matrix4x4 viewProjection, Vector3 eye, SkyParams p, bool mirror = false, bool toMap = false)
     {
       if (!(p.HdrExposure > 0) || !Matrix4x4.Invert(viewProjection, out var inverse))
       {
@@ -596,7 +613,7 @@ float4 PSSky(VsOut i) : SV_Target
       // The layout of the shader's Sky (row_major: System.Numerics' matrix as it is).
       *(Matrix4x4*)f = inverse;
       Put(f, 16, eye, clouds ? 1 : 0);
-      Put(f, 20, p.SunDirection, 0);
+      Put(f, 20, p.SunDirection, toMap ? 1 : 0);
       Put(f, 24, p.SkyColor, p.AzimuthHeight);
       Put(f, 28, p.AzimuthColor, p.AzimuthStrength);
       Put(f, 32, p.AzimuthColorEast, p.PageExposure);

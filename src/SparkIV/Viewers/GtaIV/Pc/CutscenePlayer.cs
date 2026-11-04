@@ -74,6 +74,21 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, SkyParams.From(cycle, _lighting.Hour, phase));
     }
 
+    // The sky into the mirrored surroundings' map (the page's drawSky toMap, ModelView.html ~3765-3766): without the near
+    // fog. (The sky's textures are made by DrawBackground, drawn first each frame.)
+    public void DrawParabolicSky(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle target,
+                                 int size, SceneView view)
+    {
+      if (_lighting == null || _sky == null)
+      {
+        return;
+      }
+      var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
+      var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
+      sky.NearFogAmount = 0;
+      _sky.Draw(list, target, size, size, view.ViewProjection, view.Eye, sky, toMap: true);
+    }
+
     // The water (#112 4f): made on the render thread; the location shown's water put on the GPU when it changes.
     private CutsceneWater? _water;
     private CutsceneLocation? _waterLocation;
@@ -808,7 +823,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         coronas = lamps.CoronasNow(eyeAt, viewProjection, _lighting.Hour, _lighting.CycleAt(eyeAt, viewProjection).SpriteBrightness);
         volumes = lamps.VolumesNow(eyeAt, viewProjection, _lighting.Hour, _volumeLookupSet);
       }
-      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Coronas = coronas, Volumes = volumes, Post = post };
+      // The mirrored surroundings' map wherever the game's light is (outside), its objects as far as the haze.
+      float? parabolicHaze = null;
+      if (_lighting != null)
+      {
+        float mapReach = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var mapAt) ? mapAt.Reach : float.PositiveInfinity;
+        parabolicHaze = CutsceneSunShadow.CasterReach(light.FogEnd, mapReach, null, 0);
+      }
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Coronas = coronas, Volumes = volumes, Post = post, ParabolicHaze = parabolicHaze };
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).
