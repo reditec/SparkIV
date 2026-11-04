@@ -38,8 +38,47 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// lowest and highest rate) and when the rate falls below 30 or is back (the page's countFrame: below under 27.5,
   /// back from 29.5, over the last second), on the UI thread.
   /// </summary>
-  public sealed class CutscenePlayer : IRenderScene
+  public sealed class CutscenePlayer : IRenderScene, IDisposable
   {
+    // The sky (#112 4e): made on the render thread at its first frame; its cloud textures those of the location shown.
+    private CutsceneSky? _sky;
+    private (byte[]? Clouds, byte[]? Detail)? _skyTextures;
+    private bool _skyTexturesNew;
+
+    public void DrawBackground(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
+                               int width, int height, SceneView view)
+    {
+      if (_lighting == null)
+      {
+        return;
+      }
+      _sky ??= new CutsceneSky(device, ToneMapper.LightFormat);
+      if (_skyTexturesNew && _skyTextures is var (clouds, detail))
+      {
+        _skyTexturesNew = false;
+        using var allocator = device.Device.CreateCommandAllocator(Vortice.Direct3D12.CommandListType.Direct);
+        using var upload = device.Device.CreateCommandList<Vortice.Direct3D12.ID3D12GraphicsCommandList>(0, Vortice.Direct3D12.CommandListType.Direct, allocator, null);
+        var uploads = new List<Vortice.Direct3D12.ID3D12Resource>();
+        _sky.SetTextures(clouds, detail, upload, uploads);
+        upload.Close();
+        device.Queue.ExecuteCommandList(upload);
+        device.WaitIdle();
+        foreach (var u in uploads)
+        {
+          u.Dispose();
+        }
+      }
+      var cycle = _lighting.CycleAt(view.Eye);
+      // The clouds' Phase on from the page's start value by the section's time (the trace's per cutscene: not known here).
+      float phase = CutsceneSky.CloudPhase(cycle, _time, false);
+      _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, SkyParams.From(cycle, _lighting.Hour, phase));
+    }
+
+    public void Dispose()
+    {
+      _sky?.Dispose();
+      _sky = null;
+    }
     private readonly DispatcherQueue _dispatcher;
     private readonly ConcurrentQueue<Action> _orders = new ConcurrentQueue<Action>();
 
@@ -145,6 +184,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       _far = Math.Max(1000f, drawDistance * 2);
       _shownLocation = location != null ? key : null;
+      if (location != null && (_skyTextures is not var (c, d) || !ReferenceEquals(c, location.Clouds) || !ReferenceEquals(d, location.CloudDetail)))
+      {
+        _skyTextures = (location.Clouds, location.CloudDetail);
+        _skyTexturesNew = true;
+      }
       if (key != null && location != null && !_locations.ContainsKey(key))
       {
         LoadLocation(key, location);

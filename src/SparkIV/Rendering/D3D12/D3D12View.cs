@@ -41,6 +41,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// (the eye adapts gently then, at once when stopped).
     /// </summary>
     SceneView Update(MeshRenderer renderer, double now, int width, int height);
+
+    /// <summary>
+    /// Draws what lies behind the meshes into the light target (a sky; render thread, after the target is cleared,
+    /// before the meshes). Nothing by default.
+    /// </summary>
+    void DrawBackground(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
+                        int width, int height, SceneView view)
+    {
+    }
   }
 
   /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
@@ -160,6 +169,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
           _toneMapper.Adapt(view.Tone, view.Playing, last > 0 ? now - last : 0);
           var list = _swapChain.Begin();
           _toneMapper.BeginLight(list);
+          _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light);
           _toneMapper.EndLight(list);
           // Measured at most every 200 ms (as the page), else when the last measure is read.
@@ -222,6 +232,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
       _thread.Join(5000);
       PanelSwapChain.ClearPanel(_panel);
       CloseHandle(_swapChain.WaitableObject);
+      _device.WaitIdle();
+      (_scene as IDisposable)?.Dispose();
       _renderer.Dispose();
       _toneMapper.Dispose();
       _swapChain.Dispose();

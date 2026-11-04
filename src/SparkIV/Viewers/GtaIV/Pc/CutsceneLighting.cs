@@ -96,11 +96,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>The light and tone of a frame seen from <paramref name="eyeScene"/> (in the scene's places).</summary>
     public (FrameLight Light, ToneParams Tone) At(Vector3 eyeScene)
     {
-      UnderBoxes(eyeScene);
-      int room = RoomOf(eyeScene);
-      var c = room >= 0 && room < _rooms.Length && _rooms[room] is TimeCycle inRoom ? inRoom : _boxed;
+      var c = CycleAt(eyeScene);
       return (LightOf(c), ToneOf(c));
     }
+
+    /// <summary>The time cycle a frame seen from <paramref name="eyeScene"/> takes (for the sky: CutsceneSky).</summary>
+    public TimeCycle CycleAt(Vector3 eyeScene)
+    {
+      UnderBoxes(eyeScene);
+      int room = RoomOf(eyeScene);
+      return room >= 0 && room < _rooms.Length && _rooms[room] is TimeCycle inRoom ? inRoom : _boxed;
+    }
+
+    /// <summary>Whether a place is outside every room (the sky shows there; inside, the game's world beyond is dark).</summary>
+    public bool Outside(Vector3 eyeScene) => RoomOf(eyeScene) < 0;
 
     private FrameLight LightOf(TimeCycle c) => new FrameLight
     {

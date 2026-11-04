@@ -1,6 +1,6 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 4b, playing** – in the app behind the switch `SPARKIV_D3D12=1`.
+Status: **step 4c, light and tone mapping** – in the app behind the switch `SPARKIV_D3D12=1`.
 Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
 
 ## Why
@@ -111,6 +111,44 @@ for is shown once it is on the GPU; until then the one shown before stays. Textu
 them and freed with the last (their views' slots used again). The fence is safe from several threads (an event per
 thread). In this mode the view no longer makes the page's location messages (the harbour's took seconds and
 gigabytes).
+
+### Light and tone mapping (step 4c)
+
+The page lights every cutscene with a location by one path (its "outdoor" one, inside too). The native renderer does
+the same, drawing the scene's light into a float target (`ToneMapper.LightFormat`, R16G16B16A16) and making the
+picture from it:
+
+- **Solid light** (`MeshRenderer` pixel shader): `albedo x (around x AO + sun x saturate((n.l - 0.25) x 4/3))`, the
+  light from around eased from above to below by the normal's z. AO from the vertex colours (a map object's or prop's
+  red by day and green at night, by the day/night factor; a ped's red; a vehicle's luminance, which also tints it;
+  trees 0.5; glowing materials 1; 0.45 for baked meshes without colours), times the actor's AmbientDownMult, then
+  scaled by AoMultiplier (peds also by PedAoMultiplier). Glowing materials (gta_emissive*) laid over or added by their
+  multiplier x the exposure (the night ones only at night and not in a room). Peds' and vehicles' normals turned to
+  the camera; the back faces of map objects' and props' solids culled (counter-clockwise front, as in GL). Sun and
+  light from around already include the exposure (`FrameLight`).
+- **Where the light comes from** (`CutsceneLighting`, GTA IV PC): the time cycle of the weather and hour under the
+  map's modifier boxes at the camera, inside a room the room's modifier (the room taken whole: the page's easing by
+  how much of the screen the room's portals cover is not ported yet); an actor's AmbientDownMult as the page's
+  `actorAmbientAt`, by where its pose puts it.
+- **The picture** (`ToneMapper`): a quarter-size copy of the light (each texel the mean of its 4 x 4 block) is read
+  back for the mean luminance; the eye adapts to it (kept within AdaptedLumMin and AdaptedLumMax, eased over
+  AdaptTime while playing, at once when stopped; in the app measured every 200 ms); the composite scales the light by
+  MidGrey / the adapted luminance and applies saturation, colour shift, colour correction (x 2) and gamma on the
+  luminance, as the page's post composite. No bloom, depth of field or grain yet.
+
+The G-buffer of the plan comes with the lamps (step 5): for this light a forward pass gives the page's result exactly.
+Not yet: the cutscene's own lights and the lamps (step 5), the sky (until then black, which also pulls the adaptation),
+normal and specular maps, shine.
+
+### The sky (step 4e)
+
+`CutsceneSky` (GTA IV PC) draws the sky into the light target before the meshes, as the page's HDR sky path does it
+(gta_atmoscatt_clouds, from the traces): the sky colour with the azimuth colours towards the horizon, the sun
+(`TimeCycle.SkySunDirection`, higher than the light's sun), the clouds from skydome.wtd's noise, made each time their
+Phase moves by a rage_perlinnoise pass into a 256 x 256 target (the Phase grows by CloudSpeed with the clock; in the
+visual tests it starts at the trace's value, `CLOUDPHASE`), below the horizon faded to the far fog colour on the game's
+dome, and the near fog's share. Only the main view: the parabolic surroundings map and the water's mirror come with
+the water and shadows. In the app the player draws it through `IRenderScene.DrawBackground`.
 
 ## Next steps (#112)
 
