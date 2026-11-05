@@ -672,12 +672,29 @@ f1394.75 4.25 -> 4.04 (page 4.02), f1292.25 3.27 -> 3.25 (page 3.18).
   warmed-up base and stepping per section time, see "Seeing through the water"). Mean signed difference -0.5, mean
   |difference| 1.6 at s3 f140.5, the figures and the pier equal.
 - **Film grain** (TLAD): equal strength (see round 5), random on both sides.
-- **intro s2 f682.5** (+0.11): the cabins lit through the windows; see 2dfx-lights.md "Light_Add's room test" - the
-  game's rule is in its encrypted part (0x431E40), the page is closer only by its 80-light cap.
+- **intro s2 f682.5** (+0.11 after round 6, +0.05 after round 7): see "The game's lamp list" below.
 
 Full run after round 6 (all 72): sum -0.28, native mean 3.259 (page 3.38). Above the page by more than 0.05: bc_3 s3
 f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), intro s2 f682.5 +0.11 (above), et01_ba f1292.25 +0.07
 (open: the grain-free difference lies in the far bridge's fine detail and the man in front, signed mean 0.00).
+
+### The game's lamp list (2026-11-05, round 7)
+
+Instead of the page's 80-light cap, the lamps the game draws were read from `GTAIV.3.trace` (apitrace dump of single
+frames, one line per deferred light draw) and matched with native's (`D3D12LAMPDUMP=1`, `D3D12LIGHTINFO=1`). Details,
+call numbers and the open points in [2dfx-lights.md](GtaIV/Pc/formats/2dfx-lights.md#interior-lamps-seen-from-outside-and-flag-0x10000-gtaiv3trace-2026-11-05).
+In f682.5 the game draws 74 lights, native drew 137; every game light has a native one.
+- **2dfx flag 0x10000** (25 lamps of the intro's ship): never drawn by the game. `CutsceneLights` leaves them out
+  (cutgen `D3D12KEEP10000=1` keeps them). f682.5 2.09 -> 2.03 (page 1.98).
+- **Rooms seen from outside: observed, not ported (contradicted by f863).** Only rooms behind an outside portal on
+  screen fits f682.5 (bridge yes, below deck no), but in f863 the game also drops room 0's and most of room 1's lamps.
+  Native keeps every room as seen from outside (as before); the portal rule is behind cutgen
+  `D3D12OUTSIDEPORTALROOMS=1` for study (no measurable effect on any reference).
+- Open: what drops interior lamps from outside (f863); room 0 seen from room 3 (s3 f569.75); the game draws fewer of
+  the cutscene's own lights than native's 8 (s3 f569.75: 3); it culls lamps outside the view (no visible effect).
+
+Full run after round 7 (all 72): only f682.5 changed (-0.06), native mean 3.258. Above the page by more than 0.05:
+bc_3 s3 f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), et01_ba f1292.25 +0.07 (open).
 
 ## Next steps (#112)
 

@@ -1,4 +1,4 @@
-/**********************************************************************\
+﻿/**********************************************************************\
 
  SparkIV
  Copyright (C) 2026  reditec
@@ -94,6 +94,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           {
             continue;
           }
+          // GTA IV (PC): a lamp with the 2dfx flag 0x10000 lights nothing in the cutscenes. GTAIV.exe gives it its own
+          // path (Light_FromEffect 0xC1E200: colour and strength x a runtime table entry, 0x15E88F0 + DAT_01174790 x
+          // 16, via 0xC1DAA0), and the game draws none of them: GTAIV.3.trace, intro s2 f682.5 (calls
+          // 27894936-27909727), 24 on screen within 10 m of the camera, and f863 (34228429-34242275), all 25 of the
+          // ship's; the only such lamps in the cutscenes compared (intro's ship; none in bc_1, et01_aa, intro s4).
+          if ((light.Flags & 0x10000) != 0 && !KeepFlag10000Lamps)
+          {
+            continue;
+          }
           var at = Vector3.Transform(light.Position, obj.Place);
           var way = Vector3.TransformNormal(light.Direction, obj.Place);
           way = way.LengthSquared() > 1e-8f ? Vector3.Normalize(way) : new Vector3(0, 0, -1);
@@ -129,6 +138,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
       }
     }
+
+    /// <summary>
+    /// With the camera outside, only the lamps of the rooms seen through a portal to the outside on screen (SeenRooms
+    /// from -1) instead of every room's (the default, the page's). Observed in GTAIV.3.trace intro s2 f682.5 but
+    /// contradicted by f863 (see docs/GtaIV/Pc/formats/2dfx-lights.md), so not ported: for study only.
+    /// </summary>
+    public static bool OutsidePortalRooms { get; set; }
+
+    /// <summary>The lamps with the 2dfx flag 0x10000 kept (as before 2026-11-05, the page's). For comparisons.</summary>
+    public static bool KeepFlag10000Lamps { get; set; }
 
     /// <summary>The location's lamps (lighting anything at all).</summary>
     public int LampCount => _lamps.Count;
@@ -242,7 +261,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // the camera's (seenRooms: the outside's never; the ship's galley in the intro, et01_aa's lounge).
       int camRoom = _rooms.Count > 0 ? CutsceneLighting.RoomOf(_rooms, eye) : -1;
       Vector3? camAt = camRoom >= 0 ? _rooms[camRoom].At : null;
-      var seen = camRoom >= 0 ? SeenRooms(camRoom, viewProjection) : null;
+      var seen = camRoom >= 0 || (_rooms.Count > 0 && OutsidePortalRooms) ? SeenRooms(camRoom, viewProjection) : null;
       var planes = FrustumPlanes(viewProjection);
       float night = NightFactor(hour);
       var near = new List<(DeferredLight Light, float D)>();
@@ -329,7 +348,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       int camRoom = _rooms.Count > 0 ? CutsceneLighting.RoomOf(_rooms, eye) : -1;
       Vector3? camAt = camRoom >= 0 ? _rooms[camRoom].At : null;
-      var seen = camRoom >= 0 ? SeenRooms(camRoom, viewProjection) : null;
+      var seen = camRoom >= 0 || (_rooms.Count > 0 && OutsidePortalRooms) ? SeenRooms(camRoom, viewProjection) : null;
       float night = NightFactor(hour);
       foreach (var m in _coronas)
       {
@@ -367,7 +386,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       int camRoom = _rooms.Count > 0 ? CutsceneLighting.RoomOf(_rooms, eye) : -1;
       Vector3? camAt = camRoom >= 0 ? _rooms[camRoom].At : null;
-      var seen = camRoom >= 0 ? SeenRooms(camRoom, viewProjection) : null;
+      var seen = camRoom >= 0 || (_rooms.Count > 0 && OutsidePortalRooms) ? SeenRooms(camRoom, viewProjection) : null;
       float night = NightFactor(hour);
       foreach (var m in _lamps)
       {
@@ -537,6 +556,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var seen = new HashSet<int> { room };
       var todo = new Stack<int>();
       todo.Push(room);
+      // (Only with OutsidePortalRooms, not ported: contradicted by f863, calls 34228429-34242275, where the game draws
+      // no lamp of the forward hold though its portal is on screen.)
+      // From outside (room -1): the outside itself, and the rooms whose portal to the outside is on screen, on from
+      // there as from a room (the GTA IV trace GTAIV.3.trace, intro s2 f682.5, calls 27906440-27907845: the game draws
+      // the lamps of the ship's bridge, whose windows are on screen, and none of the holds' and cabins' below deck).
+      if (room < 0)
+      {
+        todo.Clear();
+        for (int i = 0; i < _rooms.Count; i++)
+        {
+          if (!seen.Contains(i) && _rooms[i].Portals.Any(q => (q.To < 0 || q.To >= _rooms.Count) && PortalShare(_rooms[i], q.Corners, viewProjection) > 0))
+          {
+            seen.Add(i);
+            todo.Push(i);
+          }
+        }
+      }
       while (todo.Count > 0)
       {
         var r = _rooms[todo.Pop()];
