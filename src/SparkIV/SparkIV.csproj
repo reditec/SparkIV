@@ -37,7 +37,7 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Velopack" Version="1.2.161" />
-    <!-- The native Direct3D 12 renderer (#112, behind SPARKIV_D3D12=1 for now). -->
+    <!-- The native Direct3D 12 renderer (#112, the default; SPARKIV_D3D12=0 uses the WebView2 page). -->
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Vortice.Dxc" Version="3.8.3" />

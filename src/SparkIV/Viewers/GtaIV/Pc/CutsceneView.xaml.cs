@@ -1,4 +1,4 @@
-/**********************************************************************\
+﻿/**********************************************************************\
 
  SparkIV
  Copyright (C) 2026  reditec
@@ -267,7 +267,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       core.Navigate(Host + "index.html");
     }
 
-    // The native renderer (#112), with SPARKIV_D3D12=1 instead of the page.
+    // The native renderer (#112), by default (SPARKIV_D3D12=0: the page).
     private D3D12View? _native;
 
     // The scene the native renderer plays (#112 4b): told here what the page is told (location, section, seek, play,
@@ -275,7 +275,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private CutscenePlayer? _player;
 
     /// <summary>
-    /// SPARKIV_D3D12=1: the view drawn by the native Direct3D 12 renderer instead of the WebView2 page (#112 4b): the
+    /// By default (SPARKIV_D3D12=0: the page): the view drawn by the native Direct3D 12 renderer instead of the WebView2 page (#112 4b): the
     /// cutscene played by a <see cref="CutscenePlayer"/>, everything else here as with the page (the page's messages go
     /// nowhere without one; at each place one goes out, the player is told the same).
     /// </summary>

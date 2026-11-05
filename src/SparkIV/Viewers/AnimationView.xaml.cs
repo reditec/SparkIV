@@ -290,7 +290,7 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    // The native renderer (#112 step 6), with SPARKIV_D3D12=1 instead of the page: the ped or object drawn and played by
+    // The native renderer (#112 step 6), by default (SPARKIV_D3D12=0: the page): the ped or object drawn and played by
     // a ModelScenePlayer, told at each place the page is told the same; it says the frame shown as the page does.
     private Rendering.D3D12.D3D12View? _native;
     private Rendering.D3D12.ModelScenePlayer? _player;

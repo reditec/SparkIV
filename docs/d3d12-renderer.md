@@ -1,8 +1,8 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **steps 1-5 for the cutscene view, step 6 for the model and animation views** – in the app behind the switch
-`SPARKIV_D3D12=1`. Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly
-as before.
+Status: **steps 1-6** – the cutscene, model and animation views draw natively by default. `SPARKIV_D3D12=0` still
+draws them with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) as before; that path is to be removed.
+(Elsewhere in this document "with `SPARKIV_D3D12=1`" means the native path, now the default.)
 
 ## Why
 

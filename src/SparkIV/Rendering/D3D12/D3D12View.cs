@@ -39,10 +39,10 @@ namespace SparkIV.WinUI.Rendering.D3D12
   public sealed class D3D12View : IDisposable
   {
     /// <summary>
-    /// The switch for now: SPARKIV_D3D12=1 draws the cutscene, model and animation views natively, else the WebView2 page
-    /// as before.
+    /// The cutscene, model and animation views draw natively by default; SPARKIV_D3D12=0 draws them with the WebView2 page
+    /// as before (kept for now, to be removed).
     /// </summary>
-    public static bool Enabled { get; } = Environment.GetEnvironmentVariable("SPARKIV_D3D12") == "1";
+    public static bool Enabled { get; } = Environment.GetEnvironmentVariable("SPARKIV_D3D12") != "0";
 
     private readonly SwapChainPanel _panel;
     private readonly IRenderScene _scene;
