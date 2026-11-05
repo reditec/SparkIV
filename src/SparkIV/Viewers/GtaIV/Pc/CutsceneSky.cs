@@ -600,6 +600,9 @@ float4 PSSky(VsOut i) : SV_Target
         return;
       }
       bool clouds = HasClouds;
+      var profiler = _device.Profiler;
+      string mark = toMap ? "  sky (into the map)" : mirror ? "  sky (into the mirror)" : "sky";
+      profiler?.Begin(list, mark);
       list.SetGraphicsRootSignature(_rootSignature);
       list.SetDescriptorHeaps(_srvHeap);
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
@@ -637,6 +640,7 @@ float4 PSSky(VsOut i) : SV_Target
       list.SetGraphicsRootDescriptorTable(2, gpu);
       list.SetGraphicsRootDescriptorTable(3, gpu + 2 * (int)_srvSize);
       list.DrawInstanced(3, 1, 0, 0);
+      profiler?.End(list, mark);
     }
 
     private static unsafe void Put(float* f, int at, Vector3 v, float w)

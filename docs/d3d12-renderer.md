@@ -715,6 +715,82 @@ Not changed: the cables' gap comes from the page's smoothing, which the game has
 Full run after round 7 (all 72): only f682.5 changed (-0.06), native mean 3.258. Above the page by more than 0.05:
 bc_3 s3 f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), et01_ba f1292.25 +0.07 (open).
 
+## Profiling (2026-11-05)
+
+`GpuProfiler` (`Rendering/D3D12`, generic) times each pass: a timestamp query heap (8 frame slots x 512 queries) and a
+persistently mapped readback buffer; `Begin(list, name)` / `End(list, name)` put a timestamp into the command list
+and note the CPU's clock (the recording between the marks) and, where the caller passes its counter, the draw calls
+the pass adds. Names may nest and repeat (a name's spans in a frame are summed: the four cascades, the coronas' depth
+copy and their draw). At the end of the frame the slot's timestamps are resolved into the readback buffer; they are
+read once the GPU has passed the frame's fence mark (a frame or two later, never waited for; a frame whose slot is
+still busy is not recorded), converted with the queue's timestamp frequency. `Cpu(name, ms)` adds a stage of the render
+thread, `Count(name, n)` a number of the frame. The profiler lives on `D3D12Device.Profiler`: null unless profiling is
+on, and every mark is `profiler?.Begin(...)`, so with it off nothing is recorded (no queries, no clock reads). Pictures
+are byte-identical with and without (bc_3 s3 f357.25, cutgen D3D12CAP with and without `D3D12PROFILE=1`: same SHA-256,
+diff 6.35).
+
+**Switches:**
+- App: `SPARKIV_D3D12_PROFILE=1` (with `SPARKIV_D3D12=1`). Once a second, after the fps line, a block into
+  `SparkIV-d3d12.log` beside `SparkIV.exe`: per pass the GPU ms (mean over the second's frames, then the max), the CPU's
+  recording ms between its marks, the draws a frame; then the CPU stages (mean, max): `wait (frame latency, VSync)` (the
+  waitable object), `scene update` (with its parts `update: poses`, `update: camera, light, cascades`, `update: lights
+  list`, `update: coronas + volumes lists`), `wait for the buffer's fence`, `recording` (from the opened list to the
+  composite), `close + execute`, `present`; and the draws of the main view and maps and of the water's mirror.
+- cutgen: `D3D12PROFILE=1` with `D3D12BENCH=<step>`: the same table after the bench, mean and p95 over all frames (frames
+  without a pass count as 0). With `D3D12CAP` (pictures) the one frame's table (scene list and composite list).
+
+**Reading it:** `frame (GPU total)` is the GPU time from the frame's first to its last mark; the passes indented under
+another (`  sun: ...`, `  sky (into the map)`, `  sky (into the mirror)`, `  water: mirror meshes`) are inside it and
+not to be added again. The passes, in drawing order: `sky`, `G-buffer clear`, `lamp shadow atlas`, `sun shadow` (clear,
+map objects = phases 0 and 1, cast, convert = the 2 x 2 mean into the map), `parabolic map`, `G-buffer solid` (the sun
+and the light from around are lit here, in the solid pass's shader, with the sun's shadow taps), `decals` (with the copy
+of the surface's normal), `lamps (light pass)` (one instanced draw of all light volumes), `fog + depth effect` (with the
+light's copy), `coronas` (the solid depth's copy and the sprites), `water: mirror` (its sky and meshes and the
+resolve), `water: draw` (the depth copy, the quads, the sea grid; the swell on the CPU), `water: sim` (the wave
+texture's steps on the GPU), `see-through + glows` (the glows are drawn interleaved with the lit see-through parts, so
+not apart), `volumes`, `post: quarter copy`, `post: measure copy`, `post: bloom blur`, `post: tone map + DOF + grain`
+(one shader). In the bench, `close + execute + GPU wait` is the wait for the GPU (the bench draws one frame at a time):
+bench frame ~ update + recording + that. In the app CPU and GPU overlap (one frame queued), so a frame takes about
+max(CPU, GPU), CPU = update + recording + close/execute + present.
+
+**Measured** (cutgen `D3D12BENCH=1 D3D12PROFILE=1`, Release, `SPARKIV_D3D12_DEBUG=0`, 1920 x 1080, RTX 2060, all frames
+of the section; GPU ms mean / p95, the recording's CPU ms mean, draws a frame):
+
+| Pass | intro s4 (2049 frames) | bc_3 s3 (1038) | bc_1 s1 (1076, inside) |
+|---|---|---|---|
+| **frame (GPU total)** | **14.37 / 15.89** | **8.21 / 8.57** | **8.62 / 9.42** |
+| sky | 0.18 / 0.20 | 0.16 / 0.17 | 0.07 / 0.07 |
+| lamp shadow atlas | 0.13 / 0.18 (830 draws) | 0.05 / 0.07 (215) | 0.02 / 0.02 (40) |
+| **sun shadow** | **6.01 / 8.47** (rec 1.21, 3635) | **2.09 / 3.12** (rec 0.58, 1581) | **4.50 / 5.08** (rec 0.31, 1316) |
+| &nbsp;&nbsp;clear | 0.14 / 0.13 | 0.12 / 0.12 | 0.12 / 0.11 |
+| &nbsp;&nbsp;map objects | 4.68 / 6.58 (3199) | 1.23 / 2.11 (1457) | 3.71 / 4.22 (1232) |
+| &nbsp;&nbsp;cast | 0.42 / 1.36 (432) | 0.11 / 0.21 (120) | 0.04 / 0.05 (80) |
+| &nbsp;&nbsp;convert | 0.76 / 0.84 | 0.63 / 0.82 | 0.62 / 0.64 |
+| parabolic map | 0.46 / 0.69 (709) | 0.33 / 0.64 (241) | 0.05 / 0.05 (0) |
+| **G-buffer solid** | **2.55 / 3.07** (rec 1.79, 14 921) | **1.95 / 2.38** (rec 1.05, 10 375) | **1.29 / 1.77** (rec 0.17, 2911) |
+| decals | 0.16 / 0.24 (223) | 0.09 / 0.12 (72) | 0.23 / 0.30 (71) |
+| **lamps (light pass)** | **1.85 / 2.72** | **0.82 / 1.66** | **1.74 / 2.19** |
+| fog + depth effect | 0.28 / 0.32 | 0.27 / 0.31 | 0.32 / 0.32 |
+| coronas | 0.07 / 0.08 (391) | 0.10 / 0.13 (47) | 0.07 / 0.08 (5) |
+| water: mirror | 0.87 / 1.11 (meshes 0.80, 7468 draws, rec 1.13) | 0.14 / 0.23 (564) | - |
+| water: draw | 0.09 / 0.15 | 0.20 / 0.42 | - |
+| water: sim | 0.94 / 0.17 | 1.65 / 0.16 | - |
+| see-through + glows | 0.41 / 0.91 (1164) | 0.06 / 0.13 (396) | 0.04 / 0.07 (72) |
+| volumes | 0.08 / 0.13 | - | - |
+| post (quarter, measure, bloom, tone map + DOF + grain) | 0.27 / 0.28 | 0.28 / 0.28 | 0.27 / 0.28 |
+| CPU: update (poses, camera/light/cascades, lights, coronas + volumes) | 0.83 (0.19, 0.55, 0.08, 0.02) | 0.66 | 0.66 |
+| CPU: recording | 6.30 / 6.87 | 3.01 / 3.37 | 0.78 / 1.18 |
+| draws a frame (main + maps / mirror) | 21 881 / 7 468 | 12 929 / 564 | 4 417 / 0 |
+| bench frame (serial) mean / p95 | 21.78 / 23.48 | 12.10 / 12.46 | 10.26 / 11.30 |
+| overlap estimate max(CPU, GPU) | ~14.4 ms (GPU) | ~8.2 ms (GPU) | ~8.6 ms (GPU) |
+
+`water: sim`'s mean is its warm-up (the first ~10 frames step 20 000 waves); its p95 is the steady cost. All three are
+GPU-bound: the CPU's part (update + recording, ~7.1 / 3.7 / 1.4 ms) is about half the GPU's or less. The intro's
+harbour holds 60 Hz on average (14.4 ms) with little room (p95 15.9 ms). What dominates: the sun shadow's map objects
+(texels into four 4096² R32F + D32 targets: 4.7 ms in the intro, and 3.7 ms in bc_1's room, where the sun doesn't
+reach), the G-buffer solid pass, the lamps' light pass (one instanced draw, fill rate), and outside the water's mirror
+(intro) and the shadow's convert (~0.6-0.8 ms, four 2048² means).
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

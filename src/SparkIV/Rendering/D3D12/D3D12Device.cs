@@ -104,6 +104,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12CommandQueue Queue { get; }
     public string AdapterName { get; } = "";
 
+    /// <summary>
+    /// The per-pass profiler when profiling is on (the app: SPARKIV_D3D12_PROFILE=1; cutgen's bench: D3D12PROFILE=1),
+    /// else null: the passes' marks then record nothing.
+    /// </summary>
+    public GpuProfiler? Profiler { get; private set; }
+
+    /// <summary>Profiling on (once; the render thread uses it).</summary>
+    public GpuProfiler StartProfiler() => Profiler ??= new GpuProfiler(this);
+
     private readonly object _signalLock = new object();
 
     /// <summary>
@@ -188,6 +197,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
         // The device may be gone.
       }
       FlushMessages();
+      Profiler?.Dispose();
+      Profiler = null;
       _infoQueue?.Dispose();
       _fence.Dispose();
       foreach (var e in _fenceEvents.Values)

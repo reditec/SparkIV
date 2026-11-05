@@ -1280,6 +1280,7 @@ float4 PSWater(VsOut i) : SV_Target
     /// </summary>
     public (CpuDescriptorHandle Target, CpuDescriptorHandle Depth, int Width, int Height) BeginMirror(ID3D12GraphicsCommandList list, int width, int height)
     {
+      _device.Profiler?.Begin(list, "water: mirror");
       int mw = Math.Max(1, width >> 1), mh = Math.Max(1, height >> 1);
       var rtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
       var dsv = _mirrorDsv.GetCPUDescriptorHandleForHeapStart();
@@ -1319,6 +1320,7 @@ float4 PSWater(VsOut i) : SV_Target
     {
       if (_mirror == null || _mirrorSamples == null)
       {
+        _device.Profiler?.End(list, "water: mirror");
         return;
       }
       list.ResourceBarrierTransition(_mirrorSamples, ResourceStates.RenderTarget, ResourceStates.ResolveSource);
@@ -1328,6 +1330,7 @@ float4 PSWater(VsOut i) : SV_Target
       list.ResourceBarrierTransition(_mirrorSamples, ResourceStates.ResolveSource, ResourceStates.RenderTarget);
       _mirrorState = ResourceStates.PixelShaderResource;
       _mirrorDrawn = true;
+      _device.Profiler?.End(list, "water: mirror");
     }
 
     /// <summary>
@@ -1348,6 +1351,8 @@ float4 PSWater(VsOut i) : SV_Target
       {
         return;
       }
+      var profiler = _device.Profiler;
+      profiler?.Begin(list, "water: draw");
       // Outside, the scene's depth copied first (the page's water pass: gameKeepSolidDepth, then waterBehind; only with its
       // post effects, outside): <paramref name="depthBuffer"/> (D32, DEPTH_WRITE, the size of the picture) into a copy the
       // water reads, so it is see-through by how much water lies in front of the scene.
@@ -1392,7 +1397,11 @@ float4 PSWater(VsOut i) : SV_Target
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       if (SimActive)
       {
+        profiler?.End(list, "water: draw");
+        profiler?.Begin(list, "water: sim");
         Simulate(list, p, seconds, exact);
+        profiler?.End(list, "water: sim");
+        profiler?.Begin(list, "water: draw");
       }
       bool waves = _waves && _simCleared;
 
@@ -1523,6 +1532,7 @@ float4 PSWater(VsOut i) : SV_Target
         list.IASetIndexBuffer(_gridIndexView);
         list.DrawIndexedInstanced(GridIndexCount, 1, 0, 0, 0);
       }
+      _device.Profiler?.End(list, "water: draw");
     }
 
     private static unsafe void Put(float* f, int at, Vector3 v, float w)

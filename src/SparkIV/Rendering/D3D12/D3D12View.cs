@@ -138,6 +138,12 @@ namespace SparkIV.WinUI.Rendering.D3D12
       D3D12Device.Log("swap chain: at most " + _swapChain.MaximumFrameLatency + " frame(s) queued");
       _renderer = new MeshRenderer(_device, ToneMapper.LightFormat);
       _toneMapper = new ToneMapper(_device, PanelSwapChain.BackBufferFormat);
+      // SPARKIV_D3D12_PROFILE=1: per pass GPU and CPU times, once a second into the log (see GpuProfiler).
+      if (GpuProfiler.EnabledInApp)
+      {
+        _device.StartProfiler();
+        D3D12Device.Log("profiling on (SPARKIV_D3D12_PROFILE=1)");
+      }
 
       panel.SizeChanged += Panel_SizeChanged;
       panel.CompositionScaleChanged += Panel_CompositionScaleChanged;
@@ -178,10 +184,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
       int frames = 0;
       try
       {
+        var profiler = _device.Profiler;
         while (!_stop)
         {
           // At most MaximumFrameLatency frames queued (1): wait until the swap chain takes the next one.
+          long stage = profiler != null ? GpuProfiler.Now : 0;
           WaitForSingleObjectEx(_swapChain.WaitableObject, 1000, true);
+          profiler?.CpuSince("wait (frame latency, VSync)", stage);
           if (_stop)
           {
             break;
@@ -201,12 +210,21 @@ namespace SparkIV.WinUI.Rendering.D3D12
           }
 
           double now = clock.Elapsed.TotalSeconds;
+          if (profiler != null)
+          {
+            stage = GpuProfiler.Now;
+          }
           var view = _scene.Update(_renderer, now, _swapChain.Width, _swapChain.Height);
+          profiler?.CpuSince("scene update", stage);
           _toneMapper.Resize(_swapChain.Width, _swapChain.Height);
           // The eye adapts to the last measure read (a few frames old): gently while playing, at once when stopped.
           _toneMapper.ReadMeasure(wait: false);
           _toneMapper.Adapt(view.Tone, view.Playing, last > 0 ? now - last : 0);
           var list = _swapChain.Begin();
+          if (profiler != null)
+          {
+            stage = GpuProfiler.Now;
+          }
           _toneMapper.BeginLight(list);
           _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
           _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
@@ -221,7 +239,14 @@ namespace SparkIV.WinUI.Rendering.D3D12
             _lastMeasure = now;
           }
           _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
+          profiler?.CpuSince("recording", stage);
           ulong mark = _swapChain.End();
+          if (profiler != null)
+          {
+            profiler.Count("draws (main view and maps)", _renderer.DrawCalls);
+            profiler.Count("draws (water's mirror)", _renderer.MirrorDrawCalls);
+            profiler.FrameSent(mark);
+          }
           if (measured)
           {
             _toneMapper.MeasureSent(mark);
@@ -243,6 +268,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
             D3D12Device.Log(string.Format(CultureInfo.InvariantCulture, "{0:0} fps · {1:0.0} ms, max {2:0.0} ms · {3} draws · {4}x{5}",
                                           frames / (after - secondStart), sum / frames * 1000, longest * 1000, draws / frames,
                                           _swapChain.Width, _swapChain.Height));
+            if (profiler != null)
+            {
+              D3D12Device.Log(profiler.Report(p95: false));
+              profiler.Reset();
+            }
             _device.FlushMessages();
             secondStart = after;
             sum = longest = 0;

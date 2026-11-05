@@ -730,6 +730,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         Tell(() => FrameChanged?.Invoke(whole, playing));
       }
 
+      // (Profiling: the update's parts as CPU stages.)
+      var profiler = renderer.Profiler;
+      long stage = profiler != null ? GpuProfiler.Now : 0;
       foreach (var (actor, pose) in _poses)
       {
         if (_castInstances.TryGetValue(actor, out var instances))
@@ -744,6 +747,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
       }
 
+      if (profiler != null)
+      {
+        profiler.CpuSince("  update: poses", stage);
+        stage = GpuProfiler.Now;
+      }
       float aspect = width / (float)Math.Max(1, height);
       // The free view: fitted once the actors are posed (their bones' places now), walking by the keys held (the page's
       // walk: by the time passed, at most 0.1 s a step; its speed easing in and out), then what is shown eased towards
@@ -809,6 +817,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         light.SunShadow = CutsceneSunShadow.Cascades(eyeAt, viewForward, viewUp, viewFov, aspect, light.SunDirection,
                                                      CutsceneSunShadow.CasterReach(light.FogEnd, locationReach, _drawSteps, frame));
       }
+      if (profiler != null)
+      {
+        profiler.CpuSince("  update: camera, light, cascades", stage);
+        stage = GpuProfiler.Now;
+      }
       // The lights of the frame (#112 step 5): the section's own, the tail lamps, the shown location's lamps.
       List<DeferredLight>? lights = null;
       List<Corona>? coronas = null;
@@ -819,9 +832,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         lamps ??= _noLamps;
         lamps.SetSection(_cutLights);
         lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values);
+        if (profiler != null)
+        {
+          profiler.CpuSince("  update: lights list", stage);
+          stage = GpuProfiler.Now;
+        }
         // The lamps' coronas (the page's coronasNow), x the time cycle's SprBght outside a room.
         coronas = lamps.CoronasNow(eyeAt, viewProjection, _lighting.Hour, _lighting.CycleAt(eyeAt, viewProjection).SpriteBrightness);
         volumes = lamps.VolumesNow(eyeAt, viewProjection, _lighting.Hour, _volumeLookupSet);
+        profiler?.CpuSince("  update: coronas + volumes lists", stage);
       }
       // The mirrored surroundings' map wherever the game's light is (outside), its objects as far as the haze.
       float? parabolicHaze = null;

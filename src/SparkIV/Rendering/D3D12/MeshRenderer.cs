@@ -2715,6 +2715,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     public (Vector3 Min, Vector3 Max)? Bounds(int model) =>
       model >= 0 && model < _models.Count && _models[model] is Model m ? (m.Min, m.Max) : null;
 
+    /// <summary>The device's profiler when profiling is on, else null (see <see cref="D3D12Device.Profiler"/>).</summary>
+    public GpuProfiler? Profiler => _device.Profiler;
+
     /// <summary>All models and instances gone (the GPU done with them first), their textures let go.</summary>
     public void Clear()
     {
@@ -2753,12 +2756,15 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         return;
       }
+      var profiler = _device.Profiler;
       SizeGBuffer(width, height);
       var gTargets = new[] { renderTarget, GBufferView(0), GBufferView(1), GBufferView(2) };
+      profiler?.Begin(list, "G-buffer clear");
       for (int i = 1; i < gTargets.Length; i++)
       {
         list.ClearRenderTargetView(gTargets[i], new Vortice.Mathematics.Color4(0, 0, 0, 0));
       }
+      profiler?.End(list, "G-buffer clear");
 
       // The skinned instances' bones into this frame's slot of the palette buffer.
       _paletteSlot = (_paletteSlot + 1) % PaletteSlots;
@@ -2846,12 +2852,16 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       ShadowMapsDrawn = 0;
       if (lights != null)
       {
+        profiler?.Begin(list, "lamp shadow atlas", DrawCalls);
         DrawShadowMaps(list, lights);
+        profiler?.End(list, "lamp shadow atlas", DrawCalls);
       }
       SunShadowDrawn = false;
       if (sunOn)
       {
+        profiler?.Begin(list, "sun shadow", DrawCalls);
         DrawSunShadow(list, sun!, frameAddress);
+        profiler?.End(list, "sun shadow", DrawCalls);
         SunShadowDrawn = true;
       }
       // The mirrored surroundings' map (outside: the caller hands the sky's drawing into it), read by the shine.
@@ -2860,7 +2870,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       frame[47] = DebugView;
       if (parabolicSky != null && !NoParabolic)
       {
+        profiler?.Begin(list, "parabolic map", DrawCalls);
         DrawParabolic(list, eye, parabolicSky, parabolicHaze, light.DrawReach);
+        profiler?.End(list, "parabolic map", DrawCalls);
         frame[46] = _parabolicSlot;
       }
       void Bind(bool gBuffer)
@@ -2883,7 +2895,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
       Bind(true);
+      profiler?.Begin(list, "G-buffer solid", DrawCalls);
       DrawPass(list, Pass.Solid);
+      profiler?.End(list, "G-buffer solid", DrawCalls);
+      profiler?.Begin(list, "decals", DrawCalls);
       // The surface's normal and AO as the solid pass left them, for the decals taking its light (step 4d).
       if (_below != null)
       {
@@ -2894,17 +2909,21 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.ResourceBarrierTransition(_gBuffer[1]!, ResourceStates.CopySource, ResourceStates.RenderTarget);
       }
       DrawPass(list, Pass.Decal);
+      profiler?.End(list, "decals", DrawCalls);
       // The lamps over the solid scene and its decals (step 5); the water and see-through materials come after
       // (forward, without them for now).
       if (lights != null && lights.Count > 0)
       {
+        profiler?.Begin(list, "lamps (light pass)", DrawCalls);
         DrawLights(list, renderTarget, depth, width, height, lights, frameAddress);
+        profiler?.End(list, "lamps (light pass)", DrawCalls);
       }
       // How many lights the map's see-through materials lit forward read (written before the list runs).
       frame[59] = NoForwardLamps ? 0 : LightsDrawn;
       // The fog over all of it (the see-through materials and the water take theirs as they are drawn).
       if (light.Fog && !NoFog)
       {
+        profiler?.Begin(list, "fog + depth effect", DrawCalls);
         // (The light as it is now, for the depth effect.)
         if (frame[43] > 0.5f)
         {
@@ -2915,26 +2934,35 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           list.ResourceBarrierTransition(lightTexture!, ResourceStates.CopySource, ResourceStates.RenderTarget);
         }
         DrawFog(list, renderTarget, depth, width, height, frameAddress);
+        profiler?.End(list, "fog + depth effect", DrawCalls);
       }
       // The solid scene's depth for the coronas (the page's gameKeepSolidDepth, before the water and the glass).
       bool coronasOn = coronas != null && coronas.Count > 0 && _coronaSlot != 0 && depthTexture != null && !NoCoronas;      if (coronasOn)
       {
+        profiler?.Begin(list, "coronas", DrawCalls);
         KeepSolidDepth(list, depthTexture!, width, height);
+        profiler?.End(list, "coronas", DrawCalls);
       }
       // What goes between the solid scene and the see-through materials (the water), with its own states.
       afterSolid?.Invoke(list);
       Bind(false);
+      profiler?.Begin(list, "see-through + glows", DrawCalls);
       DrawPass(list, Pass.Blend);
+      profiler?.End(list, "see-through + glows", DrawCalls);
       // After the scene, as the page's gamePostEnd (gtaiv-pc.js ~1504-1507): the lamps' light volumes against the whole
       // depth, then the coronas.
       if (volumes != null && volumes.Count > 0 && depthTexture != null && !NoVolumes)
       {
+        profiler?.Begin(list, "volumes", DrawCalls);
         CopyDepth(list, depthTexture, width, height, ref _fullDepth, ref _fullDepthWidth, ref _fullDepthHeight, _fullDepthSlot);
         DrawVolumes(list, volumes, eye);
+        profiler?.End(list, "volumes", DrawCalls);
       }
       if (coronasOn)
       {
+        profiler?.Begin(list, "coronas", DrawCalls);
         DrawCoronas(list, coronas!, viewProjection);
+        profiler?.End(list, "coronas", DrawCalls);
       }
     }
 
@@ -3262,11 +3290,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       var dsv = _sunDsv.GetCPUDescriptorHandleForHeapStart();
       list.ResourceBarrierTransition(_sunMap!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
       var draw = stackalloc float[DrawConstants];
+      var profiler = _device.Profiler;
       for (int k = 0; k < SunCascades; k++)
       {
         list.OMSetRenderTargets(workRtv, dsv);
+        profiler?.Begin(list, "  sun: clear");
         list.ClearRenderTargetView(workRtv, new Vortice.Mathematics.Color4(-100, 0, 0, 0));
         list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+        profiler?.End(list, "  sun: clear");
         list.RSSetViewport(new Vortice.Mathematics.Viewport(SunWorkSize, SunWorkSize));
         list.RSSetScissorRect(SunWorkSize, SunWorkSize);
         list.SetGraphicsRootSignature(_rootSignature);
@@ -3276,8 +3307,18 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         for (int phase = 0; phase < 3; phase++)
         {
+          string? mark = phase == 0 ? "  sun: map objects" : phase == 2 ? "  sun: cast" : null;
+          if (mark != null)
+          {
+            profiler?.Begin(list, mark, DrawCalls);
+          }
           DrawSunPhase(list, sun, k, phase, draw);
+          if (phase != 0)
+          {
+            profiler?.End(list, phase == 1 ? "  sun: map objects" : "  sun: cast", DrawCalls);
+          }
         }
+        profiler?.Begin(list, "  sun: convert", DrawCalls);
         list.ResourceBarrierTransition(_sunWork!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
         list.OMSetRenderTargets(mapRtv, null);
         list.RSSetViewport(new Vortice.Mathematics.Viewport(k * SunMapSize, 0, SunMapSize, SunMapSize));
@@ -3292,6 +3333,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.DrawInstanced(3, 1, 0, 0);
         DrawCalls++;
         list.ResourceBarrierTransition(_sunWork!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+        profiler?.End(list, "  sun: convert", DrawCalls);
       }
       list.ResourceBarrierTransition(_sunMap!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
     }
@@ -3629,6 +3671,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
                                   Matrix4x4 viewProjection, Vector3 eye, Vector3 viewForward, float clipBelow, float hazeReach, float drawReach)
     {
       MirrorDrawCalls = 0;
+      _device.Profiler?.Begin(list, "  water: mirror meshes", 0);
       // The frame's constants, this frame's taken over: the mirrored view, the forward, the draw distance, the clip.
       var main = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
       var frame = (float*)(_frameMapped + (PaletteSlots + _paletteSlot) * FrameSlotBytes);
@@ -3718,6 +3761,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           }
         }
       }
+      _device.Profiler?.End(list, "  water: mirror meshes", MirrorDrawCalls);
     }
 
     /// <summary>A debug view of the solid and see-through passes (0 none; see the shader's Shade: 1 albedo, 2 normal, 3 AO, 4 light, 5 alpha, 6 vertex colour).</summary>

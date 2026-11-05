@@ -140,9 +140,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12GraphicsCommandList Begin()
     {
       int index = BufferIndex;
+      var profiler = _device.Profiler;
+      long start = profiler != null ? GpuProfiler.Now : 0;
       _device.Wait(_frameMarks[index]);
+      profiler?.CpuSince("wait for the buffer's fence", start);
       _allocators[index].Reset();
       CommandList.Reset(_allocators[index], null);
+      profiler?.BeginFrame(CommandList);
       CommandList.ResourceBarrierTransition(BackBuffer, ResourceStates.Present, ResourceStates.RenderTarget);
       return CommandList;
     }
@@ -152,9 +156,19 @@ namespace SparkIV.WinUI.Rendering.D3D12
     {
       int index = BufferIndex;
       CommandList.ResourceBarrierTransition(BackBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
+      // (Profiling: the frame's last timestamps resolved, then closing and sending, and Present, timed apart.)
+      var profiler = _device.Profiler;
+      profiler?.EndFrame(CommandList);
+      long start = profiler != null ? GpuProfiler.Now : 0;
       CommandList.Close();
       _device.Queue.ExecuteCommandList(CommandList);
+      if (profiler != null)
+      {
+        profiler.CpuSince("close + execute", start);
+        start = GpuProfiler.Now;
+      }
       _swapChain.Present(1, PresentFlags.None).CheckError();
+      profiler?.CpuSince("present", start);
       return _frameMarks[index] = _device.Signal();
     }
 

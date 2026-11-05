@@ -327,6 +327,7 @@ float4 PSComposite(VsOut i) : SV_Target
     // The quarter copy of the light (once a frame).
     private unsafe void Down(ID3D12GraphicsCommandList list)
     {
+      _device.Profiler?.Begin(list, "post: quarter copy");
       var constants = stackalloc float[Constants];
       constants[12] = 1f / Width;
       constants[13] = 1f / Height;
@@ -336,6 +337,7 @@ float4 PSComposite(VsOut i) : SV_Target
       Bind(list, _down, SlotLight, constants);
       list.DrawInstanced(3, 1, 0, 0);
       _downDone = true;
+      _device.Profiler?.End(list, "post: quarter copy");
     }
 
     /// <summary>
@@ -352,6 +354,7 @@ float4 PSComposite(VsOut i) : SV_Target
       {
         Down(list);
       }
+      _device.Profiler?.Begin(list, "post: measure copy");
       list.ResourceBarrierTransition(_quarter!, ResourceStates.RenderTarget, ResourceStates.CopySource);
       var footprint = new PlacedSubresourceFootPrint
       {
@@ -360,6 +363,7 @@ float4 PSComposite(VsOut i) : SV_Target
       };
       list.CopyTextureRegion(new TextureCopyLocation(_readback!, footprint), 0, 0, 0, new TextureCopyLocation(_quarter!, 0), null);
       list.ResourceBarrierTransition(_quarter!, ResourceStates.CopySource, ResourceStates.RenderTarget);
+      _device.Profiler?.End(list, "post: measure copy");
       _readbackPending = true;
       _readbackMark = ulong.MaxValue;
       return true;
@@ -479,8 +483,10 @@ float4 PSComposite(VsOut i) : SV_Target
       }
       var constants = stackalloc float[Constants];
       bool bloom = tone.Bloom > 0;
+      var profiler = _device.Profiler;
       if (bloom)
       {
+        profiler?.Begin(list, "post: bloom blur");
         // Across into the second copy, down back into the first.
         constants[12] = 1f / _qw;
         constants[13] = 1f / _qh;
@@ -500,7 +506,9 @@ float4 PSComposite(VsOut i) : SV_Target
         Bind(list, _blur, SlotBlurred, constants);
         list.DrawInstanced(3, 1, 0, 0);
         list.ResourceBarrierTransition(_blurred!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+        profiler?.End(list, "post: bloom blur");
       }
+      profiler?.Begin(list, "post: tone map + DOF + grain");
       list.ResourceBarrierTransition(_quarter!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
       bool dof = post.DepthOfField && depth != null && post.FarClip > post.NearClip;
       if (dof)
@@ -552,6 +560,7 @@ float4 PSComposite(VsOut i) : SV_Target
       {
         list.ResourceBarrierTransition(depth!, ResourceStates.PixelShaderResource, ResourceStates.DepthWrite);
       }
+      profiler?.End(list, "post: tone map + DOF + grain");
     }
 
     public void Dispose()
