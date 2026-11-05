@@ -1349,8 +1349,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         if (play)
         {
           Post(new { type = "play", on = true });
-          _player?.Play(true);
         }
+        // (The page's seek stops it; the player's doesn't: told the play state either way, so both stop or both play
+        // on - a player still playing after the view stopped ran to the section's end and stayed there.)
+        _player?.Play(play);
         ShowFrame();
       }
       AudioTo(seconds, play);
@@ -1460,7 +1462,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      GoTo(e.NewValue / 1000.0, play: false);
+      // Scrubbing while playing plays on from there (and on into the next section); stopped, it stays stopped.
+      GoTo(e.NewValue / 1000.0, play: _playing);
     }
 
     private void SectionList_SelectionChanged(object sender, SelectionChangedEventArgs e)

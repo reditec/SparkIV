@@ -764,6 +764,10 @@ float4 PSWater(VsOut i) : SV_Target
       void* mapped;
       _ring.Map(0, null, &mapped).CheckError();
       _ringMapped = (byte*)mapped;
+      // The noise's bytes and the cached base read here, on the thread the water is made on (the player's: another one).
+      _cachedBase = new Lazy<byte[]?>(ReadCachedBase);
+      _ = _noiseBytes.Value;
+      _ = _cachedBase.Value;
     }
 
     private static byte[] Compile(DxcShaderStage stage, string entryPoint)
@@ -978,6 +982,14 @@ float4 PSWater(VsOut i) : SV_Target
       _simN = -1;
       _advanced = null;
     }
+    // The noise's bytes (made on first use: the water's constructor touches them on the thread it is made on).
+    private readonly Lazy<byte[]> _noiseBytes = new Lazy<byte[]>(() =>
+    {
+      var bytes = new byte[SimSize * 4 * SimSize];
+      new Random(NoiseSeed).NextBytes(bytes);
+      return bytes;
+    });
+
     // The wave step's noise: 1024 x 1024 random bytes (the page's Math.random; seeded here), read nearest, wrapped.
     private unsafe ID3D12Resource MakeNoise(ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
     {
@@ -985,8 +997,8 @@ float4 PSWater(VsOut i) : SV_Target
       var texture = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
         ResourceDescription.Texture2D(SimFormat, SimSize, SimSize, 1, 1), ResourceStates.CopyDest);
       const int pitch = SimSize * 4;   // a multiple of 256 already
-      var bytes = new byte[pitch * SimSize];
-      new Random(NoiseSeed).NextBytes(bytes);
+      // (The bytes made ahead with the water, on its thread: NoiseBytes.)
+      var bytes = _noiseBytes.Value;
       var upload = d3d.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
                                                ResourceDescription.Buffer((ulong)bytes.Length), ResourceStates.GenericRead);
       void* mapped;
@@ -1132,7 +1144,16 @@ float4 PSWater(VsOut i) : SV_Target
 
     // While playing, at most this many of the base's warm-up steps a frame (about 3 ms on an RTX 2060), so no frame waits
     // on the 20000; the playback's steps (one a frame) not limited further. Drawn by a capture (exact) as before.
-    private const int PlayingWarmUpSteps = 48;
+    private const int PlayingWarmUpSteps = 32;
+    // While playing, at most this many catch-up steps a frame (after a jump; a step a frame otherwise): with the copy
+    // engine busy uploading a location a step took up to 0.5 ms instead of 0.07.
+    private const int PlayingSteps = 16;
+    // A stopped frame's (exact) wave steps a frame in the app (~28 ms): a seek takes at most a hitch, the rest after.
+    private const int StillSteps = 400;
+    // The swell's steps a frame in the app: playing (~5 ms on the CPU), stopped; a step back held while playing.
+    private const int PlayingSwellSteps = 60;
+    private const int StillSwellSteps = 300;
+    private const int SwellHoldSteps = 25;
 
     // The section's time and exactness the simulations were last brought to by Advance (Draw then leaves them).
     private (double Seconds, bool Exact)? _advanced;
@@ -1144,10 +1165,17 @@ float4 PSWater(VsOut i) : SV_Target
     /// first use, the warmed-up base read from the disk cache or warmed up (while playing <c>PlayingWarmUpSteps</c> a
     /// frame), the wave texture's steps, the swell. The state at a time is the same as Draw alone makes it.
     /// </summary>
-    public void Advance(ID3D12GraphicsCommandList list, WaterParams p, double seconds, Vector3 eye, bool exact)
+    public void Advance(ID3D12GraphicsCommandList list, WaterParams p, double seconds, Vector3 eye, bool exact, int width, int height)
     {
+      // (Draw leaves the simulations to this call this frame, also when it does only one of the things ahead below.)
+      _advanced = (seconds, exact);
       PollBaseCache();
       if (_quadIndexCount == 0 || _quadVertices == null)
+      {
+        return;
+      }
+      // The targets, the noise and the cached base each in a frame of their own first.
+      if (MakeTargets(width, height))
       {
         return;
       }
@@ -1156,10 +1184,12 @@ float4 PSWater(VsOut i) : SV_Target
         var uploads = new List<ID3D12Resource>();
         _noise = MakeNoise(list, uploads);
         _device.Retire(() => uploads.ForEach(u => u.Dispose()));
+        return;
       }
       if (!_baseReady && !_baseTried)
       {
         LoadBase(list);
+        return;
       }
       var profiler = _device.Profiler;
       list.SetGraphicsRootSignature(_rootSignature);
@@ -1168,14 +1198,13 @@ float4 PSWater(VsOut i) : SV_Target
       if (SimActive)
       {
         profiler?.Begin(list, "water: sim");
-        Simulate(list, p, seconds, exact, exact ? StepsPerList : PlayingWarmUpSteps);
+        Simulate(list, p, seconds, exact, exact ? StillSteps : _baseReady ? PlayingSteps : PlayingWarmUpSteps);
         profiler?.End(list, "water: sim");
       }
       if (_outdoors && _level.HasValue)
       {
-        Swell(p, eye, seconds, exact);
+        Swell(p, eye, seconds, exact, exact ? StillSwellSteps : PlayingSwellSteps);
       }
-      _advanced = (seconds, exact);
     }
 
     // The warmed-up base on disk (it is the same for every location and every run: seeded noise, fixed steps): read
@@ -1193,6 +1222,22 @@ float4 PSWater(VsOut i) : SV_Target
       return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SparkIV", "D3D12", "water-base-" + hash + ".bin");
     }
 
+    // The cache's bytes, read once (null: none).
+    private Lazy<byte[]?> _cachedBase = null!;
+
+    private byte[]? ReadCachedBase()
+    {
+      try
+      {
+        string path = BaseCachePath();
+        return s_baseCacheOn && System.IO.File.Exists(path) ? System.IO.File.ReadAllBytes(path) : null;
+      }
+      catch (Exception)
+      {
+        return null;
+      }
+    }
+
     // The base from the cache into the list (made ready at once), when there.
     private unsafe void LoadBase(ID3D12GraphicsCommandList list)
     {
@@ -1201,17 +1246,8 @@ float4 PSWater(VsOut i) : SV_Target
       {
         return;
       }
-      byte[] bytes;
-      try
-      {
-        string path = BaseCachePath();
-        if (!System.IO.File.Exists(path))
-        {
-          return;
-        }
-        bytes = System.IO.File.ReadAllBytes(path);
-      }
-      catch (Exception)
+      // (Read ahead on the water's own thread: CachedBaseBytes.)
+      if (_cachedBase.Value is not byte[] bytes)
       {
         return;
       }
@@ -1393,7 +1429,7 @@ float4 PSWater(VsOut i) : SV_Target
     // started flat when the cutscene camera came, 0xAD4E80). Continued step by step where it can (the same window, on
     // in time), else made afresh at the window. Not exact (while playing): a moved window clears what it leaves (as the
     // game's) and goes on (at most 7 steps made up after a step back or a jump on).
-    private void Swell(WaterParams p, Vector3 eye, double seconds, bool exact)
+    private void Swell(WaterParams p, Vector3 eye, double seconds, bool exact, int budget = int.MaxValue)
     {
       var centre = p.SwellAt ?? eye;
       int x0 = EvenDown(centre.X), y0 = EvenDown(centre.Y);
@@ -1404,10 +1440,16 @@ float4 PSWater(VsOut i) : SV_Target
       {
         return;
       }
+      // (Playing: a small step back - the sound's sync nudging the clock - held, as the wave texture's.)
+      if (!exact && !moved && !jumped && _swellM >= 0 && m < _swellM && _swellM - m <= SwellHoldSteps)
+      {
+        return;
+      }
       // The kicks and the swell of the wind.
       float kick = (p.SwellWind * 0.7f + 0.23f) * 10;
       float swell = p.SwellWind * 0.55f + 0.18f;
       bool cont = _swellM >= 0 && !jumped && !moved && m >= _swellM && s == _swellStart;
+      int from;
       if (!cont && (exact || jumped || _swellM < 0 || m < _swellM))
       {
         Array.Clear(_height);
@@ -1415,10 +1457,7 @@ float4 PSWater(VsOut i) : SV_Target
         _swellStarted = true;
         _swellX0 = x0;
         _swellY0 = y0;
-        for (int j = s; j < m; j++)
-        {
-          Advance((float)SwellStepSeconds, (j + 1) * 20.0, kick, swell, j);
-        }
+        from = s;
         _swellStart = s;
       }
       else
@@ -1439,21 +1478,23 @@ float4 PSWater(VsOut i) : SV_Target
             }
           }
         }
-        int from = cont ? _swellM : Math.Max(_swellM, m - 7);
+        from = cont ? _swellM : Math.Max(_swellM, m - 7);
         _swellX0 = x0;
         _swellY0 = y0;
-        for (int j = from; j < m; j++)
-        {
-          Advance((float)SwellStepSeconds, (j + 1) * 20.0, kick, swell, j);
-        }
         if (!cont)
         {
           _swellStart = s;
         }
       }
-      _swellM = m;
+      // At most budget steps (the drawing thread's Advance: the rest in the frames after, the swell catching up);
+      // a capture's Draw: all.
+      int to = (int)Math.Min(m, (long)from + budget);
+      for (int j = from; j < to; j++)
+      {
+        Advance((float)SwellStepSeconds, (j + 1) * 20.0, kick, swell, j);
+      }
+      _swellM = to;
     }
-
     // The page's advance (PC 842-865): random kicks, the rows' sine push, then the springs (the window's edges held to
     // themselves, not wrapped). The kicks' numbers from step <j>'s own generator.
     private void Advance(float dt, double ms, float kick, float swell, int j)
@@ -1574,15 +1615,23 @@ float4 PSWater(VsOut i) : SV_Target
 
     /// <summary>
     /// The mirror's and the depth copy's targets made for a picture of this size ahead (the drawing thread, while the
-    /// water isn't drawn yet), not by the first frame that draws the water.
+    /// water isn't drawn yet), not by the first frame that draws the water: one a call.
     /// </summary>
-    public void MakeTargets(int width, int height)
+    public bool MakeTargets(int width, int height)
     {
-      SizeMirror(Math.Max(1, width >> 1), Math.Max(1, height >> 1));
-      if (_outdoors)
+      // (One a call: true when one was made, the frame's time spent.)
+      int mw = Math.Max(1, width >> 1), mh = Math.Max(1, height >> 1);
+      if (_mirror == null || _mirrorWidth != mw || _mirrorHeight != mh)
+      {
+        SizeMirror(mw, mh);
+        return true;
+      }
+      if (_outdoors && (_behind == null || _behindWidth != width || _behindHeight != height))
       {
         SizeBehind(width, height);
+        return true;
       }
+      return false;
     }
 
     // The scene's depth copy at the size (read as R32F, slot 5; left readable).

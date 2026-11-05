@@ -82,8 +82,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (_water != null && _waterShown != null && _waterShown.Water.Count >= 4)
       {
         long started = GpuProfiler.Now;
-        _water.MakeTargets(width, height);
-        _water.Advance(list, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time, view.Eye, WaterExact);
+        _water.Advance(list, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time, view.Eye, WaterExact, width, height);
         device.Profiler?.CpuSince("  draw: water advance", started);
       }
       _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, sky);

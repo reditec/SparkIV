@@ -160,13 +160,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
     public ID3D12CommandQueue CopyQueue { get; }
 
     private readonly ID3D12Fence _copyFence;
+    private readonly object _copyLock = new object();
     private ulong _copyValue;
 
     /// <summary>A copy list (closed) sent to the copy queue and waited for (any thread; a loading one).</summary>
     public void CopyAndWait(ID3D12GraphicsCommandList list)
     {
       ulong value;
-      lock (_signalLock)
+      // (A lock of its own: the render thread's Signal never waits behind a big upload being sent.)
+      lock (_copyLock)
       {
         CopyQueue.ExecuteCommandList(list);
         value = ++_copyValue;

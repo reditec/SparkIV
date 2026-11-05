@@ -146,6 +146,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
             break;
           }
           long cpuStart = Stopwatch.GetTimestamp();
+          var pauseBefore = profiler != null ? GC.GetTotalPauseDuration() : TimeSpan.Zero;
           lock (_lock)
           {
             if (_scaleChanged)
@@ -193,6 +194,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
           profiler?.CpuSince("recording", stage);
           ulong mark = _swapChain.Submit();
           double cpuMs = (Stopwatch.GetTimestamp() - cpuStart) * 1000.0 / Stopwatch.Frequency;
+          // (How much of it the garbage collector held every thread.)
+          profiler?.Cpu("GC pause", (GC.GetTotalPauseDuration() - pauseBefore).TotalMilliseconds);
           if (pipelined)
           {
             stage = profiler != null ? GpuProfiler.Now : 0;

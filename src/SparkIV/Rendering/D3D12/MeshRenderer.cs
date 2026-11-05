@@ -2408,17 +2408,18 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
-    /// <summary>Prepared models never registered let go (the GPU is done with them: Prepare waited).</summary>
+    /// <summary>
+    /// Prepared models never registered let go, on another thread (the GPU is done with them: Prepare waited; freeing a
+    /// location's thousands of buffers and textures took the render thread 1.9 s when a dropped location's load came in).
+    /// </summary>
     public void Discard(PreparedModels prepared)
     {
-      foreach (var model in prepared.Models)
-      {
-        if (model != null)
-        {
-          Free(model);
-        }
-      }
+      var models = prepared.Models.Where(m => m != null).ToList();
       prepared.Models.Clear();
+      if (models.Count > 0)
+      {
+        _device.Retire(() => models.ForEach(m => Free(m!)));
+      }
     }
 
     private void Free(Model model)

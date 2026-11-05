@@ -912,7 +912,7 @@ upload`, `draw: water advance`).
 
 | Cause (measured) | Fix |
 |---|---|
-| The water's 20 000-step warmed-up base, 2 000 steps a list: 10 frames of ~140 ms GPU when the water first showed | The base is written to a disk cache (`%LOCALAPPDATA%\SparkIV\D3D12\water-base-<key>.bin`, keyed by the adapter, the shader and the warm-up's numbers), read instead of the steps. Without the cache, while playing at most 48 steps a frame (~3 ms). A capture, which always warms up itself, compares what it made with the cache and logs it ("water base made again: the same as the cache"). `SPARKIV_D3D12_WATERCACHE=0`: no cache. |
+| The water's 20 000-step warmed-up base, 2 000 steps a list: 10 frames of ~140 ms GPU when the water first showed | The base is written to a disk cache (`%LOCALAPPDATA%\SparkIV\D3D12\water-base-<key>.bin`, keyed by the adapter, the shader and the warm-up's numbers), read instead of the steps. Without the cache, while playing at most 32 warm-up steps a frame (since round 2; 48 at first). A capture, which always warms up itself, compares what it made with the cache and logs it ("water base made again: the same as the cache"). `SPARKIV_D3D12_WATERCACHE=0`: no cache. |
 | The water simulated only once the location was drawn: the swell caught up the section's seconds at once (frame 179 of bc_3: 113 ms; intro section 2: 230 ms with the upload) | `CutsceneWater.Advance` from `DrawBackground` every frame from the section's start, also while the location isn't shown yet: a step a frame. `Draw` leaves what Advance did that frame. |
 | The water exact (a still frame) at a section's end while the scene plays on: the swell recomputed from flat, 115 ms (bc_3, last frame of sections 2 and 3) | Exact only when stopped by the user (`_ranOut`). |
 | The water's quads uploaded on the render thread with `WaitIdle` (20-42 ms) | `CutsceneWater.Prepare` on another thread, on the copy queue; `Use` swaps them in on the render thread, the old ones retired. |
@@ -952,6 +952,41 @@ Without the water cache (first run on a machine, bc_3): the base warms over the 
 no frame is over 33 ms (worst 31.5 ms, the first frame drawing the harbour, measured before the targets were made ahead). Pictures are byte-identical to before on all
 8 references checked (bc_3 s3 f357.25, s1 f292.5; intro s4 f420.5, s3 f49.5; bc_1 s1 f144, f940; et01_aa s3 f49.75;
 et01_ba f468). The debug layer reports no new kinds of message (the copy queue's textures are made in COMMON).
+
+### Seeks, dropped locations and the sound's nudges (2026-11-05, round 2)
+
+The user's test of the app (intro, log from 18:21:14) showed what the first offline run lacked:
+- 1.9 s frames when a location dropped earlier came back;
+- 90-150 ms frames from the water after time jumps;
+- scrubbing the timeline while playing stopped playback at the section's end.
+
+**Reproduced:** `D3D12PLAYREAL=1` plays in real time:
+- the wall's clock, frames paced to 60 a second;
+- every 0.25 s the sound's `Sync`, a little off (±30 ms);
+- locations loaded on another thread as the view does: when a section there or the next one wants them, and dropped
+  (CPU data and GPU) when neither does, so they are loaded again later.
+
+`D3D12PLAYSEEKS=1` adds the user's seeks (the view's `GoTo`):
+- 3 s into section 2, back to the middle of section 1;
+- then on to section 3, then back into section 2, whose location was dropped meanwhile;
+- then ten slider steps within section 2 while playing, after which the next section must still follow.
+
+A `GC pause` stage (`GC.GetTotalPauseDuration` per frame) is now in the app's log and in cutgen's.
+
+| Hitch (app log 18:21-18:25) | Reproduced offline (before) | Cause | Fix | After (offline, intro, real time, seeks) |
+|---|---|---|---|---|
+| `loaded (register)` 1876 / 1890 ms | 619 ms and 2519 ms, after the seeks | A dropped location's load that came in anyway: `MeshRenderer.Discard` freed its thousands of buffers and textures on the render thread | `Discard` retires them, freed on the freeing thread | `loaded (register)` < 2 ms |
+| `draw: water advance` 56-130 ms, `water: sim` 80-125 ms GPU | 37-39 ms on the first water frame, 34 ms GPU per frame while the copy engine uploaded | The swell recomputed from flat on a step back of the sound's sync; the wave texture and the swell caught up unbudgeted after jumps; the noise (4 MB of random bytes) and the cache file made on the render thread | While playing, a step back of up to 25 swell steps (0.5 s) is held as the waves' 12 are. The swell's catch-up is budgeted per frame: 60 steps playing, 300 stopped (a capture's Draw: all). The waves' catch-up: 16 steps a frame playing (with the copy engine busy a step took 0.5 ms instead of 0.07), 32 for the warm-up, 400 when stopped (one hitch at most, then the rest). The noise's bytes and the cache file are made or read on the water's own thread. Targets, noise and base each take a frame of their own. | ≤ 25 ms (first water frame), no water frame over 20 ms after |
+| Scrubbing while playing stopped at the section's end | Checked: "next section 3 started after the scrub: yes" | `TimeSlider_ValueChanged` went to `GoTo(play: false)`. The view stopped and paused the sound, but the player was never told to stop (`Seek` alone) and played to the section's end, where the stopped view didn't go on. The page's seek stops it, so the page path stopped right at the scrub. | The slider keeps the play state (`GoTo(play: _playing)`), and `GoTo` tells the player the play state either way (`Play(play)`), so page and player stop or play on together. A seek within the section keeps the prefetch: the next section's data stays prepared. | Next section follows |
+| first draw of 752,-212: workers 721 / 364 / 180 ms | not reproduced (offline 10.8 ms at the change) | (The app's `GC pause` stage will show whether it is the collector) | Workers' code compiled ahead (round 1) | - |
+| `prepare location` 178 ms, `update: camera, light, cascades` 58 ms, `lights list` 50 ms, `wait for the buffer's fence` 64 ms, `close + execute` 49 ms | not reproduced | Not found in the code: each is constant work. Likely collector pauses or the system (the new `GC pause` stage will tell). | The copy queue has a lock of its own, so `Signal` (`Retire`, `Submit`) never waits behind a big upload being sent | - |
+
+Offline totals (intro, real time with the seeks):
+- before: 3 frames over 33 ms, the worst 2519 ms;
+- after: 0 frames over 33 ms. The worst is 25 ms on the first water frame of section 1. Every change is under 18 ms
+  CPU and 21 ms GPU, including the return to the dropped location and the scrub.
+
+Pictures are unchanged: the 8 references are byte-identical.
 
 ## Next steps (#112)
 
