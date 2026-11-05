@@ -468,7 +468,7 @@ struct Light { float4 At; float4 Dir; float4 Color; float4 Kind; };
 StructuredBuffer<Light> Lights : register(t3);
 
 // deferred: the solid pass and the decals (G-buffer); else the see-through pass (forward, blended).
-PsOut Shade(VsOut input, bool deferred)
+PsOut Shade(VsOut input, bool deferred, bool solid = false)
 {
   // Beyond the camera's reach nothing (the page's drawReach: the depth along the view, here the clip w).
   if (f.FogParams.z > 0 && input.position.w > f.FogParams.z)
@@ -624,6 +624,9 @@ PsOut Shade(VsOut input, bool deferred)
   float sunR = saturate(dot(R, f.SunDirection.xyz));
   float shineScale = f.Params2.x;
   float3 vehicleShine = 0, shine = 0;
+  // The lamps' shine into the G-buffer (the page's lampShine with 2 x shineAmount, gtaiv-pc.js ~234-237 and
+  // ModelView.html ~558-660): its amount (albedo's alpha) and power (in the place's w), read by PSLight.
+  float gShine = 0, gPower = 0;
   bool vehicleGlassShader = p.VShine.z > 0.5 && p.VShine.z < 1.5;
   if (vehicle && (vehicleGlassShader || (specMap && textured)) && reflective > 0)
   {
@@ -675,6 +678,8 @@ PsOut Shade(VsOut input, bool deferred)
     {
       // The G-buffer's (deferred_lighting's sun pass): 2 x GB2.x x the sun x 2 gDirectionalLight.w.
       float power = spec.a * p.Spec.x * (baked ? 1 : 0.75);
+      gShine = 2 * (baked ? 0.5 : 0.25) * amount;
+      gPower = power;
       // + the mirrored surroundings (the page's pedShine, gtaiv-pc.js ~215-235): 10 x globalScalars.w x AO x Fresnel x
       // the map along R + v x saturate(distance x 0.02), blurred by the power, x saturate(5 R'.z) x (1 - saturate(d / 100)).
       float away = length(input.world - f.Eye.xyz);
@@ -806,15 +811,22 @@ PsOut Shade(VsOut input, bool deferred)
   o.light = float4(rgb, deferred ? alpha : a);
   // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
   // game's decals write GB0's colour only, the page's outBelow.)
-  o.albedo = float4(lampAlbedo, a);
+  // The solid pass also writes the lamps' shine (albedo's alpha: its amount; place.w = 1 or 2 (baked) + 4 x the power
+  // in 64ths, see PSLight); a decal's alpha blends its albedo and keeps the surface's shine x (1 - its alpha).
+  o.albedo = float4(lampAlbedo, solid ? gShine : a);
   o.normal = float4(n, ao);
-  o.place = float4(input.world, baked ? 2 : 1);
+  o.place = float4(input.world, (baked ? 2 : 1) + 4 * floor(min(gPower, 60000) * 64));
   return o;
 }
 
 PsOut PSMain(VsOut input)
 {
-  return Shade(input, true);
+  return Shade(input, true, true);
+}
+
+PsOut PSDecal(VsOut input)
+{
+  return Shade(input, true, false);
 }
 
 // The see-through materials and glass: the light target only (no lamps on them yet: the game lights them forward,
@@ -1232,7 +1244,9 @@ float4 PSLight(LvOut input) : SV_Target
     discard;
   }
   Light l = Lights[input.light];
-  bool baked = place.w > 1.5;
+  // (place.w: 1, or 2 where baked, + 4 x the shine's power in 64ths, see Shade.)
+  bool baked = fmod(place.w, 4) > 1.5;
+  float3 shineLight = 0;
   uint mask = (uint)(l.Kind.w + 0.5);
   if ((mask == 1 && baked) || (mask == 2 && !baked))
   {
@@ -1276,8 +1290,18 @@ float4 PSLight(LvOut input) : SV_Target
       lampLight *= shadowed ? saturate(0.5 * ao * ao * ao * ao + ao * ao) : saturate(ao * ao + 0.5);
     }
     lit = lampLight * saturate(nl);
+    // Its shine (the page's lampShine, ModelView.html ~629, ~643, ~657-659; deferred_lighting's 2 x GB2.x x
+    // saturate(L.R)^power): the G-buffer's amount (albedo's alpha, 2 x shineAmount) and power (place.w / 4 in 64ths),
+    // R the view mirrored by the normal. Not the fillers'.
+    float power = floor(place.w / 4) / 64;
+    if (power > 0)
+    {
+      float3 R = reflect(normalize(place.xyz - f.Eye.xyz), n);
+      shineLight = lampLight * pow(saturate(dot(L, R)), power);
+    }
   }
-  return float4(GAlbedo.Load(px).rgb * lit, 0);
+  float4 albedo = GAlbedo.Load(px);
+  return float4(albedo.rgb * lit + albedo.a * shineLight, 0);
 }
 
 // The fog over the solid scene (#112; the page's gameFog, GTA IV's rage_postfx program 21, which the game draws after
@@ -1431,6 +1455,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       /// </summary>
       public bool DirtFirst { get; init; }
 
+      /// <summary>A blended material that isn't glass: pulled towards the camera in the see-through pass (the page's polygonOffset(-0.25, -2)).</summary>
+      public bool Pulled { get; init; }
+
       /// <summary>
       /// A glowing see-through part (the page's mat.emissive: draw bucket 4 or 5, textured, see-through or glass): its glow
       /// drawn apart (DrawPass, the page's glowApart). Its emissiveMultiplier (0 without), whether gta_emissivenight,
@@ -1526,7 +1553,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private readonly TextureCache _textures;
     private readonly ID3D12RootSignature _rootSignature;
     // Skinned or not x pass x back faces culled or not.
-    private readonly ID3D12PipelineState[] _pipelines = new ID3D12PipelineState[16];
+    // (By Pipe; from 16 on the blended non-glass materials' pulled variants of the see-through passes.)
+    private readonly ID3D12PipelineState?[] _pipelines = new ID3D12PipelineState?[32];
     // The water's mirror: its solid parts, its see-through ones (see DrawMirror).
     private readonly ID3D12PipelineState[] _mirrorPipelines = new ID3D12PipelineState[2];
     // The see-through glows drawn apart (DrawGlow): by skinned (2) and added (1) instead of laid over.
@@ -1671,6 +1699,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       var skinnedShader = Compile(DxcShaderStage.Vertex, "VSSkinned");
       var pixelShader = Compile(DxcShaderStage.Pixel, "PSMain");
       var blendShader = Compile(DxcShaderStage.Pixel, "PSBlend");
+      var decalShader = Compile(DxcShaderStage.Pixel, "PSDecal");
       var input = new[]
       {
         new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
@@ -1716,7 +1745,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // A decal: blended into the light and into the G-buffer's albedo (colour only), the normal, AO and place left.
       var decalBlend = BlendDescription.NonPremultiplied;
       decalBlend.IndependentBlendEnable = true;
-      decalBlend.RenderTarget[1] = decalBlend.RenderTarget[0] with { RenderTargetWriteMask = ColorWriteEnable.Red | ColorWriteEnable.Green | ColorWriteEnable.Blue };
+      // (Its alpha, the surface's lamp shine, kept x (1 - the decal's alpha): the page blends the lit decal over the lit
+      // surface, its shine with it.)
+      decalBlend.RenderTarget[1] = decalBlend.RenderTarget[0] with { SourceBlendAlpha = Blend.Zero, DestinationBlendAlpha = Blend.InverseSourceAlpha, BlendOperationAlpha = BlendOperation.Add };
       decalBlend.RenderTarget[2] = decalBlend.RenderTarget[0] with { BlendEnable = false, RenderTargetWriteMask = 0 };
       decalBlend.RenderTarget[3] = decalBlend.RenderTarget[2];
       // Both faces, or the back ones culled: the page's front faces wind counter-clockwise (GL's default), and so they
@@ -1724,21 +1755,31 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // its walls).
       var both = RasterizerDescription.CullNone;
       // The depth test less or equal, as the page's (ModelView.html ~3180-3184: the game's ZFUNC 4): a surface laid on
-      // another with the same vertices is drawn over it (the intro's galley mat ah_rubbermat over cj_black_rubber).
+      // another with the same vertices is drawn over it.
       var depthLe = DepthStencilDescription.Default with { DepthFunc = ComparisonFunction.LessEqual };
       var readLe = DepthStencilDescription.Read with { DepthFunc = ComparisonFunction.LessEqual };
       var front = new RasterizerDescription(CullMode.Back, FillMode.Solid) { FrontCounterClockwise = true };
-      // A decal a little in front of the surface it lies on (nearer is less depth here).
-      var pulled = both with { DepthBias = -16, SlopeScaledDepthBias = -1.0f };
+      // Pulled a little towards the camera as the page's polygonOffset (ModelView.html ~3510-3530): a decal by (-0.25, -4),
+      // a blended material that isn't glass by (-0.25, -2) - factor x the slope, units x the depth's smallest step (the
+      // page's 24-bit depth: 2^-24; this D32 float's step for depths 0.5 to 1, where nearly all lie: also 2^-24).
+      // (Native pulled its decals by (-1, -16): the intro galley's floor shadow decal cargoflrsha, 1 mm under the rubber
+      // mat mp_bada_mat, came through it and laid it black.)
+      RasterizerDescription Pulled(RasterizerDescription r, int units) => r with { DepthBias = units, SlopeScaledDepthBias = -0.25f };
       for (int s = 0; s < 2; s++)
       {
         for (int cull = 0; cull < 2; cull++)
         {
+          var raster = cull == 1 ? front : both;
           int at = Pipe(s == 1, Pass.Solid, cull == 1);
-          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, depthLe, cull == 1 ? front : both, true));
-          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, readLe, cull == 1 ? front : both, false));
-          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, decalBlend, readLe, cull == 1 ? front with { DepthBias = -16, SlopeScaledDepthBias = -1.0f } : pulled, true));
-          _pipelines[Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, depthLe, cull == 1 ? front : both, false));
+          _pipelines[at] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.Opaque, depthLe, raster, true));
+          _pipelines[Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, readLe, raster, false));
+          var decalState = Pipeline(s == 1, decalBlend, readLe, Pulled(raster, -4), true);
+          decalState.PixelShader = decalShader;
+          _pipelines[Pipe(s == 1, Pass.Decal, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(decalState);
+          _pipelines[Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, depthLe, raster, false));
+          // (The blended non-glass materials' pulled variants: Part.Pulled.)
+          _pipelines[16 + Pipe(s == 1, Pass.Blend, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, readLe, Pulled(raster, -2), false));
+          _pipelines[16 + Pipe(s == 1, Pass.Glass, cull == 1)] = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline(s == 1, BlendDescription.NonPremultiplied, depthLe, Pulled(raster, -2), false));
         }
       }
 
@@ -2562,6 +2603,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           Layered = layerUvs && material.LayerCount > 1,
           DirtFirst = pass == Pass.Decal && (material.DirtMask != null || (material.Decal && source.Baked && !source.Actor && dirtModel)),
           GlowApart = glowApart,
+          Pulled = material.Blend && !material.Glass && !material.Decal,
           GlowMultiplier = material.EmissiveMultiplier ?? 0,
           GlowNight = material.EmissiveAtNight,
           GlowStrong = material.EmissiveStrong,
@@ -3505,7 +3547,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           {
             continue;
           }
-          int pipeline = Pipe(skinned, part.Pass, part.Culled);
+          int pipeline = Pipe(skinned, part.Pass, part.Culled) + (part.Pulled && part.Pass is Pass.Blend or Pass.Glass ? 16 : 0);
           // A glowing see-through part (the page's ModelView.html ~3622-3646, ~3707-3734): its glow, whether drawn apart
           // and whether its lit draw is left out (in a room, a see-through gta_emissivenight, a glowing glass).
           float glow = 0;
@@ -3539,7 +3581,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           {
             if (pipeline != lastPipeline)
             {
-              list.SetPipelineState(_pipelines[pipeline]);
+              list.SetPipelineState(_pipelines[pipeline]!);
               lastPipeline = pipeline;
             }
             list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
@@ -3850,7 +3892,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       _lightSignature.Dispose();
       foreach (var pipeline in _pipelines)
       {
-        pipeline.Dispose();
+        pipeline?.Dispose();
       }
       _rootSignature.Dispose();
     }

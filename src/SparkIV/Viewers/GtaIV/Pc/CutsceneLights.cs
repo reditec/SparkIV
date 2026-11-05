@@ -246,9 +246,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var planes = FrustumPlanes(viewProjection);
       float night = NightFactor(hour);
       var near = new List<(DeferredLight Light, float D)>();
+      bool dump = Environment.GetEnvironmentVariable("D3D12LAMPDUMP") == "1";
       foreach (var m in _lamps)
       {
         bool otherInterior = camAt is Vector3 at0 && m.Room >= 0 && _rooms[m.Room].At != at0;
+        if (dump)
+        {
+          Console.WriteLine($"D3D12 lamp at {m.At} radius {m.Radius:0.00} strength {m.Strength:0.00} rgb {m.Rgb} flags 0x{m.Flags:x} room {m.Room} other {otherInterior} seen {seen?.Contains(m.Room)} on {LampOn(m.Flags, NightFactor(hour))} fade {m.Fade:0.0} d {Vector3.Distance(m.At, eye):0.00}");
+        }
         if (otherInterior || (seen != null && !seen.Contains(m.Room)))
         {
           continue;

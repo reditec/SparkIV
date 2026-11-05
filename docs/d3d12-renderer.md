@@ -403,7 +403,7 @@ an R32F atlas (2048 x 4096: a row of two 1024² halves per lamp), drawn each fra
 solid parts (instances added with `castsShadow`; the location casts none), sampled in the light pass with the page's
 four rotated taps (its GL rows and pixel y turned over, so the reads are the page's). Other shadow lamps stay fully
 lit. Since 2026-11-04 also the map's see-through materials lit forward by the lamps, the lamps' coronas and visible
-light volumes (below). Not yet: the lamps' shine on the G-buffer.
+light volumes (below), and the lamps' shine on the G-buffer (below, round 4).
 
 ### Materials (step 4d)
 
@@ -421,7 +421,7 @@ see-through parts (gta_ped, bucket 1) blended by the stipple's share of their al
 and the map's glass with vertex alpha by their texture's alpha, culled, writing depth; other glass at 0.45) and the
 map's other see-through materials (culled, writing depth, forward shine); the location's decals lit by the surface
 below (its normal and AO copied after the solid pass), normal decals taking its AO.
-Not yet: the lamps' shine on the G-buffer, animated textures. (The mirrored surroundings in the shine: below, "The
+Not yet: animated textures. (The mirrored surroundings in the shine: below, "The
 mirrored surroundings' map".) (Glowing see-through parts and glass, and the lamps on the forward-drawn map materials:
 below.)
 
@@ -575,9 +575,41 @@ the rise is the glows, coronas, volumes, forward lamps and the fog's depth effec
   reference changed by it.)
 - Full run (all 72, one frame each): sum -0.47, nothing worse; bc_1 s1 f940 3.59 -> 3.27, f459.5 1.45 -> 1.30.
   Native mean 3.345 (page 3.38).
-- Open: the intro galley's rubber mat (s3 f569.75, +1.83 against the page): the debug views show its texel black
-  already at level 0 (texture coordinates fine, no paint2/environment/layer flags), where the page shows a ribbed grey
-  mat; which mesh and texture native draws there is not found yet (the depth test made no difference).
+### Decal offsets and the lamps' shine (2026-11-05, round 4)
+
+- **Decals and blended materials pulled as the page pulls them** (ModelView.html ~3510-3530: `polygonOffset(-0.25, -4)`
+  for a decal, `(-0.25, -2)` for a blended material that isn't glass): Direct3D's DepthBias -4 / -2 with
+  SlopeScaledDepthBias -0.25 (the page's 24-bit depth step is 2^-24, this D32 float's for depths 0.5 to 1 too; the
+  blended non-glass parts, `Part.Pulled`, get pipeline variants from index 16). Native pulled its decals by (-1, -16):
+  in the intro's galley the floor's shadow decal `cargoflrsha` (gta_default, bucket 2), 1 mm under the rubber mat
+  `mp_bada_mat` (gta_normal_spec km_genrubrmat), came through the mat and laid it black. Found with cutgen's
+  `D3D12PICK=x,y` (the location's triangles under a pixel, nearest first: model, mesh, drawn, far / mirror-only, room,
+  material, shader, texture, bucket, winding; with `D3D12LAMPDUMP=1` every lamp of the location with why it is taken or
+  left). intro s3 f569.75 6.05 -> 4.29 (page 4.22); the full run: sum -1.83,
+  nothing worse by more than 0.01.
+- **The lamps' shine on the G-buffer** (the page's lampShine, ModelView.html ~558-660 with gtaiv-pc.js pedShine
+  ~234-237: 2 x shineAmount x the lamp's light x saturate(L.R)^power, for the lamp family and the cutscene's lights,
+  not the fillers): the solid pass writes the amount (2 x shineAmount: 0.5 x the spec map's channels x intensity
+  on the map, 0.25 on peds) into the albedo target's alpha and the power (spec map alpha x specularFactor, x 0.75 on
+  peds) into the place's w (1, or 2 where baked, + 4 x the power in 64ths); decals (`PSDecal`) keep the surface's
+  amount x (1 - their alpha) (the page blends the lit decal over the lit surface); `PSLight` adds amount x light x
+  saturate(L.R)^power, R the view mirrored by the G-buffer's normal. Bernie's wallpaper (gta_normal_spec) by the hall
+  lamp, the bikers' leather jackets in et01_aa.
+
+| Reference | page | before (round 3) | decal offsets | + lamps' shine |
+|---|---|---|---|---|
+| intro s3 f569.75 | 4.22 | 6.05 | 4.29 | 4.26 |
+| bc_1 s3 f994.5 | 1.58 | 2.43 | 2.41 | 1.63 |
+| et01_aa s1 f463.25 | 2.81 | 3.20 | 3.20 | 2.82 |
+| et01_aa s4 f337.25 | 2.00 | 2.35 | 2.35 | 2.00 |
+| guard et01_aa s3 f49.75 | 2.52 | 2.55 | 2.55 | 2.54 |
+| guard intro s4 f420.5 | 2.97 | 2.95 | 2.95 | 2.95 |
+| guard bc_1 s1 f144 | 0.97 | 1.03 | 1.02 | 0.98 |
+| guard bc_3 s3 f357.25 | 6.69 | 6.35 | 6.35 | 6.35 |
+
+Full run with both (all 72): the lamps' shine sum -2.76 against the decal offsets alone, worse at most +0.03 (intro s4
+f258.5); native mean 3.281 (page 3.38). Left: et01_ba (+0.23 to +0.46: the booth's panes and the car's glass show less
+of a mirrored shape than the page's), bc_3 s3 f140.5 +0.27.
 - cutgen's `D3D12DEBUGVIEW=<n>` (`MeshRenderer.DebugView`, `Params2.w`): the solid and see-through passes show 1 the
   albedo, 2 the normal, 3 AO, 4 the light without albedo, 5 alpha, 6 the vertex colour, 7 the texture's texel, 8 flags
   (paint2, environment, layers), 9 the texture at level 0, 10 the texture coordinates. `D3D12NODECALBELOW=1`, and the
