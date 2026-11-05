@@ -579,7 +579,8 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
   float reflective = p.SpecMask.w;
   // A map *_reflect shader's environment texture added to the albedo (by the specular map x intensity, or alone) x
   // reflectivity; see-through, divided by the alpha first.
-  if ((bits & FEnv) != 0 && !vehicle)
+  // (DebugView 99: the environment texture left out, for comparisons.)
+  if ((bits & FEnv) != 0 && !vehicle && (uint)(f.Params2.w + 0.5) != 99)
   {
     float3 r = reflect(view, envN);
     float3 env = Tex[p.Tex.w].Sample(Linear, -0.5 * (r.xz / max(length(r), 1e-5) + 1)).rgb
@@ -799,7 +800,7 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
   // (Debug views, MeshRenderer.DebugView in f.Params2.w: 1 the albedo, 2 the normal (0.5 + 0.5 n), 3 AO, 4 the light
   // without albedo, 5 the texture's alpha x the vertex's, 6 the vertex colour - each x the exposure, for the picture.)
   uint debugView = (uint)(f.Params2.w + 0.5);
-  if (debugView != 0)
+  if (debugView != 0 && debugView != 99)
   {
     float3 dv = debugView == 1 ? albedo : debugView == 2 ? 0.5 + 0.5 * n : debugView == 3 ? ao.xxx : debugView == 4 ? lit
               : debugView == 5 ? alpha.xxx : debugView == 6 ? vc : debugView == 7 ? texel.rgb
@@ -3516,10 +3517,15 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       bool ordered = pass is Pass.Decal or Pass.Blend;
       static bool First(Part p, Instance i, Pass pass) => pass == Pass.Decal ? p.DirtFirst
         : p.GlowApart && p.GlowBlend && (i.InRoom ? p.GlowMultiplier > 0 : p.GlowNight);
+      // Within each, the cast before the location, as the page's visible list (CutsceneView's PostVisible: the cast's
+      // meshes, then the location's): a car's windscreen behind a toll booth's pane is drawn before the pane writes its
+      // depth (et01_ba).
       for (int sweep = ordered ? 0 : 1; sweep < 2; sweep++)
+      for (int group = 0; group < 2; group++)
       foreach (var instance in _instances)
       {
         if (instance == null || !instance.Visible || !instance.MainView || _models[instance.Model] is not Model model ||
+            model.Actor != (group == 0) ||
             !model.Parts.Any(p => Drawn(p.Pass, pass) && (!ordered || First(p, instance, pass) == (sweep == 0))))
         {
           continue;

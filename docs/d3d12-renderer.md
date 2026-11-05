@@ -615,6 +615,45 @@ of a mirrored shape than the page's), bc_3 s3 f140.5 +0.27.
   (paint2, environment, layers), 9 the texture at level 0, 10 the texture coordinates. `D3D12NODECALBELOW=1`, and the
   diagnostics `LOCMATS=<text>` (the location's materials) and `GLASSINFO=1`.
 
+### The cast before the location (2026-11-05, round 5)
+
+The page draws its meshes in the order of its visible list, the cast's meshes first, then the location's
+(CutsceneView.xaml.cs PostVisible: `_castVisible.Concat(_locationVisible)`; ModelView.html's passes go through
+`visible` in that order). Native drew its instances in the order they were added, the location first. In the
+see-through pass that matters where a cast's glass lies behind a map's glass that writes its depth: et01_ba's car
+windscreen behind the toll booth's pane (BM_E1_tollbooth01, gta_glass_spec) was rejected by the pane's depth, so the
+windscreen's milky shine was missing through it. `DrawPass` now draws, within each of its sweeps, the instances of
+actors' models first, then the rest.
+
+| Reference | page | before | after |
+|---|---|---|---|
+| et01_ba f1118.25 | 4.28 | 4.74 | 4.29 |
+| et01_ba f220.25 | 4.00 | 4.30 | 3.98 |
+| et01_ba f402 | 3.74 | 4.06 | 3.75 |
+| et01_ba f706.75 | 3.79 | 4.09 | 3.79 |
+| et01_ba f468 | 4.86 | 4.80 | 4.86 |
+
+All 72: sum -1.32, nothing else changed; native mean 3.263 (page 3.38).
+
+Film grain (TLAD): its strength is the game's - the high-frequency energy (mean |pixel - its 3 x 3 mean|) over a flat
+part of et01_ba f1118.25 is 2.87 in the game's picture, 2.79 on the page, 2.86 natively; without it native's value
+there is 3.91 instead of 4.29. So the grain costs page and native alike (random against random) and isn't a gap of
+its own.
+
+Left above the page (native > page + 0.05) after this round, with what was found:
+- et01_ba f1394.75 (+0.23): the toll keeper's helmet is much lighter natively (at (1320, 440): game 47, page 4d,
+  native a2). Without the environment texture (cutgen `D3D12DEBUGVIEW=99`) and the mirrored surroundings' map it is 36
+  (darker than both); each alone lifts it to 67 / 76. So the helmet takes its *_reflect environment and the map's shine
+  both, where the page shows much less; not found why within the time limit.
+- bc_3 s3 f140.5 (+0.27), bc_3 s1 f854.75 (+0.08), s3 f829.5 (+0.07): the difference against the page lies in the
+  water's wave pattern (the swell and ripple simulation's state differs from the page's, both deterministic) - not
+  ported further.
+- intro s2 f682.5 (+0.11): native lights the ship's cabins seen through its windows (137 lights in that frame); the
+  game's picture shows them dark. With the page's cap of 80 lights (`D3D12LIGHTCAP=80`) native gives the page's 1.98
+  exactly: the page is closer only because its cap drops those lamps by distance. What the game does (its interior
+  lamps from outside) is not known, so neither the cap nor a guessed rule is taken over.
+- et01_ba f1292.25 (+0.09): not analysed.
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation
