@@ -74,8 +74,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         device.Profiler?.CpuSince("  draw: sky textures upload", started);
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
-      // The clouds' Phase on from the page's start value by the section's time (the trace's per cutscene: not known here).
-      float phase = CutsceneSky.CloudPhase(cycle, _time, false);
+      float phase = CloudPhaseNow(cycle);
       var sky = SkyParams.From(cycle, _lighting.Hour, phase);
       // The water's simulations brought to the section's time every frame, also while the location isn't shown yet (they
       // go on a step a frame instead of catching up seconds when the water first shows; CutsceneWater.Advance).
@@ -88,6 +87,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, sky);
     }
 
+    // The clouds' Phase now: on from the page's start value by the section's time (the trace's per cutscene: not known
+    // here), held at it while the clock is held (the page's perlinNoise, ModelView.html ~2169-2203: clockLocked, from the
+    // view's "lockTime" - CutsceneViewer.ClockLocked: "Lock time", else the mission script holding the clock, the intro).
+    private float CloudPhaseNow(TimeCycle cycle) => CutsceneSky.CloudPhase(cycle, _time, _cloudsHeld);
+
+    private bool _cloudsHeld;
+
+    /// <summary>The clock held or running (the page's "lockTime" message): the clouds then stand still or drift.</summary>
+    public void HoldClouds(bool held) => Order(() => _cloudsHeld = held);
+
     // The sky into the mirrored surroundings' map (the page's drawSky toMap, ModelView.html ~3765-3766): without the near
     // fog. (The sky's textures are made by DrawBackground, drawn first each frame.)
     public void DrawParabolicSky(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle target,
@@ -98,7 +107,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
-      var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
+      var sky = SkyParams.From(cycle, _lighting.Hour, CloudPhaseNow(cycle));
       sky.NearFogAmount = 0;
       _sky.Draw(list, target, size, size, view.ViewProjection, view.Eye, sky, toMap: true);
     }
@@ -206,7 +215,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
-      var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
+      var sky = SkyParams.From(cycle, _lighting.Hour, CloudPhaseNow(cycle));
       // The mirror first: the sky seen from the view mirrored in the water's level, without the near fog (the page's
       // reflection pass, ModelView.html: drawSky(mirrored, mirroredEye, false, true)).
       if (_sky != null && _water.MirrorOf(view.ViewProjection, view.Eye, out var mirroredViewProjection, out var mirroredEye))
@@ -860,10 +869,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           var palette = pose.SkinAt(frame, _fps);
           float ambient = _lighting?.ActorAmbient(pose.Place) ?? 1;
+          // The face's shapes by its clip's weights now (the page's blendFace; null: the head's own shape).
+          var face = pose.FaceAt(frame, _fps);
           foreach (int instance in instances)
           {
             renderer.SetPalette(instance, palette);
             renderer.SetActorAmbient(instance, ambient);
+            renderer.SetShapeWeights(instance, face);
           }
         }
       }

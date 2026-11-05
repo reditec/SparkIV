@@ -57,6 +57,12 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>What the model's owner sets on its materials, by material id (a vehicle's second paint, dirt, shine, lamps).</summary>
     public IReadOnlyDictionary<int, MaterialLook>? Looks { get; init; }
 
+    /// <summary>
+    /// Blend shapes by mesh id (a cutscene head's face shapes): its instances drawn with them added by their weights
+    /// (<see cref="MeshRenderer.SetShapeWeights"/>; MeshRenderer.Shapes.cs).
+    /// </summary>
+    public IReadOnlyDictionary<int, IReadOnlyList<BlendShape>>? Shapes { get; init; }
+
     /// <summary>A model's checked meshes (as the page shows them), moving with bones or not.</summary>
     public static ModelSource Shown(ModelScene scene, bool skinned, bool baked = false)
     {
@@ -1513,6 +1519,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       public ID3D12Resource PartData = null!;
       public ID3D12Resource? Extras;
       public VertexBufferView ExtrasView;
+      // Its meshes with blend shapes (null: none; MeshRenderer.Shapes.cs), in the order of their first vertex.
+      public List<ShapedRange>? Shapes;
 
       public void Dispose()
       {
@@ -1538,6 +1546,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // Drawn into the water's mirror (DrawMirror); drawn in the main view and the shadow maps (false: the mirror only).
       public bool Mirrored;
       public bool MainView = true;
+      // Its blend shapes' weights by key (null: none) and its own vertex buffers for them (MeshRenderer.Shapes.cs).
+      public IReadOnlyDictionary<int, float>? ShapeWeights;
+      public InstanceShapes? Shaped;
     }
 
     /// <summary>An actor's share of the light from around (its room's AmbientDownMult; 1 outside).</summary>
@@ -2400,6 +2411,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       {
         if (_instances[i] is Instance instance && _models[instance.Model] is Model model && model.Group == group)
         {
+          ReleaseShapes(instance);
           _instances[i] = null;
         }
       }
@@ -2457,6 +2469,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       var indices = new List<uint>();
       var parts = new List<Part>();
       var partData = new List<uint>();
+      List<ShapedRange>? shaped = null;
       var min = new Vector3(float.MaxValue);
       var max = new Vector3(float.MinValue);
       long textureBytes = 0;
@@ -2545,6 +2558,21 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
               extras.Add(layerWeights ? mesh.LayerWeights![v * 4 + k] : 0);
             }
           }
+        }
+        // Its blend shapes (MeshRenderer.Shapes.cs): its vertices as built kept, to add them to each time.
+        if (source.Shapes != null && source.Shapes.TryGetValue(mesh.Id, out var meshShapes) && meshShapes.Count > 0 && count > 0)
+        {
+          shaped ??= new List<ShapedRange>();
+          shaped.Add(new ShapedRange
+          {
+            VertexBase = first,
+            VertexCount = count,
+            Base = vertices.GetRange((int)first * VertexFloats, count * VertexFloats).ToArray(),
+            BaseExtras = extras?.GetRange((int)first * ExtraFloats, count * ExtraFloats).ToArray(),
+            Normals = normals,
+            Tangents = tangents,
+            Shapes = meshShapes,
+          });
         }
         uint start = (uint)indices.Count;
         foreach (ushort index in mesh.Indices)
@@ -2714,7 +2742,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
         return null;
       }
-      var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray(), Actor = source.Actor };
+      var model = new Model { Min = min, Max = max, IndexCount = (uint)indices.Count, Parts = parts.ToArray(), Actor = source.Actor, Shapes = shaped };
       model.Textures.AddRange(textures);
       pending += (long)vertices.Count * 4 + (long)indices.Count * 4 + (skin?.Count ?? 0) * 4L + (extras?.Count ?? 0) * 4L + partData.Count * 4L;
       model.Vertices = Upload(vertices.ToArray(), list, uploads, out ulong vertexBytes);
@@ -2827,6 +2855,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
       }
       _models.Clear();
+      foreach (var instance in _instances)
+      {
+        instance?.Shaped?.Dispose();
+      }
       _instances.Clear();
     }
 
@@ -2887,6 +2919,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           used += palette.Length;
         }
       }
+      // The blend shapes' instances brought to their weights (before any draw reads their vertices).
+      UpdateShapes(list);
 
       // The frame's constants into this frame's slot.
       var frame = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
@@ -3421,7 +3455,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
               list.SetPipelineState(_shadowPipelines[pipeline]);
               lastPipeline = pipeline;
             }
-            list.IASetVertexBuffers(0, model.VertexView);
+            list.IASetVertexBuffers(0, VertexViewOf(instance, model));
             if (skinned)
             {
               list.IASetVertexBuffers(1, model.SkinView);
@@ -3610,7 +3644,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           list.SetPipelineState(_sunPipelines[pipeline]);
           lastPipeline = pipeline;
         }
-        list.IASetVertexBuffers(0, model.VertexView);
+        list.IASetVertexBuffers(0, VertexViewOf(instance, model));
         if (skinned)
         {
           list.IASetVertexBuffers(1, model.SkinView);
@@ -3926,13 +3960,13 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         }
         // A skinned model without its bones (none given, or no room for them this frame): drawn at rest.
         bool skinned = model.Skin != null;
-        list.IASetVertexBuffers(0, model.VertexView);
+        list.IASetVertexBuffers(0, VertexViewOf(instance, model));
         if (skinned)
         {
           list.IASetVertexBuffers(1, model.SkinView);
           list.SetGraphicsRootShaderResourceView(2, instance.PaletteAddress != 0 ? instance.PaletteAddress : _palette.GPUVirtualAddress);
         }
-        list.IASetVertexBuffers(2, model.ExtrasView);
+        list.IASetVertexBuffers(2, ExtrasViewOf(instance, model));
         list.SetGraphicsRootShaderResourceView(4, model.PartData.GPUVirtualAddress);
         list.IASetIndexBuffer(model.IndexView);
         *(Matrix4x4*)draw = instance.World;
@@ -4276,6 +4310,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     {
       Clear();
       DisposeViewer();
+      DisposeShapes();
       foreach (var b in _recorders.SelectMany(s => s))
       {
         b.List?.Dispose();

@@ -1078,6 +1078,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Post(cycle.Message(hour, location.Clouds != null ? LocationUrl(CutsceneLocation.CloudKey) : null,
                          location.CloudDetail != null ? LocationUrl(CutsceneLocation.CloudDetailKey) : null, rooms));
       Post(new { type = "lockTime", on = _document.ClockLocked });
+      // (The native player's clouds held with the clock, as the page's.)
+      _player?.HoldClouds(_document.ClockLocked);
       _clockMinute = (int)(hour * 60);
       return true;
     }
@@ -1517,6 +1519,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       _document.LockTime = LockTimeToggle.IsChecked == true;
       Post(new { type = "lockTime", on = _document.ClockLocked });
+      // (The native player's clouds held with the clock, as the page's.)
+      _player?.HoldClouds(_document.ClockLocked);
       ShowClock();
     }
 

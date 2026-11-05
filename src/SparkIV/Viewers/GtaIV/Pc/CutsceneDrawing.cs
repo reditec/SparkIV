@@ -48,13 +48,30 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       var tints = paint == null ? null : scene.Materials.Where(m => m.PaintSlot > 0 && m.PaintSlot <= paint.Length)
         .ToDictionary(m => m.Id, m => new Vector3(paint[m.PaintSlot - 1][0], paint[m.PaintSlot - 1][1], paint[m.PaintSlot - 1][2]));
       // Peds lit as they are; props (a door) as the location is (their light baked into vertex colours); vehicles never baked.
-      sources.Add(ModelSource.Shown(scene, skinned, baked: !actor.IsPed) with { Tints = tints, Actor = true, Looks = LooksOf(actor, scene) });
+      sources.Add(ModelSource.Shown(scene, skinned, baked: !actor.IsPed) with { Tints = tints, Actor = true, Looks = LooksOf(actor, scene), Shapes = FaceShapesOf(actor) });
       var worn = CutsceneMessages.WornProps(actor);
       if (worn.Count > 0 && skinned && actor.PropScene != null)
       {
         sources.Add(new ModelSource(worn, actor.PropScene.Materials, actor.PropScene.Textures, true) { Actor = true });
       }
       return sources;
+    }
+
+    /// <summary>
+    /// A cutscene ped's face shapes (its .wbs, see CutActor.Faces) by the head mesh they move, as the page gets them
+    /// (Cutscene.FaceMessage; docs/GtaIV/Pc/formats/wbs.md): per shape its key, its vertices and their changes, position
+    /// / 4096, normal and tangent / 128. Null for an actor without. Weighted per frame by CutscenePose.FaceAt.
+    /// </summary>
+    private static Dictionary<int, IReadOnlyList<BlendShape>>? FaceShapesOf(CutActor actor)
+    {
+      if (actor.Faces.Count == 0)
+      {
+        return null;
+      }
+      return actor.Faces.ToDictionary(f => f.Key, f => (IReadOnlyList<BlendShape>)f.Value.Targets.Where(t => t.Key >= 0)
+        .Select(t => new BlendShape(t.Key, t.Vertices, t.Positions.Select(v => v / 4096f).ToArray(),
+                                    t.Normals?.Select(v => v / 128f).ToArray(), t.Tangents?.Select(v => v / 128f).ToArray()))
+        .ToList());
     }
 
     /// <summary>

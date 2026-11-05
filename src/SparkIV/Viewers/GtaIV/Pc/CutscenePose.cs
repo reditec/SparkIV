@@ -297,6 +297,34 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return skin;
     }
 
+    /// <summary>
+    /// The face shapes' weights at a frame of the timeline, by the shapes' keys (the page's poseCast, ModelView.html
+    /// ~2721-2730): the face clip's type-21 tracks (CastMotion.Face) at the actor's clip frame, linearly between frames;
+    /// null without them or without a clip (the head then keeps its own shape).
+    /// </summary>
+    public Dictionary<int, float>? FaceAt(double timelineFrame, float timelineFps)
+    {
+      if (_motion.Clip == null || _motion.Face.Count == 0)
+      {
+        return null;
+      }
+      double f = Math.Min(timelineFrame / timelineFps * FramesPerSecond, _frames - 1);
+      int f0 = Math.Max(0, (int)Math.Floor(f));
+      float t = (float)(f - f0);
+      var weights = new Dictionary<int, float>(_motion.Face.Count);
+      foreach (var (key, values) in _motion.Face)
+      {
+        int n = values.Length;
+        if (n == 0)
+        {
+          continue;
+        }
+        int i0 = Math.Min(f0, n - 1), i1 = Math.Min(f0 + 1, n - 1);
+        weights[key] = values[i0] * (1 - t) + values[i1] * t;
+      }
+      return weights;
+    }
+
     // The page's qmul (a then applied after b: a × b in its column convention), as quaternions.
     private static Quaternion Mul(Quaternion a, Quaternion b) => new Quaternion(
       a.W * b.X + a.X * b.W + a.Y * b.Z - a.Z * b.Y,

@@ -65,7 +65,7 @@ Drawn so far: the location (all placed objects but mirror-only far versions, whi
 cutscene's camera, with its first texture layer (step 3), and the cast posed at the frame with its worn props (step
 4a; `D3D12NOCAST=1` leaves it out), vehicles in their paint (`ModelSource.Tints`: a material's paint slot takes the
 actor's colour, as the page's `paint` uniform). Until 4a every level of detail of the location's models was drawn at
-once. Not yet: face shapes (a seam at Roman's neck in the intro), peds' hair (alpha as gloss, stipple + blend: Bernie's
+once. Not yet (at 4a): face shapes (a seam at Roman's neck in the intro; ported 2026-11-05, see "Materials"), peds' hair (alpha as gloss, stipple + blend: Bernie's
 hair comes out dark), the second paint layer, vehicle dirt and shine, animated textures, terrain layers, normal and specular maps, vertex colours, glass,
 lighting, sky, water, post effects (steps 4b–5).
 The differences are therefore large; what the run shows now is that framing, camera and geometry match the game.
@@ -190,7 +190,11 @@ normal and specular maps, shine.
 (gta_atmoscatt_clouds, from the traces): the sky colour with the azimuth colours towards the horizon, the sun
 (`TimeCycle.SkySunDirection`, higher than the light's sun), the clouds from skydome.wtd's noise, made each time their
 Phase moves by a rage_perlinnoise pass into a 256 x 256 target (the Phase grows by CloudSpeed with the clock; in the
-visual tests it starts at the trace's value, `CLOUDPHASE`), below the horizon faded to the far fog colour on the game's
+visual tests it starts at the trace's value, `CLOUDPHASE`). While the clock is held the Phase stays at its start, as the
+page's `clockLocked` (ModelView.html ~2169-2203; since 2026-11-05 natively too, issue N4): the view hands its
+`ClockLocked` ("Lock time", else the mission script holding the clock: the intro) to `CutscenePlayer.HoldClouds` with the
+page's "lockTime" message; cutgen holds them where the script holds the clock (`CLOUDHOLD=0/1` sets it; the game's Phase
+stays at 393.984 in every intro frame of GTAIV.3.trace). Below the horizon faded to the far fog colour on the game's
 dome, and the near fog's share. The main view, the water's mirror (below, "The water's mirror") and the mirrored
 surroundings' map (`toMap`, below). In the app the player draws it through `IRenderScene.DrawBackground`.
 
@@ -424,7 +428,24 @@ see-through parts (gta_ped, bucket 1) blended by the stipple's share of their al
 and the map's glass with vertex alpha by their texture's alpha, culled, writing depth; other glass at 0.45) and the
 map's other see-through materials (culled, writing depth, forward shine); the location's decals lit by the surface
 below (its normal and AO copied after the solid pass), normal decals taking its AO.
-Not yet: animated textures. (The mirrored surroundings in the shine: below, "The
+Animated textures: not in cutscenes, on the page nor natively. The page's `uvAnim` (ModelView.html ~2906-2920, ~3662)
+reads `clip.uv`, which only the animation view's "clip" message fills (`AnimationView.TextureMatrix`, a map object's
+`_uv_N` clip; natively `AnimationPose.UvAt`, step 6); a cutscene's timeline clip has no tracks (`Cutscene.Section`), and
+`CutsceneLocation` shows the IDE's animated objects (anim, tanm) at rest. The five tested cutscenes' locations hold such
+objects (the intro's ship ET_ShipIn62, ET_ShipINHullF01, ET_ShipInMast02; Times Square's far LOD signs of manhat09 in
+intro s5, bc_3 and et01_ba; BM_coinop01 in et01_aa); whether they move a texture is not checked. Native = page.
+
+Face shapes (2026-11-05, `MeshRenderer.Shapes.cs`, the page's makeFace / blendFace, ModelView.html ~1091-1128 and
+poseCast ~2721-2730): a cutscene ped's .wbs shapes on its head mesh (`ModelSource.Shapes`, from `CutActor.Faces` by
+`CutsceneDrawing`: position / 4096, normal and tangent / 128), weighted per frame by the face clip's type-21 tracks at
+the actor's clip frame, linearly between frames (`CutscenePose.FaceAt`), added to the vertices before skinning. The CPU
+adds them as the page does into an upload ring (a slot per frame in flight) and copies the changed ranges into vertex
+buffers of the instance's own (default heap; the model's vertices copied in once) at the start of `Draw`, only when the
+weights changed; the instance is then drawn from those (main, lamp shadow and sun shadow passes). Without weights (a
+section without the face's tracks) the model's own vertices; the page keeps the last blend there. Only actors with a .wbs
+in cutsprops.img have them (seen: bc_1's Roman, bc_3's cs_Bernie_CraneC, the intro's CS_Hossan in s3, a face in et01_aa s3); Niko has none, as on
+the page. cutgen: `D3D12NOFACES=1` leaves them out.
+(The mirrored surroundings in the shine: below, "The
 mirrored surroundings' map".) (Glowing see-through parts and glass, and the lamps on the forward-drawn map materials:
 below.)
 
