@@ -654,6 +654,31 @@ Left above the page (native > page + 0.05) after this round, with what was found
   lamps from outside) is not known, so neither the cap nor a guessed rule is taken over.
 - et01_ba f1292.25 (+0.09): not analysed.
 
+### Worn props with their vertex colours (2026-11-05, round 6)
+
+`CutsceneMessages.WornProps` (the worn props' meshes for native) copied only positions, normals, texture coordinates,
+alpha and the bone binding; the page's prop message is the whole mesh message with only positions, normals, bones and
+weights replaced (Cutscene.cs `Section()`, ~513-540). Native's props therefore had no vertex colours: a ped's AO is its
+vertex red, so the toll keeper's helmet in et01_ba (CS_DeSean's prop `p_head_000`, gta_ped_reflect) took the whole light
+from around, its *_reflect environment texture and the mirrored surroundings at AO 1 (at (1320, 440): game 47, page 4d,
+native a2). Now the colours, tangents (unmoved, as the page's), layer coordinates and weights come along. et01_ba
+f1394.75 4.25 -> 4.04 (page 4.02), f1292.25 3.27 -> 3.25 (page 3.18).
+
+### Gaps counted as noise (decided 2026-11-05)
+
+- **bc_3's water** (s3 f140.5 +0.27, s1 f854.75 +0.08, s3 f829.5 +0.07 against the page): the grain-free difference
+  (8 x 8 block means of native minus page, `lowdiff.ps1`) lies almost wholly in the water, as a wave pattern: both
+  simulations are deterministic (the page's value 5.65 in every run since 2026-11-02), but their states differ (native's
+  warmed-up base and stepping per section time, see "Seeing through the water"). Mean signed difference -0.5, mean
+  |difference| 1.6 at s3 f140.5, the figures and the pier equal.
+- **Film grain** (TLAD): equal strength (see round 5), random on both sides.
+- **intro s2 f682.5** (+0.11): the cabins lit through the windows; see 2dfx-lights.md "Light_Add's room test" - the
+  game's rule is in its encrypted part (0x431E40), the page is closer only by its 80-light cap.
+
+Full run after round 6 (all 72): sum -0.28, native mean 3.259 (page 3.38). Above the page by more than 0.05: bc_3 s3
+f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), intro s2 f682.5 +0.11 (above), et01_ba f1292.25 +0.07
+(open: the grain-free difference lies in the far bridge's fine detail and the man in front, signed mean 0.00).
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

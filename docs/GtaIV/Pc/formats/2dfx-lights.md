@@ -263,6 +263,26 @@ With the camera inside an interior, the game draws the deferred lamps of that in
 
 In SparkIV: `sceneLightsNow`, `lightVolumesNow` and `coronasNow` in `ModelView.html` skip lamps of another interior. With the camera in a room, they also skip the outside's lamps and lamps of rooms not seen from it (`seenRooms`). A room is seen when it is the camera's or lies behind a portal on screen, followed on through the portals of the rooms seen. Status: **used**. Not traced: whether the game also clips the view through each portal (SparkIV takes the whole screen); with the camera outside, every room is taken as seen.
 
+### Light_Add's room test, decoded (2026-11-05)
+
+0xA0FE70 is no longer in the encrypted part in the current Ghidra project; decompiled (headless, `DecompileAt.java`):
+- **0xA0FE70 `Light_RoomAllows(interior, room)`**: a lamp of an interior's room (interior > 0, room not 0x3f and not
+  −1) always passes. Any other lamp (outside, or an interior's "outside" room) passes only when 0xA0FB40 returns not 1.
+- **0xA0FB40 `Room_CameraDropsOutsideLights()`**: with the camera in an interior's room (0x12B41A4 the camera's
+  interior, 0x103B110 its room; not 0, 0x3f, −1), bit 3 of the room record's byte +0x52 (record from 0xB226E0); else 0.
+  So outside lamps are dropped only for camera rooms with that flag - the per-room flag field in the `.ide`'s
+  `mlo` room lines is the likely source (not checked which column).
+- **0xB03D30** (`Lights_PointInsideVolumes`), called by Light_Add for an outside lamp (room −1) with flags 0x140: the
+  lamp's place against lists of planes (records of 0x5580 bytes, count at +0x4000); inside one → not made.
+- Before that, Light_Add tests the lamp's sphere (place, radius) with a plane at 0x118D800 + 0x340 (the view) and with
+  **0x431E40**, a sphere test called by some 40 functions. 0x431E40 is in the encrypted part (its decompilation is
+  garbage). That is where an interior lamp seen from outside could be dropped (the intro's harbour, s2 f682.5: the
+  game's picture shows the ship's cabins behind their windows unlit, where SparkIV lights them with the cabins' lamps).
+
+Status: **decoded, not ported** - the rooms' +0x52 flag isn't mapped to the `.ide` yet, and the sphere test that
+decides interior lamps from outside (0x431E40) can't be read. SparkIV (page and native) keeps: with the camera outside,
+every room's lamps are taken.
+
 ## How far from the camera: drawn objects and FadeDistance
 
 `Entity_AddModelLights` (0xC1DB60) makes an object's lights:

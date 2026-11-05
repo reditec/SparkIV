@@ -577,6 +577,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             SkinBones = bones,
             SkinWeights = weights,
             Alphas = mesh.Alphas,
+            // The rest as the page's prop message keeps it (Section(): mesh.ToMessage() with only the positions,
+            // normals, bones and weights replaced): the vertex colours (a ped's AO is their red - without them a worn
+            // helmet took the whole light from around and its reflections, et01_ba), the tangents as they are, the
+            // layer coordinates and weights.
+            Colors = mesh.Colors,
+            Tangents = mesh.Tangents,
+            LayerUvs = mesh.LayerUvs,
+            LayerWeights = mesh.LayerWeights,
           });
         }
       }
