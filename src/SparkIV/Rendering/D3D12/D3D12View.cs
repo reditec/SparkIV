@@ -121,6 +121,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
     private float _scaleX, _scaleY;
     private bool _sizeChanged, _scaleChanged;
     private double _lastMeasure = double.NegativeInfinity;
+    private readonly FramePacer _pacer = new FramePacer();
 
     /// <summary>Starts on the UI thread, once the panel is loaded; <paramref name="failed"/> hears (on the UI thread) why drawing stopped.</summary>
     public D3D12View(SwapChainPanel panel, IRenderScene scene, Action<string> failed)
@@ -185,16 +186,25 @@ namespace SparkIV.WinUI.Rendering.D3D12
       try
       {
         var profiler = _device.Profiler;
+        int pipelinedFrames = 0;
+        double cpuSum = 0, gpuSum = 0;
         while (!_stop)
         {
-          // At most MaximumFrameLatency frames queued (1): wait until the swap chain takes the next one.
+          // At most MaximumFrameLatency frames queued (1): wait until the swap chain takes the next one - serial: here,
+          // before the frame is updated (the input read as late as possible, shown at the next refresh); pipelined:
+          // before Present, so this frame is updated and recorded while the GPU still draws the last (FramePacer).
+          bool pipelined = _pacer.Pipelined;
           long stage = profiler != null ? GpuProfiler.Now : 0;
-          WaitForSingleObjectEx(_swapChain.WaitableObject, 1000, true);
-          profiler?.CpuSince("wait (frame latency, VSync)", stage);
+          if (!pipelined)
+          {
+            WaitForSingleObjectEx(_swapChain.WaitableObject, 1000, true);
+            profiler?.CpuSince("wait (frame latency, VSync)", stage);
+          }
           if (_stop)
           {
             break;
           }
+          long cpuStart = Stopwatch.GetTimestamp();
           lock (_lock)
           {
             if (_scaleChanged)
@@ -240,7 +250,19 @@ namespace SparkIV.WinUI.Rendering.D3D12
           }
           _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
           profiler?.CpuSince("recording", stage);
-          ulong mark = _swapChain.End();
+          ulong mark = _swapChain.Submit();
+          double cpuMs = (Stopwatch.GetTimestamp() - cpuStart) * 1000.0 / Stopwatch.Frequency;
+          if (pipelined)
+          {
+            stage = profiler != null ? GpuProfiler.Now : 0;
+            WaitForSingleObjectEx(_swapChain.WaitableObject, 1000, true);
+            profiler?.CpuSince("wait (frame latency, VSync)", stage);
+          }
+          _swapChain.Present();
+          _pacer.Record(cpuMs, _swapChain.LastGpuMs, clock.Elapsed.TotalSeconds);
+          pipelinedFrames += pipelined ? 1 : 0;
+          cpuSum += cpuMs;
+          gpuSum += _swapChain.LastGpuMs;
           if (profiler != null)
           {
             profiler.Count("draws (main view and maps)", _renderer.DrawCalls);
@@ -265,11 +287,16 @@ namespace SparkIV.WinUI.Rendering.D3D12
           last = after;
           if (after - secondStart >= 1 && frames > 0)
           {
-            D3D12Device.Log(string.Format(CultureInfo.InvariantCulture, "{0:0} fps · {1:0.0} ms, max {2:0.0} ms · {3} draws · {4}x{5}",
+            D3D12Device.Log(string.Format(CultureInfo.InvariantCulture, "{0:0} fps · {1:0.0} ms, max {2:0.0} ms · {3} draws · {4}x{5} · {6}",
                                           frames / (after - secondStart), sum / frames * 1000, longest * 1000, draws / frames,
-                                          _swapChain.Width, _swapChain.Height));
+                                          _swapChain.Width, _swapChain.Height, pipelinedFrames * 2 >= frames ? "pipelined" : "serial"));
             if (profiler != null)
             {
+              // How much the CPU's and the GPU's parts overlapped: their sum a frame against the frame's time.
+              double cpu = cpuSum / frames, gpu = gpuSum / frames, frameMs = sum / frames * 1000;
+              D3D12Device.Log(string.Format(CultureInfo.InvariantCulture,
+                "pacing: {0} of {1} frames pipelined, refresh {2:0.00} ms; CPU (update to submit) {3:0.00} ms + GPU {4:0.00} ms = {5:0.00} ms serial, frame {6:0.00} ms, overlapped {7:0.00} ms; costliest CPU + GPU of the last {8}: {9:0.00} ms",
+                pipelinedFrames, frames, _pacer.PeriodMs, cpu, gpu, cpu + gpu, frameMs, Math.Max(0, cpu + gpu - frameMs), FramePacer.Window, _pacer.SerialCostMs));
               D3D12Device.Log(profiler.Report(p95: false));
               profiler.Reset();
             }
@@ -278,6 +305,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
             sum = longest = 0;
             draws = 0;
             frames = 0;
+            pipelinedFrames = 0;
+            cpuSum = gpuSum = 0;
           }
         }
       }

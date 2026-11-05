@@ -202,43 +202,75 @@ namespace SparkIV.WinUI.Rendering.D3D12
     }
 
     /// <summary>A pass begins (its GPU timestamp, the CPU's clock; <paramref name="draws"/>: the caller's draw counter now, or -1).</summary>
-    public void Begin(ID3D12GraphicsCommandList list, string name, int draws = -1)
-    {
-      if (Recording is not Slot slot || slot.Queries + 2 > QueriesPerSlot)
-      {
-        return;
-      }
-      int query = slot.Queries++;
-      list.EndQuery(_heap, QueryType.Timestamp, (uint)(_current * QueriesPerSlot + query));
-      slot.Marks.Add(new MarkRecord { Name = NameOf(name), BeginQuery = query, EndQuery = -1, CpuStart = Now, DrawsStart = draws, Draws = -1 });
-    }
+    public void Begin(ID3D12GraphicsCommandList list, string name, int draws = -1) => Open(list, name, draws);
 
     /// <summary>The pass of that name begun last ends (<paramref name="draws"/>: the same counter now, or -1).</summary>
     public void End(ID3D12GraphicsCommandList list, string name, int draws = -1)
     {
-      if (Recording is not Slot slot || !_nameIndex.TryGetValue(name, out int n))
+      lock (_marksLock)
       {
-        return;
-      }
-      for (int i = slot.Marks.Count - 1; i >= 0; i--)
-      {
-        var m = slot.Marks[i];
-        if (m.Name != n || m.EndQuery >= 0)
-        {
-          continue;
-        }
-        if (slot.Queries + 1 > QueriesPerSlot)
+        if (Recording is not Slot slot || !_nameIndex.TryGetValue(name, out int n))
         {
           return;
         }
+        for (int i = slot.Marks.Count - 1; i >= 0; i--)
+        {
+          var m = slot.Marks[i];
+          if (m.Name == n && m.EndQuery < 0)
+          {
+            CloseMark(list, slot, i, draws);
+            return;
+          }
+        }
+      }
+    }
+
+    /// <summary>
+    /// A pass begins (as <see cref="Begin"/>), from any thread into any of the frame's command lists (lists recorded on
+    /// worker threads); the mark's number for <see cref="Close"/> (-1: none).
+    /// </summary>
+    public int Open(ID3D12GraphicsCommandList list, string name, int draws = -1)
+    {
+      lock (_marksLock)
+      {
+        if (Recording is not Slot slot || slot.Queries + 2 > QueriesPerSlot)
+        {
+          return -1;
+        }
         int query = slot.Queries++;
         list.EndQuery(_heap, QueryType.Timestamp, (uint)(_current * QueriesPerSlot + query));
-        m.EndQuery = query;
-        m.CpuMs = (Now - m.CpuStart) * 1000.0 / Stopwatch.Frequency;
-        m.Draws = draws >= 0 && m.DrawsStart >= 0 ? Math.Max(0, draws - m.DrawsStart) : -1;
-        slot.Marks[i] = m;
+        slot.Marks.Add(new MarkRecord { Name = NameOf(name), BeginQuery = query, EndQuery = -1, CpuStart = Now, DrawsStart = draws, Draws = -1 });
+        return slot.Marks.Count - 1;
+      }
+    }
+
+    /// <summary>The pass of <see cref="Open"/>'s number ends (any thread, the list it began in).</summary>
+    public void Close(ID3D12GraphicsCommandList list, int mark, int draws = -1)
+    {
+      lock (_marksLock)
+      {
+        if (mark >= 0 && Recording is Slot slot && mark < slot.Marks.Count && slot.Marks[mark].EndQuery < 0)
+        {
+          CloseMark(list, slot, mark, draws);
+        }
+      }
+    }
+
+    private readonly object _marksLock = new object();
+
+    private void CloseMark(ID3D12GraphicsCommandList list, Slot slot, int i, int draws)
+    {
+      if (slot.Queries + 1 > QueriesPerSlot)
+      {
         return;
       }
+      var m = slot.Marks[i];
+      int query = slot.Queries++;
+      list.EndQuery(_heap, QueryType.Timestamp, (uint)(_current * QueriesPerSlot + query));
+      m.EndQuery = query;
+      m.CpuMs = (Now - m.CpuStart) * 1000.0 / Stopwatch.Frequency;
+      m.Draws = draws >= 0 && m.DrawsStart >= 0 ? Math.Max(0, draws - m.DrawsStart) : -1;
+      slot.Marks[i] = m;
     }
 
     /// <summary>A CPU stage of the frame on the render thread (summed per frame, counted at <see cref="FrameSent"/>).</summary>
@@ -388,7 +420,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
           {
             continue;
           }
-          string format = counts ? "  {0,-30} {1,9:0} {2,9:0}" : "  {0,-30} {1,9:0.000} {2,9:0.000}";
+          string format = counts ? "  {0,-30} {1,9:0.##} {2,9:0.##}" : "  {0,-30} {1,9:0.000} {2,9:0.000}";
           text.AppendLine(string.Format(inv, format, _cpuNames[i], _cpu[i].Mean(CpuFrames),
             p95 ? _cpu[i].Percentile(CpuFrames, 0.95) : _cpu[i].Max));
         }

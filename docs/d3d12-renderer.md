@@ -27,8 +27,10 @@ timeline, status bar, dialogs) stays; only the drawing area changes.
 compiles them in.
 | `D3D12View` | Ties the panel to device, swap chain and renderer. Draws on its own thread, which waits on the waitable object before each frame, so frames go out at the refresh rate and the UI thread stays free (loading the cast doesn't stall the view). Size and DPI changes are recorded on the UI thread and applied at the next frame. Once a second: frames per second, mean and longest frame time into the status bar (`FpsText`) and the log. |
 
-Frame: wait on the waitable object → apply size/DPI → wait for the buffer's last fence mark → reset its allocator and
-the command list → barrier present→render target → clear, draw → barrier back → execute → `Present(1)` → signal.
+Frame (since 2026-11-05, see "The frame loop" below): serial - wait on the waitable object → apply size/DPI → update →
+`Begin` (the buffer's last fence mark and the frame before last waited for, its allocator and the command list reset) →
+record → `Submit` (execute, signal) → `Present(1)`; pipelined - the same with the wait on the waitable object moved to
+just before `Present`.
 
 ### How the data gets to the GPU
 
@@ -738,6 +740,7 @@ diff 6.35).
   composite), `close + execute`, `present`; and the draws of the main view and maps and of the water's mirror.
 - cutgen: `D3D12PROFILE=1` with `D3D12BENCH=<step>`: the same table after the bench, mean and p95 over all frames (frames
   without a pass count as 0). With `D3D12CAP` (pictures) the one frame's table (scene list and composite list).
+  `D3D12BENCHPIPE=1`: the bench as the app's pipelined loop (sent, not waited for; see "The frame loop").
 
 **Reading it:** `frame (GPU total)` is the GPU time from the frame's first to its last mark; the passes indented under
 another (`  sun: ...`, `  sky (into the map)`, `  sky (into the mirror)`, `  water: mirror meshes`) are inside it and
@@ -790,6 +793,95 @@ harbour holds 60 Hz on average (14.4 ms) with little room (p95 15.9 ms). What do
 (texels into four 4096² R32F + D32 targets: 4.7 ms in the intro, and 3.7 ms in bc_1's room, where the sun doesn't
 reach), the G-buffer solid pass, the lamps' light pass (one instanced draw, fill rate), and outside the water's mirror
 (intro) and the shadow's convert (~0.6-0.8 ms, four 2048² means).
+
+## The frame loop, the dark sun and parallel recording (2026-11-05)
+
+What the profile of the app showed (Release, 1610 x 818, intro harbour, `SparkIV-d3d12.log` 14:53:29 against 14:53:36):
+recording 6.1 ms + GPU 8.7 ms = 14.8 ms gave 60 fps; recording 6.7 ms + GPU 12.8 ms = 19.5 ms locked to exactly 30 fps,
+with 25.8 ms in the waitable object's wait. With at most one frame queued (`MaximumFrameLatency` 1, for the camera's
+feel) the loop waited first and recorded after, so the CPU's and the GPU's parts ran one after the other; each alone was
+well under 16.7 ms.
+
+### The frame loop (`D3D12View`, `FramePacer`, `PanelSwapChain`; generic)
+
+`PanelSwapChain.End` is split into `Submit` (close, execute, signal: the GPU starts) and `Present`. `FramePacer` decides
+each frame where the loop waits on the waitable object:
+- **Serial** (as before): wait → update (the mouse read right before the view is built) → record → submit → present. The
+  input is shown at the next refresh: **1 refresh of latency**. Only while the CPU's part (update to submit) and the GPU's
+  fit in a refresh.
+- **Pipelined**: update → record → submit → wait → present. The frame is updated and recorded while the GPU still draws
+  the last one, so the rate is set by the larger part, not their sum. The input read right after one refresh is shown two
+  refreshes later: **2 refreshes of latency**, the least possible once CPU + GPU take longer than a refresh (serial
+  would show it after 2 refreshes too, but at 30 fps).
+- The choice: serial while the costliest CPU + GPU of the last 30 frames stays under the refresh less 1.5 ms (one frame
+  over it switches at once); pipelined until 30 frames in a row are under the refresh less 3 ms. The refresh from DWM
+  (`DwmGetCompositionTimingInfo`, read once a second; 60 Hz when not known); the GPU time from two timestamps per
+  frame in the swap chain's list (`PanelSwapChain.LastGpuMs`, a few frames old). `SPARKIV_D3D12_PACING=serial` or
+  `pipelined` fixes the mode; `SPARKIV_D3D12_LATENCY=2` still raises the queue.
+- Before: 1 refresh while it fit, else 30 fps with 2 refreshes. After: the same 1 refresh while it fits, else 60 fps
+  (while the GPU alone fits) with 2 refreshes.
+- The log's fps line says `serial` or `pipelined`; with `SPARKIV_D3D12_PROFILE=1` a `pacing:` line gives the frames
+  pipelined, the refresh, CPU and GPU a frame, their sum, the frame time and how much of the sum overlapped.
+
+**What the CPU writes while the GPU reads** (all checked): `PanelSwapChain.Begin` (and `OffscreenTarget.Begin`, now two
+allocators) waits for every frame but the last one sent, so at most one frame is on the GPU while one is recorded.
+Every per-frame buffer the CPU writes is a ring of at least two frames: `MeshRenderer`'s frame constants (main, mirror,
+map), palette and lights (4 slots, one each a frame), its recorders' allocators (4 slots), `CutsceneSky`'s constants (8
+slots, three draws a frame), `CutsceneWater`'s ring (4 slots, one a frame); the tone mapper's measure and the
+profiler's readback are read only after their fence mark; the water's simulation, the sun's, lamps' and the map's
+targets, G-buffer and depth are written and read by the GPU only, in queue order. Instance matrices, materials and
+lights per draw go as root constants in the list.
+
+### The sun's shadow where the sun is 0 (`MeshRenderer.Draw`)
+
+Every read of the sun's shadow map is multiplied by the sun's colour (the frame's `Sun`: `LitBy` and the three shine
+terms in `Shade`, the water's glint, light and foam; the mirror's and the map's light read no shadow). `Sun` is
+`TimeCycle.Sun x SunMultiplier x Exposure` (`CutsceneLighting.LightOf`), eased by the room's strength. Where it is
+exactly (0, 0, 0) the map's value can't reach a pixel: without the map `SunShadow` is 1 and 0 x 1 = 0 x anything the map
+holds (also through FMA: a 0 product adds nothing). So then the cascades (map objects, cast, convert) are left out and the
+map isn't bound - byte-identical (bc_1 s1 f704 and f884, sun 0: same SHA-256 as with the shadow drawn,
+`D3D12KEEPDARKSUN=1`). This happens in bc_1 s1 in 360 of 1076 frames (f569-f928, Bernie's flat with the room's modifier
+whole); bc_1 s1 f144 has sun 0.016 (room strength 0.96), et01_aa's room sun 25 (dark only through the walls' shadow: no
+exact condition there, the map is needed), the outdoor sections never. Nothing approximated.
+
+### Parallel recording (`MeshRenderer`, generic)
+
+The heavy passes are recorded on worker threads (`Task.Run`) into direct command lists of their own while the render
+thread records the rest: the four sun cascades (a list each: clear, phases, convert), the mirrored surroundings' map's
+objects, the solid pass (four lists of consecutive draws: the pass's sequence of visits sweep x group x instance split
+in four), the decals, the see-through pass (two lists). Each list sets every state it needs. Where its pass is drawn,
+`Splice` closes the frame's list, sends it with the workers' lists after it in one `ExecuteCommandLists` (in order),
+and opens the same list object again on an allocator of the renderer's (allowed as soon as it is sent), so the callers
+go on unchanged; the states the following commands need are set again. Draw order within every pass is unchanged
+(cast first). Per-draw overhead cut where free: no LINQ closure per instance in `DrawPass`. `SPARKIV_D3D12_PARALLEL=0`
+records everything on the render thread as before (the same pictures). The profiler's marks may be set from workers
+(`GpuProfiler.Open`/`Close`); the workers' times show as `worker: ...` CPU stages.
+
+Tried and dropped: **bundles** (`ExecuteBundle`) instead of direct lists - same pictures, but the GPU took 2.1 ms more
+for bc_1's solid pass (1.23 -> 3.35 ms, 2911 draws; not in the intro or bc_3), cause not found; and recording the
+**water's mirror** ahead on a worker - from a bundle its 4-sample target came out 25 pixels by 1 different from run to
+run; it stays on the render thread (1.0 ms in the intro).
+
+**Measured** (cutgen `D3D12BENCH=1 D3D12PROFILE=1`, Release, `SPARKIV_D3D12_DEBUG=0`, 1920 x 1080, all frames; serial =
+each frame waited for, as before; `D3D12BENCHPIPE=1` = the pipelined loop, at most one frame on the GPU):
+
+| Scene | | before (26a35c4) | after, serial | after, pipelined |
+|---|---|---|---|---|
+| intro s4 | frame mean / p95 | 21.78 / 23.48 ms | 16.17 / 17.68 ms | **14.38 / 15.94 ms** |
+| | GPU | 14.37 | 14.32 | 14.34 |
+| | CPU update + recording | 0.83 + 6.30 | 0.87 + 3.19 | |
+| | workers (sun, map, solid, decals, see-through) | - | 1.40, 0.25, 2.05, 0.26, 0.62 | |
+| bc_3 s3 | frame mean / p95 | 12.10 / 12.46 | **9.48 / 9.78** | 8.24 / 8.58 |
+| | GPU | 8.21 | 8.21 | 8.16 |
+| | CPU update + recording | 0.66 + 3.01 | 0.65 + 1.61 | |
+| bc_1 s1 | frame mean / p95 | 10.26 / 11.30 | **8.33 / 10.25** | 7.09 / 9.25 |
+| | GPU (sun shadow) | 8.62 (4.50) | 7.28 (3.14: 360 frames without) | 7.04 |
+| | CPU update + recording | 0.66 + 0.78 | 0.63 + 0.49 | |
+
+The serial frame is now less than update + recording + GPU: the spliced lists start on the GPU while the rest is still
+recorded. Expected in the app at 60 Hz: the intro pipelined (CPU ~4 ms + GPU ~14 ms over the line), ~14.3 ms, 60 fps,
+2 refreshes of latency (before: 30 fps once over); bc_3 and bc_1 serial, 60 fps, 1 refresh of latency. Still on the
+render thread in the intro: the water's mirror meshes (1.0 ms) and waiting for the solid pass's workers (0.8 ms).
 
 ## Next steps (#112)
 

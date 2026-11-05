@@ -91,6 +91,17 @@ namespace SparkIV.WinUI.Rendering.D3D12
       }
       CommandList = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, _allocators[0], null);
       CommandList.Close();
+      _timeHeap = d3d.CreateQueryHeap<ID3D12QueryHeap>(new QueryHeapDescription(QueryHeapType.Timestamp, BufferCount * 2));
+      _timeReadback = d3d.CreateCommittedResource(new HeapProperties(HeapType.Readback), HeapFlags.None,
+        ResourceDescription.Buffer(BufferCount * 16), ResourceStates.CopyDest);
+      unsafe
+      {
+        void* mapped;
+        _timeReadback.Map(0, null, &mapped).CheckError();
+        _times = (ulong*)mapped;
+      }
+      device.Queue.GetTimestampFrequency(out ulong frequency).CheckError();
+      _ticksToMs = 1000.0 / frequency;
       MakeTargets();
     }
 
@@ -136,40 +147,95 @@ namespace SparkIV.WinUI.Rendering.D3D12
       MakeTargets();
     }
 
-    /// <summary>Starts a frame: waits until the GPU is done with this buffer's last frame, opens the command list.</summary>
+    /// <summary>
+    /// Starts a frame: waits until the GPU is done with this buffer's last frame and with every frame but the last one
+    /// sent (so at most one frame is on the GPU while this one is recorded: rings of two or more slots a frame are safe
+    /// to write), opens the command list. The GPU time of the frame drawn last into this buffer is read here
+    /// (<see cref="LastGpuMs"/>).
+    /// </summary>
     public ID3D12GraphicsCommandList Begin()
     {
       int index = BufferIndex;
       var profiler = _device.Profiler;
       long start = profiler != null ? GpuProfiler.Now : 0;
       _device.Wait(_frameMarks[index]);
+      _device.Wait(_beforeLastMark);
       profiler?.CpuSince("wait for the buffer's fence", start);
+      ReadGpuTime(index);
       _allocators[index].Reset();
       CommandList.Reset(_allocators[index], null);
+      CommandList.EndQuery(_timeHeap, QueryType.Timestamp, (uint)(index * 2));
       profiler?.BeginFrame(CommandList);
       CommandList.ResourceBarrierTransition(BackBuffer, ResourceStates.Present, ResourceStates.RenderTarget);
       return CommandList;
     }
 
-    /// <summary>Ends a frame: closes and sends the command list and shows the buffer (with vsync); the frame's fence mark.</summary>
-    public ulong End()
+    /// <summary>
+    /// Ends the frame's recording: closes and sends the command list (the GPU starts on it); the frame's fence mark.
+    /// <see cref="Present"/> shows it.
+    /// </summary>
+    public ulong Submit()
     {
       int index = BufferIndex;
       CommandList.ResourceBarrierTransition(BackBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
-      // (Profiling: the frame's last timestamps resolved, then closing and sending, and Present, timed apart.)
+      // (Profiling: the frame's last timestamps resolved, then closing and sending timed.)
       var profiler = _device.Profiler;
       profiler?.EndFrame(CommandList);
+      CommandList.EndQuery(_timeHeap, QueryType.Timestamp, (uint)(index * 2 + 1));
+      CommandList.ResolveQueryData(_timeHeap, QueryType.Timestamp, (uint)(index * 2), 2, _timeReadback, (ulong)index * 16);
       long start = profiler != null ? GpuProfiler.Now : 0;
       CommandList.Close();
       _device.Queue.ExecuteCommandList(CommandList);
-      if (profiler != null)
-      {
-        profiler.CpuSince("close + execute", start);
-        start = GpuProfiler.Now;
-      }
+      profiler?.CpuSince("close + execute", start);
+      _beforeLastMark = _lastMark;
+      _lastMark = _frameMarks[index] = _device.Signal();
+      _timed[index] = true;
+      return _lastMark;
+    }
+
+    /// <summary>Shows the frame sent last (with vsync).</summary>
+    public void Present()
+    {
+      var profiler = _device.Profiler;
+      long start = profiler != null ? GpuProfiler.Now : 0;
       _swapChain.Present(1, PresentFlags.None).CheckError();
       profiler?.CpuSince("present", start);
-      return _frameMarks[index] = _device.Signal();
+    }
+
+    /// <summary>Sends and shows the frame at once (<see cref="Submit"/>, then <see cref="Present"/>); its fence mark.</summary>
+    public ulong End()
+    {
+      ulong mark = Submit();
+      Present();
+      return mark;
+    }
+
+    // The fence marks of the frame sent last and the one before it.
+    private ulong _lastMark, _beforeLastMark;
+
+    // Two timestamps a frame (its list's start and end) per buffer, read when the buffer's frame is done.
+    private readonly ID3D12QueryHeap _timeHeap;
+    private readonly ID3D12Resource _timeReadback;
+    private readonly unsafe ulong* _times;
+    private readonly double _ticksToMs;
+    private readonly bool[] _timed = new bool[BufferCount];
+
+    /// <summary>The GPU time of the last frame read (its command list from start to end, ms; a few frames old); 0 before any.</summary>
+    public double LastGpuMs { get; private set; }
+
+    // After the buffer's last frame is done (Begin waited for it): its GPU time.
+    private unsafe void ReadGpuTime(int index)
+    {
+      if (!_timed[index])
+      {
+        return;
+      }
+      _timed[index] = false;
+      ulong a = _times[index * 2], b = _times[index * 2 + 1];
+      if (b > a)
+      {
+        LastGpuMs = (b - a) * _ticksToMs;
+      }
     }
 
     private void MakeTargets()
@@ -237,6 +303,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
     {
       _device.WaitIdle();
       ReleaseTargets();
+      _timeReadback.Unmap(0);
+      _timeReadback.Dispose();
+      _timeHeap.Dispose();
       CommandList.Dispose();
       foreach (var allocator in _allocators)
       {

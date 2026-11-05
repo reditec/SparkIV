@@ -698,14 +698,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         order();
       }
-      // The mouse's move since the last frame, read now (after a press's leaving of the cutscene's camera above).
-      ApplyDrag();
-      if (_wheel != 0)
-      {
-        _free.Zoom(-Math.Sign(_wheel));
-        _wheel = 0;
-      }
-
       // The clock, as the page's tick: on by the time passed, stopping at the section's end.
       if (_playing)
       {
@@ -751,6 +743,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         profiler.CpuSince("  update: poses", stage);
         stage = GpuProfiler.Now;
+      }
+      // The mouse's move since the last frame, read as late as possible: right before the view is built (after a press's
+      // leaving of the cutscene's camera, in the orders above, and after the poses).
+      ApplyDrag();
+      if (_wheel != 0)
+      {
+        _free.Zoom(-Math.Sign(_wheel));
+        _wheel = 0;
       }
       float aspect = width / (float)Math.Max(1, height);
       // The free view: fitted once the actors are posed (their bones' places now), walking by the keys held (the page's

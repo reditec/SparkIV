@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 using Vortice.Direct3D;
 using Vortice.Direct3D12;
 using Vortice.Dxc;
@@ -2827,7 +2828,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       frame[59] = 0;
       // The sun's shadow (FrameLight.SunShadow): its axes, cascades and fade; the map's number once drawn (below).
       var sun = light.SunShadow;
-      bool sunOn = sun != null && sun.Boxes.Length >= SunCascades && sun.Biases.Length >= SunCascades && _sunSlot > 0;
+      // Not drawn where the sun adds nothing: every read of the map is multiplied by the sun's colour (Shade's LitBy and
+      // shine, the mirror's and the map's ReflectTexture light, the water's glint, light and foam), so with the sun 0 the
+      // map's value can't reach a pixel - without it SunShadow is 1, and 0 x 1 = 0 x anything the map holds: the same
+      // picture, bit for bit. (In a room the time cycle's sun x SunMultiplier x Exposure can be 0.)
+      SunSkipped = sun != null && light.Sun == Vector3.Zero && !KeepDarkSunShadow;
+      bool sunOn = sun != null && sun.Boxes.Length >= SunCascades && sun.Biases.Length >= SunCascades && _sunSlot > 0 && !SunSkipped;
       new Span<float>(frame + 60, FrameFloats - 60).Clear();
       if (sunOn)
       {
@@ -2847,7 +2853,42 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       frame[43] = depthFx && lightTexture != null && _lightCopy != null ? 1 : 0;
 
       ulong frameAddress = _frame.GPUVirtualAddress + (ulong)(_paletteSlot * FrameSlotBytes);
+      ulong lightsAddress = _lights.GPUVirtualAddress + (ulong)((long)_paletteSlot * LightCapacity * LightBytes);
 
+      // The heavy passes recorded on worker threads into command lists of their own while this thread records the rest:
+      // the sun's cascades (a list each), the mirrored surroundings' map's objects, the solid pass (four lists of
+      // consecutive draws), the decals, the see-through pass (two lists). Each is sent where its pass is drawn (Splice), so
+      // the GPU gets the same draws in the same order (ParallelRecording off: drawn into this list as before).
+      BeginRecorders();
+      bool parabolicOn = parabolicSky != null && !NoParabolic;
+      Task<Recorder>[]? sunLists = null, solidLists = null, decalLists = null, blendLists = null;
+      Task<Recorder>? parabolicList = null;
+      Task<Recorder>[] Chunks(string name, Pass pass, bool gBuffer, int chunks) =>
+        Enumerable.Range(0, chunks).Select(c => Record(name, (l, r) =>
+        {
+          BindOn(l, gBuffer);
+          r.Draws += DrawPass(l, pass, c, chunks);
+        })).ToArray();
+      if (ParallelRecording)
+      {
+        if (sunOn)
+        {
+          SizeSun();
+          sunLists = Enumerable.Range(0, SunCascades).Select(k => Record("  worker: sun shadow", (l, r) => DrawCascade(l, sun!, frameAddress, k, r))).ToArray();
+        }
+        if (parabolicOn)
+        {
+          float reachNow = light.DrawReach;
+          parabolicList = Record("  worker: parabolic map", (l, r) =>
+          {
+            SetupParabolic(l);
+            DrawParabolicParts(l, r, eye, parabolicHaze, reachNow);
+          });
+        }
+        solidLists = Chunks("  worker: G-buffer solid", Pass.Solid, true, 4);
+        decalLists = Chunks("  worker: decals", Pass.Decal, true, 1);
+        blendLists = Chunks("  worker: see-through + glows", Pass.Blend, false, 2);
+      }
       // The shadowed lights' maps (step 5) and the sun's, before anything else is drawn.
       ShadowMapsDrawn = 0;
       if (lights != null)
@@ -2857,10 +2898,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         profiler?.End(list, "lamp shadow atlas", DrawCalls);
       }
       SunShadowDrawn = false;
+      profiler?.Count("sun shadow left out (sun 0)", SunSkipped ? 1 : 0);
       if (sunOn)
       {
         profiler?.Begin(list, "sun shadow", DrawCalls);
-        DrawSunShadow(list, sun!, frameAddress);
+        DrawSunShadow(list, sun!, frameAddress, sunLists);
         profiler?.End(list, "sun shadow", DrawCalls);
         SunShadowDrawn = true;
       }
@@ -2868,35 +2910,44 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       frame[45] = light.GlobalScalarsW;
       frame[46] = 0;
       frame[47] = DebugView;
-      if (parabolicSky != null && !NoParabolic)
+      if (parabolicOn)
       {
         profiler?.Begin(list, "parabolic map", DrawCalls);
-        DrawParabolic(list, eye, parabolicSky, parabolicHaze, light.DrawReach);
+        DrawParabolic(list, eye, parabolicSky!, parabolicHaze, light.DrawReach, parabolicList);
         profiler?.End(list, "parabolic map", DrawCalls);
         frame[46] = _parabolicSlot;
       }
-      void Bind(bool gBuffer)
+      // The main passes' states into a list (this frame's or a worker's).
+      void BindOn(ID3D12GraphicsCommandList l, bool gBuffer)
       {
         if (gBuffer)
         {
-          list.OMSetRenderTargets(gTargets, depth);
+          l.OMSetRenderTargets(gTargets, depth);
         }
         else
         {
-          list.OMSetRenderTargets(renderTarget, depth);
+          l.OMSetRenderTargets(renderTarget, depth);
         }
-        list.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
-        list.RSSetScissorRect(width, height);
-        list.SetGraphicsRootSignature(_rootSignature);
-        list.SetDescriptorHeaps(_textures.Heap);
-        list.SetGraphicsRootConstantBufferView(3, frameAddress);
-        list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
-        list.SetGraphicsRootShaderResourceView(5, _lights.GPUVirtualAddress + (ulong)((long)_paletteSlot * LightCapacity * LightBytes));
-        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        l.RSSetViewport(new Vortice.Mathematics.Viewport(width, height));
+        l.RSSetScissorRect(width, height);
+        l.SetGraphicsRootSignature(_rootSignature);
+        l.SetDescriptorHeaps(_textures.Heap);
+        l.SetGraphicsRootConstantBufferView(3, frameAddress);
+        l.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+        l.SetGraphicsRootShaderResourceView(5, lightsAddress);
+        l.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
       }
+      void Bind(bool gBuffer) => BindOn(list, gBuffer);
       Bind(true);
       profiler?.Begin(list, "G-buffer solid", DrawCalls);
-      DrawPass(list, Pass.Solid);
+      if (solidLists != null)
+      {
+        Splice(list, solidLists);
+      }
+      else
+      {
+        Inline(list, (l, b) => b.Draws += DrawPass(l, Pass.Solid));
+      }
       profiler?.End(list, "G-buffer solid", DrawCalls);
       profiler?.Begin(list, "decals", DrawCalls);
       // The surface's normal and AO as the solid pass left them, for the decals taking its light (step 4d).
@@ -2908,7 +2959,14 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         list.ResourceBarrierTransition(_below, ResourceStates.CopyDest, ResourceStates.PixelShaderResource);
         list.ResourceBarrierTransition(_gBuffer[1]!, ResourceStates.CopySource, ResourceStates.RenderTarget);
       }
-      DrawPass(list, Pass.Decal);
+      if (decalLists != null)
+      {
+        Splice(list, decalLists);
+      }
+      else
+      {
+        Inline(list, (l, b) => b.Draws += DrawPass(l, Pass.Decal));
+      }
       profiler?.End(list, "decals", DrawCalls);
       // The lamps over the solid scene and its decals (step 5); the water and see-through materials come after
       // (forward, without them for now).
@@ -2947,7 +3005,16 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       afterSolid?.Invoke(list);
       Bind(false);
       profiler?.Begin(list, "see-through + glows", DrawCalls);
-      DrawPass(list, Pass.Blend);
+      if (blendLists != null)
+      {
+        Splice(list, blendLists);
+        // (The list goes on without states: the volumes and coronas below draw with the main passes' ones.)
+        Bind(false);
+      }
+      else
+      {
+        Inline(list, (l, b) => b.Draws += DrawPass(l, Pass.Blend));
+      }
       profiler?.End(list, "see-through + glows", DrawCalls);
       // After the scene, as the page's gamePostEnd (gtaiv-pc.js ~1504-1507): the lamps' light volumes against the whole
       // depth, then the coronas.
@@ -3267,83 +3334,110 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     // (solid, then those blended by their texture's alpha), the cast (each frame; max with the map), then its 2 x 2 mean
     // into the cascade's quarter of the map. The page keeps the map's objects' part per cascade and draws it again only
     // when the cascades change; drawn whole each frame here (the same map).
-    private unsafe void DrawSunShadow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress)
+    private unsafe void DrawSunShadow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress, Task<Recorder>[]? cascades)
     {
       var recording = System.Diagnostics.Stopwatch.StartNew();
       Array.Clear(SunTriangles);
       Array.Clear(SunParts);
-      DrawSunShadowNow(list, sun, frameAddress);
+      DrawSunShadowNow(list, sun, frameAddress, cascades);
       SunRecordMs = recording.Elapsed.TotalMilliseconds;
     }
+
+    /// <summary>The sun's shadow drawn also where the sun is 0 (for comparisons: the picture is the same).</summary>
+    public bool KeepDarkSunShadow { get; set; }
+
+    /// <summary>Whether the last frame left the sun's shadow out because its sun was 0 (see Draw).</summary>
+    public bool SunSkipped { get; private set; }
 
     /// <summary>Last frame's sun shadow: the map objects' triangles and parts drawn per cascade, the recording's time on the CPU.</summary>
     public long[] SunTriangles { get; } = new long[SunCascades];
     public int[] SunParts { get; } = new int[SunCascades];
     public double SunRecordMs { get; private set; }
 
-    private unsafe void DrawSunShadowNow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress)
+    private unsafe void DrawSunShadowNow(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress, Task<Recorder>[]? cascades)
     {
       SizeSun();
-      var d3d = _device.Device;
-      var workRtv = _sunRtvs.GetCPUDescriptorHandleForHeapStart();
-      var mapRtv = workRtv + (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
-      var dsv = _sunDsv.GetCPUDescriptorHandleForHeapStart();
       list.ResourceBarrierTransition(_sunMap!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
-      var draw = stackalloc float[DrawConstants];
-      var profiler = _device.Profiler;
-      for (int k = 0; k < SunCascades; k++)
+      if (cascades != null)
       {
-        list.OMSetRenderTargets(workRtv, dsv);
-        profiler?.Begin(list, "  sun: clear");
-        list.ClearRenderTargetView(workRtv, new Vortice.Mathematics.Color4(-100, 0, 0, 0));
-        list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
-        profiler?.End(list, "  sun: clear");
-        list.RSSetViewport(new Vortice.Mathematics.Viewport(SunWorkSize, SunWorkSize));
-        list.RSSetScissorRect(SunWorkSize, SunWorkSize);
-        list.SetGraphicsRootSignature(_rootSignature);
-        list.SetDescriptorHeaps(_textures.Heap);
-        list.SetGraphicsRootConstantBufferView(3, frameAddress);
-        list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
-        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-        for (int phase = 0; phase < 3; phase++)
+        Splice(list, cascades);
+        for (int k = 0; k < SunCascades; k++)
         {
-          string? mark = phase == 0 ? "  sun: map objects" : phase == 2 ? "  sun: cast" : null;
-          if (mark != null)
-          {
-            profiler?.Begin(list, mark, DrawCalls);
-          }
-          DrawSunPhase(list, sun, k, phase, draw);
-          if (phase != 0)
-          {
-            profiler?.End(list, phase == 1 ? "  sun: map objects" : "  sun: cast", DrawCalls);
-          }
+          SunTriangles[k] = cascades[k].Result.Triangles;
+          SunParts[k] = cascades[k].Result.Parts;
         }
-        profiler?.Begin(list, "  sun: convert", DrawCalls);
-        list.ResourceBarrierTransition(_sunWork!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
-        list.OMSetRenderTargets(mapRtv, null);
-        list.RSSetViewport(new Vortice.Mathematics.Viewport(k * SunMapSize, 0, SunMapSize, SunMapSize));
-        list.RSSetScissorRect(new Vortice.Mathematics.RectI(k * SunMapSize, 0, SunMapSize, SunMapSize));
-        list.SetGraphicsRootSignature(_lightSignature);
-        list.SetPipelineState(_sunConvertPipeline);
-        list.SetDescriptorHeaps(_gBufferSrvs);
-        list.SetGraphicsRootConstantBufferView(0, frameAddress);
-        list.SetGraphicsRootShaderResourceView(1, _lights.GPUVirtualAddress);
-        list.SetGraphicsRootDescriptorTable(2, _gBufferSrvs.GetGPUDescriptorHandleForHeapStart());
-        list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-        list.DrawInstanced(3, 1, 0, 0);
-        DrawCalls++;
-        list.ResourceBarrierTransition(_sunWork!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
-        profiler?.End(list, "  sun: convert", DrawCalls);
+      }
+      else
+      {
+        for (int k = 0; k < SunCascades; k++)
+        {
+          int kk = k;
+          var stats = Inline(list, (l, r) => DrawCascade(l, sun, frameAddress, kk, r));
+          SunTriangles[k] = stats.Triangles;
+          SunParts[k] = stats.Parts;
+        }
       }
       list.ResourceBarrierTransition(_sunMap!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
     }
 
+    // One cascade (any thread, any list: every state it needs set here; the map in RENDER_TARGET): the work target cleared,
+    // the three phases, the 2 x 2 mean into the cascade's quarter of the map. Its draws, triangles and parts counted.
+    private unsafe void DrawCascade(ID3D12GraphicsCommandList list, SunShadow sun, ulong frameAddress, int k, Recorder stats)
+    {
+      var d3d = _device.Device;
+      var workRtv = _sunRtvs.GetCPUDescriptorHandleForHeapStart();
+      var mapRtv = workRtv + (int)d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
+      var dsv = _sunDsv.GetCPUDescriptorHandleForHeapStart();
+      var profiler = _device.Profiler;
+      list.OMSetRenderTargets(workRtv, dsv);
+      int mark = profiler?.Open(list, "  sun: clear") ?? -1;
+      list.ClearRenderTargetView(workRtv, new Vortice.Mathematics.Color4(-100, 0, 0, 0));
+      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+      profiler?.Close(list, mark);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(SunWorkSize, SunWorkSize));
+      list.RSSetScissorRect(SunWorkSize, SunWorkSize);
+      list.SetGraphicsRootSignature(_rootSignature);
+      list.SetDescriptorHeaps(_textures.Heap);
+      list.SetGraphicsRootConstantBufferView(3, frameAddress);
+      list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      for (int phase = 0; phase < 3; phase++)
+      {
+        if (phase != 1)
+        {
+          mark = profiler?.Open(list, phase == 0 ? "  sun: map objects" : "  sun: cast", stats.Draws) ?? -1;
+        }
+        DrawSunPhase(list, sun, k, phase, stats);
+        if (phase != 0)
+        {
+          profiler?.Close(list, mark, stats.Draws);
+        }
+      }
+      mark = profiler?.Open(list, "  sun: convert", stats.Draws) ?? -1;
+      list.ResourceBarrierTransition(_sunWork!, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+      list.OMSetRenderTargets(mapRtv, null);
+      list.RSSetViewport(new Vortice.Mathematics.Viewport(k * SunMapSize, 0, SunMapSize, SunMapSize));
+      list.RSSetScissorRect(new Vortice.Mathematics.RectI(k * SunMapSize, 0, SunMapSize, SunMapSize));
+      list.SetGraphicsRootSignature(_lightSignature);
+      list.SetPipelineState(_sunConvertPipeline);
+      list.SetDescriptorHeaps(_gBufferSrvs);
+      list.SetGraphicsRootConstantBufferView(0, frameAddress);
+      list.SetGraphicsRootShaderResourceView(1, _lights.GPUVirtualAddress);
+      list.SetGraphicsRootDescriptorTable(2, _gBufferSrvs.GetGPUDescriptorHandleForHeapStart());
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      list.DrawInstanced(3, 1, 0, 0);
+      stats.Draws++;
+      list.ResourceBarrierTransition(_sunWork!, ResourceStates.PixelShaderResource, ResourceStates.RenderTarget);
+      profiler?.Close(list, mark, stats.Draws);
+    }
     // One phase of a cascade (the page's drawMeshes with castBox): 0 the map's objects' parts not blended (all but those
     // marked AlphaShadow), 1 those blended by their texture's alpha (alpha 1 without a texture), 2 the cast's parts that
     // aren't see-through. Of the map's objects only the parts whose sphere lies across the cascade's box on u and v and
     // within SunShadow.CasterReach of the camera (see InCascade).
-    private unsafe void DrawSunPhase(ID3D12GraphicsCommandList list, SunShadow sun, int k, int phase, float* draw)
+    // (Any thread: its draw calls, triangles and parts counted into the recorder's figures, its scratch the recorder's.)
+    private unsafe void DrawSunPhase(ID3D12GraphicsCommandList list, SunShadow sun, int k, int phase, Recorder stats)
     {
+      var draw = stackalloc float[DrawConstants];
       var box = sun.Boxes[k];
       int lastPipeline = -1;
       foreach (var instance in _instances)
@@ -3371,16 +3465,16 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         // The parts drawn: those of the phase; of a map object only those whose own sphere lies across the box and
         // within the caster reach (the page culls each mesh so).
         int drawn = 0;
-        if (_sunPartOn.Length < model.Parts.Length)
+        if (stats.PartOn.Length < model.Parts.Length)
         {
-          _sunPartOn = new bool[model.Parts.Length * 2];
+          stats.PartOn = new bool[model.Parts.Length * 2];
         }
         for (int i = 0; i < model.Parts.Length; i++)
         {
           var part = model.Parts[i];
           bool on = SunDrawn(part, phase) &&
                     (model.Actor || InCascade(sun, box, Vector3.Transform(part.Center, instance.World), part.Radius * scale, true));
-          _sunPartOn[i] = on;
+          stats.PartOn[i] = on;
           drawn += on ? 1 : 0;
         }
         if (drawn == 0)
@@ -3413,7 +3507,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         for (int i = 0; i < model.Parts.Length; i++)
         {
           var part = model.Parts[i];
-          if (!_sunPartOn[i])
+          if (!stats.PartOn[i])
           {
             continue;
           }
@@ -3421,11 +3515,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           draw[32] = part.Index;
           list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
           list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-          DrawCalls++;
+          stats.Draws++;
           if (phase < 2)
           {
-            SunTriangles[k] += part.Count / 3;
-            SunParts[k]++;
+            stats.Triangles += part.Count / 3;
+            stats.Parts++;
           }
         }
       }
@@ -3444,8 +3538,6 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       return !reach || !(Vector3.Distance(center, sun.Eye) - radius > sun.CasterReach);
     }
 
-    // DrawSunPhase's parts of the model at hand drawn or not (grown to the most parts a model has).
-    private bool[] _sunPartOn = new bool[64];
 
     private static bool SunDrawn(Part part, int phase) => phase == 2 ? !part.SeeThrough : part.AlphaShadow == (phase == 1);
 
@@ -3548,10 +3640,128 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
-    private unsafe void DrawPass(ID3D12GraphicsCommandList list, Pass pass)
+    /// <summary>
+    /// The heavy passes recorded into command lists of their own on worker threads (default; SPARKIV_D3D12_PARALLEL=0:
+    /// all on the calling thread into its list, as before), sent in the frame's order (see <see cref="Splice"/>). The same
+    /// commands in the same order either way, only the states each list sets for itself added.
+    /// </summary>
+    public bool ParallelRecording { get; set; } = Environment.GetEnvironmentVariable("SPARKIV_D3D12_PARALLEL") != "0";
+
+    // A command list recorded on a worker thread (or, without one, the figures of a pass drawn into the frame's list):
+    // its draw calls, the sun's map triangles and parts, its scratch, the worker's time and the profiler's name for it.
+    // Also the allocators the frame's list goes on with after a splice (List unused).
+    private sealed class Recorder
     {
+      public ID3D12CommandAllocator? Allocator;
+      public ID3D12GraphicsCommandList? List;
+      public int Draws;
+      public long Triangles;
+      public int Parts;
+      public bool[] PartOn = new bool[64];
+      public double Ms;
+      public string Name = "";
+    }
+
+    // Per frame slot (_paletteSlot: the GPU is done with a slot's frame before it comes round again, as for the other
+    // per-frame buffers: at most one frame is on the GPU while one is recorded) the recorders made so far, used again in
+    // order each frame.
+    private readonly List<Recorder>[] _recorders = Enumerable.Range(0, PaletteSlots).Select(_ => new List<Recorder>()).ToArray();
+    private int _recorderNext;
+
+    private void BeginRecorders() => _recorderNext = 0;
+
+    // The next recorder of this frame's slot, its allocator reset (on the calling thread).
+    private Recorder NextRecorder()
+    {
+      var slot = _recorders[_paletteSlot];
+      if (_recorderNext == slot.Count)
+      {
+        var allocator = _device.Device.CreateCommandAllocator(CommandListType.Direct);
+        var made = _device.Device.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
+        made.Close();
+        slot.Add(new Recorder { Allocator = allocator, List = made });
+      }
+      var r = slot[_recorderNext++];
+      r.Allocator!.Reset();
+      r.Draws = 0;
+      r.Triangles = 0;
+      r.Parts = 0;
+      return r;
+    }
+
+    // A command list opened here and recorded by body on a worker thread (which sets every state it needs: a list
+    // inherits none), then closed.
+    private Task<Recorder> Record(string name, Action<ID3D12GraphicsCommandList, Recorder> body)
+    {
+      var r = NextRecorder();
+      r.List!.Reset(r.Allocator, null);
+      r.Name = name;
+      return Task.Run(() =>
+      {
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        body(r.List!, r);
+        r.List!.Close();
+        r.Ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        return r;
+      });
+    }
+
+    /// <summary>
+    /// The frame's list closed and sent with the workers' lists after it (waited for, in their order), then opened again
+    /// on an allocator of this renderer's (a list may be reset as soon as it is sent): the caller goes on with the same
+    /// list object, which holds no state now. The workers' draws counted; their figures summed into the return.
+    /// </summary>
+    private Recorder Splice(ID3D12GraphicsCommandList list, IReadOnlyList<Task<Recorder>> parts)
+    {
+      var lists = new ID3D12CommandList[parts.Count + 1];
+      lists[0] = list;
+      var sum = _spliced;
+      sum.Draws = 0;
+      sum.Triangles = 0;
+      sum.Parts = 0;
+      var profiler = _device.Profiler;
+      for (int i = 0; i < parts.Count; i++)
+      {
+        var r = parts[i].Result;
+        lists[i + 1] = r.List!;
+        sum.Draws += r.Draws;
+        sum.Triangles += r.Triangles;
+        sum.Parts += r.Parts;
+        profiler?.Cpu(r.Name, r.Ms);
+      }
+      list.Close();
+      _device.Queue.ExecuteCommandLists(lists);
+      list.Reset(NextRecorder().Allocator, null);
+      DrawCalls += sum.Draws;
+      return sum;
+    }
+
+    private readonly Recorder _spliced = new Recorder();
+
+    // Scratch figures for a pass drawn into the frame's list (ParallelRecording off).
+    private readonly Recorder _inline = new Recorder();
+
+    // A pass drawn into the frame's list now (ParallelRecording off): its draws counted, its figures returned.
+    private Recorder Inline(ID3D12GraphicsCommandList list, Action<ID3D12GraphicsCommandList, Recorder> body)
+    {
+      var b = _inline;
+      b.Draws = 0;
+      b.Triangles = 0;
+      b.Parts = 0;
+      body(list, b);
+      DrawCalls += b.Draws;
+      return b;
+    }
+
+    // A pass's draws (any thread, any list with the main passes' states); how many. <paramref name="chunk"/> of
+    // <paramref name="chunks"/>: that share of the pass's sequence of visits (sweep, group, instance), so the chunks played
+    // one after the other draw exactly what the whole pass draws, in its order (each chunk sets its pipeline anew).
+    private unsafe int DrawPass(ID3D12GraphicsCommandList list, Pass pass, int chunk = 0, int chunks = 1)
+    {
+      int draws = 0;
       int lastPipeline = -1;
       var draw = stackalloc float[DrawConstants];
+      int count = _instances.Count;
       // The decals and the see-through parts in the page's order (ModelView.html ~3352-3380): first the dirt decals (and
       // the decals of a location model with dirt, dirtFirst) or the glowing see-through parts (glowFirst: gta_emissive*
       // of bucket 4/5, see-through, in a room with a multiplier over 0, outside gta_emissivenight), then the rest, each
@@ -3562,13 +3772,33 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       // Within each, the cast before the location, as the page's visible list (CutsceneView's PostVisible: the cast's
       // meshes, then the location's): a car's windscreen behind a toll booth's pane is drawn before the pane writes its
       // depth (et01_ba).
+      long firstVisit = ordered ? 0 : 2L * count, visits = 4L * count - firstVisit;
+      long from = firstVisit + visits * chunk / chunks, to = firstVisit + visits * (chunk + 1) / chunks;
       for (int sweep = ordered ? 0 : 1; sweep < 2; sweep++)
       for (int group = 0; group < 2; group++)
-      foreach (var instance in _instances)
+      for (int index = 0; index < count; index++)
       {
+        long visit = (sweep * 2L + group) * count + index;
+        if (visit < from || visit >= to)
+        {
+          continue;
+        }
+        var instance = _instances[index];
         if (instance == null || !instance.Visible || !instance.MainView || _models[instance.Model] is not Model model ||
-            model.Actor != (group == 0) ||
-            !model.Parts.Any(p => Drawn(p.Pass, pass) && (!ordered || First(p, instance, pass) == (sweep == 0))))
+            model.Actor != (group == 0))
+        {
+          continue;
+        }
+        bool any = false;
+        foreach (var p in model.Parts)
+        {
+          if (Drawn(p.Pass, pass) && (!ordered || First(p, instance, pass) == (sweep == 0)))
+          {
+            any = true;
+            break;
+          }
+        }
+        if (!any)
         {
           continue;
         }
@@ -3634,7 +3864,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
             }
             list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
             list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-            DrawCalls++;
+            draws++;
           }
           if (apart && !NoGlow)
           {
@@ -3646,10 +3876,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
             draw[33] = part.GlowStrong ? 0.0004f : -0.0004f;
             list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
             list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-            DrawCalls++;
+            draws++;
           }
         }
       }
+      return draws;
     }
 
     /// <summary>The see-through parts' glows drawn apart left out (for comparisons).</summary>
@@ -3698,6 +3929,17 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
 
+      // The meshes, into the frame's list (not recorded apart: from a bundle the 4-sample target came out a few pixels by 1
+      // different from run to run).
+      MirrorDrawCalls = DrawMirrorParts(list, eye, clipBelow, hazeReach, drawReach);
+      _device.Profiler?.End(list, "  water: mirror meshes", MirrorDrawCalls);
+    }
+
+    // The mirrored meshes (see DrawMirror); how many draws.
+    private unsafe int DrawMirrorParts(ID3D12GraphicsCommandList list, Vector3 eye, float clipBelow, float hazeReach, float drawReach)
+    {
+      int draws = 0;
+      bool reachOn = drawReach > 0 && float.IsFinite(drawReach);
       float farthest = MathF.Min(hazeReach > 0 ? hazeReach : float.PositiveInfinity, reachOn ? drawReach : float.PositiveInfinity);
       var draw = stackalloc float[DrawConstants];
       for (int phase = 0; phase < 2; phase++)
@@ -3757,11 +3999,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
             draw[35] = 0;
             list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
             list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-            MirrorDrawCalls++;
+            draws++;
           }
         }
       }
-      _device.Profiler?.End(list, "  water: mirror meshes", MirrorDrawCalls);
+      return draws;
     }
 
     /// <summary>A debug view of the solid and see-through passes (0 none; see the shader's Shade: 1 albedo, 2 normal, 3 AO, 4 light, 5 alpha, 6 vertex colour).</summary>
@@ -3780,14 +4022,13 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     // the haze (hazeReach) nor the shot's draw distance; then each smaller level halved from the one above. Called by
     // Draw with this frame's constants written (taken over into a slot of its own, the eye's height as the clip).
     private unsafe void DrawParabolic(ID3D12GraphicsCommandList list, Vector3 eye, Action<ID3D12GraphicsCommandList, CpuDescriptorHandle, int> sky,
-                                      float hazeReach, float drawReach)
+                                      float hazeReach, float drawReach, Task<Recorder>? objects)
     {
       var main = (float*)(_frameMapped + _paletteSlot * FrameSlotBytes);
       var frame = (float*)(_frameMapped + (2 * PaletteSlots + _paletteSlot) * FrameSlotBytes);
       Buffer.MemoryCopy(main, frame, FrameSlotBytes, FrameFloats * 4);
       frame[58] = 0;
       frame[59] = eye.Z;
-      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)((2 * PaletteSlots + _paletteSlot) * FrameSlotBytes);
       var rtv = _parabolicRtvs.GetCPUDescriptorHandleForHeapStart();
       uint rtvSize = _device.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
       var dsv = _parabolicDsv.GetCPUDescriptorHandleForHeapStart();
@@ -3796,7 +4037,41 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
       sky(list, rtv, (int)ParabolicSize);
 
-      list.OMSetRenderTargets(rtv, dsv);
+      if (objects != null)
+      {
+        Splice(list, new[] { objects });
+      }
+      else
+      {
+        SetupParabolic(list);
+        Inline(list, (l, r) => DrawParabolicParts(l, r, eye, hazeReach, drawReach));
+      }
+      // (After a splice the list holds no states: the map's again for the halving.)
+      SetupParabolic(list);
+      var draw = stackalloc float[DrawConstants];
+      // Each smaller level the mean of the one above (the page's generateMipmap; the game's own pass not derived).
+      list.SetPipelineState(_halvePipeline);
+      for (int level = 1; level < ParabolicLevels; level++)
+      {
+        list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, (uint)(level - 1));
+        uint size = ParabolicSize >> level;
+        list.OMSetRenderTargets(rtv + level * (int)rtvSize);
+        list.RSSetViewport(new Vortice.Mathematics.Viewport(size, size));
+        list.RSSetScissorRect((int)size, (int)size);
+        new Span<float>(draw, DrawConstants).Clear();
+        draw[32] = _parabolicLevelSlots[level - 1];
+        list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
+        list.DrawInstanced(3, 1, 0, 0);
+      }
+      list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, ParabolicLevels - 1);
+    }
+
+    // The mirrored surroundings' map's states into a list (this frame's or a worker's): its level 0 and depth, the main
+    // root signature with the map's frame constants (DrawParabolic's slot), the textures.
+    private void SetupParabolic(ID3D12GraphicsCommandList list)
+    {
+      ulong frameAddress = _frame.GPUVirtualAddress + (ulong)((2 * PaletteSlots + _paletteSlot) * FrameSlotBytes);
+      list.OMSetRenderTargets(_parabolicRtvs.GetCPUDescriptorHandleForHeapStart(), _parabolicDsv.GetCPUDescriptorHandleForHeapStart());
       list.RSSetViewport(new Vortice.Mathematics.Viewport(ParabolicSize, ParabolicSize));
       list.RSSetScissorRect((int)ParabolicSize, (int)ParabolicSize);
       list.SetGraphicsRootSignature(_rootSignature);
@@ -3804,6 +4079,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       list.SetGraphicsRootConstantBufferView(3, frameAddress);
       list.SetGraphicsRootDescriptorTable(1, _textures.Handle(0));
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+    }
+
+    // The map's objects drawn into the mirrored surroundings' map (any thread, any list with SetupParabolic's states; see
+    // DrawParabolic): the far versions' solid parts reaching above the camera, near enough and not too small.
+    private unsafe void DrawParabolicParts(ID3D12GraphicsCommandList list, Recorder stats, Vector3 eye, float hazeReach, float drawReach)
+    {
       list.SetPipelineState(_parabolicPipeline);
       bool reachOn = drawReach > 0 && float.IsFinite(drawReach);
       var draw = stackalloc float[DrawConstants];
@@ -3864,29 +4145,19 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           draw[35] = 0;
           list.SetGraphicsRoot32BitConstants(0, 16, draw + 20, 20);
           list.DrawIndexedInstanced(part.Count, 1, part.Start, 0, 0);
-          DrawCalls++;
+          stats.Draws++;
         }
       }
-      // Each smaller level the mean of the one above (the page's generateMipmap; the game's own pass not derived).
-      list.SetPipelineState(_halvePipeline);
-      for (int level = 1; level < ParabolicLevels; level++)
-      {
-        list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, (uint)(level - 1));
-        uint size = ParabolicSize >> level;
-        list.OMSetRenderTargets(rtv + level * (int)rtvSize);
-        list.RSSetViewport(new Vortice.Mathematics.Viewport(size, size));
-        list.RSSetScissorRect((int)size, (int)size);
-        new Span<float>(draw, DrawConstants).Clear();
-        draw[32] = _parabolicLevelSlots[level - 1];
-        list.SetGraphicsRoot32BitConstants(0, DrawConstants, draw, 0);
-        list.DrawInstanced(3, 1, 0, 0);
-      }
-      list.ResourceBarrierTransition(_parabolic, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource, ParabolicLevels - 1);
     }
 
     public void Dispose()
     {
       Clear();
+      foreach (var b in _recorders.SelectMany(s => s))
+      {
+        b.List?.Dispose();
+        b.Allocator?.Dispose();
+      }
       foreach (var p in _mirrorPipelines.Concat(_glowPipelines))
       {
         p?.Dispose();

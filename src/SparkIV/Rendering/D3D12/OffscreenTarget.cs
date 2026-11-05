@@ -63,6 +63,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       d3d.CreateRenderTargetView(_color, null, RenderTargetView);
       d3d.CreateDepthStencilView(_depth, null, DepthView);
       _allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
+      _allocator2 = d3d.CreateCommandAllocator(CommandListType.Direct);
       CommandList = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, _allocator, null);
       CommandList.Close();
     }
@@ -75,21 +76,38 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>The depth buffer itself (in DepthWrite between draws; the post effects read it).</summary>
     public ID3D12Resource DepthBuffer => _depth;
 
-    /// <summary>Opens the command list for a frame.</summary>
+    /// <summary>
+    /// Opens the command list for a frame (its allocator one of two, used again once the GPU is done with the frame
+    /// before last: at most one frame on the GPU while this one is recorded, as in the app's loop).
+    /// </summary>
     public ID3D12GraphicsCommandList Begin()
     {
-      _allocator.Reset();
-      CommandList.Reset(_allocator, null);
+      _slot = (_slot + 1) % 2;
+      _device.Wait(_marks[_slot]);
+      var allocator = _slot == 0 ? _allocator : _allocator2;
+      allocator.Reset();
+      CommandList.Reset(allocator, null);
       return CommandList;
     }
 
     /// <summary>Ends the frame without reading it back: sent, the GPU done (for timing).</summary>
     public void End()
     {
-      CommandList.Close();
-      _device.Queue.ExecuteCommandList(CommandList);
+      Submit();
       _device.WaitIdle();
     }
+
+    /// <summary>Ends the frame without waiting: sent, the GPU going on with it while the next is recorded; its fence mark.</summary>
+    public ulong Submit()
+    {
+      CommandList.Close();
+      _device.Queue.ExecuteCommandList(CommandList);
+      return _marks[_slot] = _device.Signal();
+    }
+
+    private readonly ID3D12CommandAllocator _allocator2;
+    private readonly ulong[] _marks = new ulong[2];
+    private int _slot;
 
     /// <summary>Ends the frame: the colour copied into the readback buffer, the GPU done, the picture saved as PNG.</summary>
     public unsafe void EndAndSave(string path)
@@ -132,6 +150,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       _device.WaitIdle();
       CommandList.Dispose();
       _allocator.Dispose();
+      _allocator2.Dispose();
       _rtvHeap.Dispose();
       _dsvHeap.Dispose();
       _readback.Dispose();
