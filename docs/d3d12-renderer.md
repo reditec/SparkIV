@@ -693,6 +693,25 @@ In f682.5 the game draws 74 lights, native drew 137; every game light has a nati
 - Open: what drops interior lamps from outside (f863); room 0 seen from room 3 (s3 f569.75); the game draws fewer of
   the cutscene's own lights than native's 8 (s3 f569.75: 3); it culls lamps outside the view (no visible effect).
 
+### et01_ba f1292.25 (+0.07 against the page, round 8)
+
+Native 3.25 (run 2026-11-05_13-00: 3.24), page 3.18; the signed mean is equal (+0.332 both against the game), the gap
+stays at 4 x 4 and 8 x 8 block means (0.067 / 0.054), so it is shapes, not grain. By 32-pixel tiles it lies in:
+- **The far bridge's suspender cables** (x 256-512, y 352-480, ~0.02 of the 0.066): thin lines at 500-540 m
+  (`mhb_cable04_bkn`, gta_spec `mh_bkn_cablewhite02`), darker and harder in native (grey sd 18.6, page 17.4, game 16.6).
+  The page draws its scene with 4 samples a pixel (gtaiv-pc.js ~1378-1392, `renderbufferStorageMultisample`), which
+  thins sub-pixel lines; the game draws without: `GTAIV.2.trace` call 3, CreateDevice `MultiSampleType =
+  D3DMULTISAMPLE_NONE`, no multisampled render target in calls 0-200000; its edges show stair steps as native's (the
+  man's head at (640-710, 270-330)). Native keeps one sample, as the game.
+- **A gap under the bridge** (x 480-560, y 500-545, ~0.009): game and page show far buildings, native showed the haze.
+  `D3D12PICK` (which now also prints the pixel's ray) finds the far city's `SuprLOD_Ks_01` / `_02` there at 1100-1200
+  m, beyond native's far plane of max(1000 m, draw distance x 2). The page's film far plane is max(sceneRadius x 8 +
+  100, backgroundReach x 2), backgroundReach = 1.8 x the largest |coordinate| of the location's meshes (ModelView.html
+  ~1037, ~3102). Ported: `CutsceneDrawing.FarClip` (the larger of both; player and cutgen; `D3D12FARNOREACH=1` the old
+  plane). et01_ba f1292.25 3.25 -> 3.24; the gap now shows the far buildings as game and page.
+- The rest spreads over the man in front and the edges (sub-pixel differences of thin geometry).
+Not changed: the cables' gap comes from the page's smoothing, which the game hasn't (accepted, not ported).
+
 Full run after round 7 (all 72): only f682.5 changed (-0.06), native mean 3.258. Above the page by more than 0.05:
 bc_3 s3 f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), et01_ba f1292.25 +0.07 (open).
 

@@ -426,7 +426,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public void SetLocation(string? key, CutsceneLocation? location, float drawDistance) => Order(() =>
     {
-      _far = Math.Max(1000f, drawDistance * 2);
+      _far = CutsceneDrawing.FarClip(location, drawDistance);
       _shownLocation = location != null ? key : null;
       if (location != null && (_skyTextures is not var (c, d) || !ReferenceEquals(c, location.Clouds) || !ReferenceEquals(d, location.CloudDetail)))
       {

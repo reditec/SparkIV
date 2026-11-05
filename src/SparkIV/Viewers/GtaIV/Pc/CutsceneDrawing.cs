@@ -18,6 +18,7 @@
 
 \**********************************************************************/
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -106,5 +107,50 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>A location's models and its objects to draw (all but those only for the mirrored surroundings' map).</summary>
     public static IEnumerable<LocationObject> DrawnObjects(CutsceneLocation location) => location.Objects.Where(o => !o.MirrorOnly);
+
+    /// <summary>When true, the far plane only from the draw distance (at least 1000 m), as before 2026-11-05. For comparisons.</summary>
+    public static bool FarClipWithoutReach { get; set; }
+
+    /// <summary>
+    /// The cutscene camera's far plane: max(1000 m, the .cut's draw distance x 2), and beyond the location as the page
+    /// keeps it (ModelView.html ~1037 and ~3102: backgroundReach = 1.8 x the largest |coordinate| of the location's
+    /// meshes in the scene's places, the film's far plane at least twice that). With 1000 m, et01_ba f1292.25 lost the
+    /// far city's SuprLOD_Ks_01 / _02 (1100-1200 m) through the gaps under the bridge, which the game and the page show.
+    /// </summary>
+    public static float FarClip(CutsceneLocation? location, float drawDistance)
+    {
+      float far = Math.Max(1000f, drawDistance * 2);
+      if (location == null || FarClipWithoutReach)
+      {
+        return far;
+      }
+      float reach = 0;
+      var modelReach = new Dictionary<(int, Matrix4x4), float>();
+      foreach (var o in location.Objects)
+      {
+        if (modelReach.TryGetValue((o.Model, o.Place), out float r))
+        {
+          reach = Math.Max(reach, r);
+          continue;
+        }
+        r = 0;
+        foreach (var mesh in location.Models[o.Model].Meshes)
+        {
+          var p = mesh.Positions;
+          if (p == null)
+          {
+            continue;
+          }
+          for (int i = 0; i + 2 < p.Length; i += 3)
+          {
+            var v = Vector3.Transform(new Vector3(p[i], p[i + 1], p[i + 2]), o.Place);
+            r = Math.Max(r, Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))));
+          }
+        }
+        modelReach[(o.Model, o.Place)] = r;
+        reach = Math.Max(reach, r);
+      }
+      return Math.Max(far, reach * 1.8f * 2);
+    }
   }
 }
