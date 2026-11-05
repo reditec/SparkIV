@@ -124,16 +124,56 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return far;
       }
-      float reach = 0;
-      var modelReach = new Dictionary<(int, Matrix4x4), float>();
-      foreach (var o in location.Objects)
+      return Math.Max(far, BackgroundReach(location) * 1.8f * 2);
+    }
+
+    /// <summary>
+    /// <see cref="FarClip"/> without working anything out: false (and the plane without the location's reach) while
+    /// <see cref="BackgroundReach"/> hasn't been worked out for the location yet (the render thread asks this; a loading
+    /// thread works it out).
+    /// </summary>
+    public static bool TryFarClip(CutsceneLocation? location, float drawDistance, out float far)
+    {
+      far = Math.Max(1000f, drawDistance * 2);
+      if (location == null || FarClipWithoutReach)
       {
-        if (modelReach.TryGetValue((o.Model, o.Place), out float r))
+        return true;
+      }
+      lock (s_reach)
+      {
+        if (!s_reach.TryGetValue(location, out var reach))
         {
-          reach = Math.Max(reach, r);
-          continue;
+          return false;
         }
-        r = 0;
+        far = Math.Max(far, reach.Value * 1.8f * 2);
+        return true;
+      }
+    }
+
+    // The locations' reach, once worked out (kept as long as the location is).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CutsceneLocation, System.Runtime.CompilerServices.StrongBox<float>> s_reach =
+      new System.Runtime.CompilerServices.ConditionalWeakTable<CutsceneLocation, System.Runtime.CompilerServices.StrongBox<float>>();
+
+    /// <summary>
+    /// The largest |coordinate| of the location's meshes in the scene's places (the page's backgroundReach / 1.8; every
+    /// vertex of every object: worked out once per location, the objects spread over the cores - the largest of all is
+    /// the same in any order). From any thread.
+    /// </summary>
+    public static float BackgroundReach(CutsceneLocation location)
+    {
+      lock (s_reach)
+      {
+        if (s_reach.TryGetValue(location, out var known))
+        {
+          return known.Value;
+        }
+      }
+      var objects = location.Objects;
+      var reaches = new float[objects.Count];
+      System.Threading.Tasks.Parallel.For(0, objects.Count, k =>
+      {
+        var o = objects[k];
+        float r = 0;
         foreach (var mesh in location.Models[o.Model].Meshes)
         {
           var p = mesh.Positions;
@@ -147,10 +187,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             r = Math.Max(r, Math.Max(Math.Abs(v.X), Math.Max(Math.Abs(v.Y), Math.Abs(v.Z))));
           }
         }
-        modelReach[(o.Model, o.Place)] = r;
+        reaches[k] = r;
+      });
+      float reach = 0;
+      foreach (float r in reaches)
+      {
         reach = Math.Max(reach, r);
       }
-      return Math.Max(far, reach * 1.8f * 2);
+      lock (s_reach)
+      {
+        s_reach.AddOrUpdate(location, new System.Runtime.CompilerServices.StrongBox<float>(reach));
+      }
+      return reach;
     }
   }
 }

@@ -2226,44 +2226,61 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     /// </summary>
     public PreparedModels Prepare(IReadOnlyList<ModelSource> sources)
     {
-      var d3d = _device.Device;
-      var models = new List<Model?>(sources.Count);
-      var uploads = new List<ID3D12Resource>();
-      long pending = 0;
-      var allocator = d3d.CreateCommandAllocator(CommandListType.Direct);
-      var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Direct, allocator, null);
-      void Send()
+      // The models spread over several threads (each its own copy list, sent when it holds FlushBytes), the order kept:
+      // model i is the source i's. Textures shared between them are made once (TextureCache), the copies all done
+      // before this returns. Below the render thread's priority.
+      var models = new Model?[sources.Count];
+      int workers = Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+      int chunk = (sources.Count + workers - 1) / Math.Max(1, workers);
+      System.Threading.Tasks.Parallel.For(0, workers, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = workers }, w =>
       {
-        list.Close();
-        _device.Queue.ExecuteCommandList(list);
-        _device.WaitIdle();
-        foreach (var upload in uploads)
+        int from = w * chunk, to = Math.Min(sources.Count, from + chunk);
+        if (from >= to)
         {
-          upload.Dispose();
+          return;
         }
-        uploads.Clear();
-        pending = 0;
-      }
-      try
-      {
-        foreach (var source in sources)
+        var thread = System.Threading.Thread.CurrentThread;
+        var priority = thread.Priority;
+        thread.Priority = System.Threading.ThreadPriority.BelowNormal;
+        var d3d = _device.Device;
+        var uploads = new List<ID3D12Resource>();
+        long pending = 0;
+        // On the copy queue: the uploads run beside the frames, not between their lists (D3D12Device.CopyQueue).
+        var allocator = d3d.CreateCommandAllocator(CommandListType.Copy);
+        var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Copy, allocator, null);
+        void Send()
         {
-          models.Add(Build(source, list, uploads, ref pending));
-          if (pending >= FlushBytes)
+          list.Close();
+          _device.CopyAndWait(list);
+          foreach (var upload in uploads)
           {
-            Send();
-            allocator.Reset();
-            list.Reset(allocator, null);
+            upload.Dispose();
           }
+          uploads.Clear();
+          pending = 0;
         }
-        Send();
-      }
-      finally
-      {
-        list.Dispose();
-        allocator.Dispose();
-      }
-      return new PreparedModels(models);
+        try
+        {
+          for (int i = from; i < to; i++)
+          {
+            models[i] = Build(sources[i], list, uploads, ref pending);
+            if (pending >= FlushBytes)
+            {
+              Send();
+              allocator.Reset();
+              list.Reset(allocator, null);
+            }
+          }
+          Send();
+        }
+        finally
+        {
+          list.Dispose();
+          allocator.Dispose();
+          thread.Priority = priority;
+        }
+      });
+      return new PreparedModels(models.ToList());
     }
 
     /// <summary>
@@ -2296,6 +2313,54 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
+    /// <summary>The device it draws with.</summary>
+    public D3D12Device Device => _device;
+
+    /// <summary>
+    /// A texture blob made on the GPU from any thread (a loading one: on the copy queue, waited for there); its number in
+    /// the texture heap (0: none), for <see cref="UseCoronaSprite"/> or <see cref="UseVolumeLookup"/> on the drawing thread.
+    /// </summary>
+    public int PrepareTexture(byte[]? raw)
+    {
+      if (raw == null)
+      {
+        return 0;
+      }
+      var d3d = _device.Device;
+      using var allocator = d3d.CreateCommandAllocator(CommandListType.Copy);
+      using var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Copy, allocator, null);
+      var uploads = new List<ID3D12Resource>();
+      int slot = _textures.Acquire(raw, list, uploads, out _);
+      list.Close();
+      _device.CopyAndWait(list);
+      foreach (var upload in uploads)
+      {
+        upload.Dispose();
+      }
+      return slot;
+    }
+
+    /// <summary>A prepared texture (PrepareTexture) as the coronas' sprite (the drawing thread; the one before let go once the GPU is past it).</summary>
+    public void UseCoronaSprite(int slot)
+    {
+      int old = _coronaSlot;
+      _coronaSlot = slot;
+      if (old != 0)
+      {
+        _device.Retire(() => _textures.Release(old));
+      }
+    }
+
+    /// <summary>A prepared texture (PrepareTexture) as the light volumes' lookup (the drawing thread; as UseCoronaSprite).</summary>
+    public void UseVolumeLookup(int slot)
+    {
+      int old = _volumeLookupSlot;
+      _volumeLookupSlot = slot;
+      if (old != 0)
+      {
+        _device.Retire(() => _textures.Release(old));
+      }
+    }
     /// <summary>The coronas left out (for comparisons).</summary>
     public bool NoCoronas { get; set; }
 
@@ -2315,10 +2380,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       return numbers;
     }
 
-    /// <summary>A group's models and their instances gone (the drawing thread; the GPU done with them first), their textures let go.</summary>
+    /// <summary>
+    /// A group's models and their instances gone (the drawing thread): no longer drawn from now on; their buffers and
+    /// textures freed once the GPU is past the frames that may still read them (D3D12Device.Retire: not waited for here).
+    /// </summary>
     public void RemoveGroup(int group)
     {
-      _device.WaitIdle();
       for (int i = 0; i < _instances.Count; i++)
       {
         if (_instances[i] is Instance instance && _models[instance.Model] is Model model && model.Group == group)
@@ -2326,13 +2393,18 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           _instances[i] = null;
         }
       }
+      var gone = new List<Model>();
       for (int i = 0; i < _models.Count; i++)
       {
         if (_models[i] is Model model && model.Group == group)
         {
-          Free(model);
+          gone.Add(model);
           _models[i] = null;
         }
+      }
+      if (gone.Count > 0)
+      {
+        _device.Retire(() => gone.ForEach(Free));
       }
     }
 
@@ -2681,7 +2753,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       upload.Unmap(0);
       list.ResourceBarrierTransition(buffer, ResourceStates.Common, ResourceStates.CopyDest);
       list.CopyBufferRegion(buffer, 0, upload, 0, bytes);
-      list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, state);
+      // (On the copy queue the buffer is left to decay to COMMON, which the direct queue promotes to any read state.)
+      if (list.CommandListType != CommandListType.Copy)
+      {
+        list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, state);
+      }
       return buffer;
     }
 
@@ -2723,6 +2799,8 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     public void Clear()
     {
       _device.WaitIdle();
+      // (What RemoveGroup retired, freed now while the texture cache is still there.)
+      _device.ReleaseRetiredNow();
       foreach (var model in _models)
       {
         if (model != null)
@@ -2755,6 +2833,9 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       LightsDrawn = 0;
       if (_instances.Count == 0)
       {
+        // Nothing to draw yet (the scene still loading): the targets the drawing will need made now, one kind a frame,
+        // not by the first frame that draws a location.
+        MakeTargetsAhead(width, height, depthTexture);
         return;
       }
       var profiler = _device.Profiler;
@@ -3033,6 +3114,27 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
     }
 
+    // One kind of target a call, made ahead while nothing is drawn: the G-buffer (with the decals' and the light's
+    // copies), the sun's shadow targets, the depth copies of the coronas and the light volumes.
+    private void MakeTargetsAhead(int width, int height, ID3D12Resource? depthTexture)
+    {
+      if (_gBuffer[0] == null || _gWidth != width || _gHeight != height)
+      {
+        SizeGBuffer(width, height);
+      }
+      else if (_sunMap == null)
+      {
+        SizeSun();
+      }
+      else if (depthTexture != null && (_solidDepth == null || _solidDepthWidth != width || _solidDepthHeight != height))
+      {
+        MakeDepthCopy(width, height, ref _solidDepth, ref _solidDepthWidth, ref _solidDepthHeight, _solidDepthSlot);
+      }
+      else if (depthTexture != null && (_fullDepth == null || _fullDepthWidth != width || _fullDepthHeight != height))
+      {
+        MakeDepthCopy(width, height, ref _fullDepth, ref _fullDepthWidth, ref _fullDepthHeight, _fullDepthSlot);
+      }
+    }
     // The depth (D32, DEPTH_WRITE) copied into _solidDepth (read as R32F by its number in the texture heap).
     private void KeepSolidDepth(ID3D12GraphicsCommandList list, ID3D12Resource depth, int width, int height) =>
       CopyDepth(list, depth, width, height, ref _solidDepth, ref _solidDepthWidth, ref _solidDepthHeight, _solidDepthSlot);
@@ -3041,37 +3143,39 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private void CopyDepth(ID3D12GraphicsCommandList list, ID3D12Resource depth, int width, int height,
                            ref ID3D12Resource? copy, ref int copyWidth, ref int copyHeight, int slot)
     {
-      var d3d = _device.Device;
       if (copy == null || copyWidth != width || copyHeight != height)
       {
-        if (copy != null)
-        {
-          _device.WaitIdle();
-          copy.Dispose();
-        }
-        copy = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
-          ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
-          ResourceStates.CopyDest, new ClearValue(Format.D32_Float, 1.0f, 0));
-        copyWidth = width;
-        copyHeight = height;
-        d3d.CreateShaderResourceView(copy, new ShaderResourceViewDescription
-        {
-          Format = Format.R32_Float,
-          ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-          Shader4ComponentMapping = ShaderComponentMapping.Default,
-          Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
-        }, _textures.CpuHandle(slot));
+        MakeDepthCopy(width, height, ref copy, ref copyWidth, ref copyHeight, slot);
       }
-      else
-      {
-        list.ResourceBarrierTransition(copy, ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource, ResourceStates.CopyDest);
-      }
+      list.ResourceBarrierTransition(copy!, ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource, ResourceStates.CopyDest);
       list.ResourceBarrierTransition(depth, ResourceStates.DepthWrite, ResourceStates.CopySource);
       list.CopyResource(copy, depth);
       list.ResourceBarrierTransition(depth, ResourceStates.CopySource, ResourceStates.DepthWrite);
       list.ResourceBarrierTransition(copy, ResourceStates.CopyDest, ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource);
     }
 
+    // A depth copy at the size (the one before freed, the GPU done with it first), left readable (as after a copy).
+    private void MakeDepthCopy(int width, int height, ref ID3D12Resource? copy, ref int copyWidth, ref int copyHeight, int slot)
+    {
+      var d3d = _device.Device;
+      if (copy != null)
+      {
+        _device.WaitIdle();
+        copy.Dispose();
+      }
+      copy = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+        ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource, new ClearValue(Format.D32_Float, 1.0f, 0));
+      copyWidth = width;
+      copyHeight = height;
+      d3d.CreateShaderResourceView(copy, new ShaderResourceViewDescription
+      {
+        Format = Format.R32_Float,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _textures.CpuHandle(slot));
+    }
     // The light volumes' unit meshes as GTAIV.exe makes them at its start (the page's gameLightVolumeMesh, gtaiv-pc.js
     // ~1563-1595; 0xABE3A0): a spot's (n 5, its lower four eighths, a fan at its rim), a point lamp's (n 4, all eight) as
     // triangle strips; and c213 (gDeferredVolumeRadiusScale) from n.

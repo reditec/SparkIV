@@ -24,7 +24,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
-using Microsoft.UI.Dispatching;
 using SparkIV.WinUI.Rendering.D3D12;
 
 namespace SparkIV.WinUI.Viewers.GtaIV.Pc
@@ -40,21 +39,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// </summary>
   public sealed class CutscenePlayer : IRenderScene, IDisposable
   {
-    // The sky (#112 4e): made on the render thread at its first frame; its cloud textures those of the location shown.
+    // The sky (#112 4e) and the water (4f): made on the render thread at its first frame (Update); the sky's cloud
+    // textures those of the location shown (made again only when their bytes change: every location has skydome.wtd's).
     private CutsceneSky? _sky;
+    private System.Threading.Tasks.Task<CutsceneSky>? _skyMade;
+    private System.Threading.Tasks.Task<CutsceneWater>? _waterMade;
     private (byte[]? Clouds, byte[]? Detail)? _skyTextures;
     private bool _skyTexturesNew;
+
+    private static bool SameBytes(byte[]? a, byte[]? b) => ReferenceEquals(a, b) || (a != null && b != null && a.AsSpan().SequenceEqual(b));
 
     public void DrawBackground(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
                                int width, int height, SceneView view)
     {
-      if (_lighting == null)
+      if (_lighting == null || _sky == null)
       {
         return;
       }
-      _sky ??= new CutsceneSky(device, ToneMapper.LightFormat);
       if (_skyTexturesNew && _skyTextures is var (clouds, detail))
       {
+        long started = GpuProfiler.Now;
         _skyTexturesNew = false;
         using var allocator = device.Device.CreateCommandAllocator(Vortice.Direct3D12.CommandListType.Direct);
         using var upload = device.Device.CreateCommandList<Vortice.Direct3D12.ID3D12GraphicsCommandList>(0, Vortice.Direct3D12.CommandListType.Direct, allocator, null);
@@ -67,11 +71,22 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           u.Dispose();
         }
+        device.Profiler?.CpuSince("  draw: sky textures upload", started);
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       // The clouds' Phase on from the page's start value by the section's time (the trace's per cutscene: not known here).
       float phase = CutsceneSky.CloudPhase(cycle, _time, false);
-      _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, SkyParams.From(cycle, _lighting.Hour, phase));
+      var sky = SkyParams.From(cycle, _lighting.Hour, phase);
+      // The water's simulations brought to the section's time every frame, also while the location isn't shown yet (they
+      // go on a step a frame instead of catching up seconds when the water first shows; CutsceneWater.Advance).
+      if (_water != null && _waterShown != null && _waterShown.Water.Count >= 4)
+      {
+        long started = GpuProfiler.Now;
+        _water.MakeTargets(width, height);
+        _water.Advance(list, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time, view.Eye, WaterExact);
+        device.Profiler?.CpuSince("  draw: water advance", started);
+      }
+      _sky.Draw(list, lightTarget, width, height, view.ViewProjection, view.Eye, sky);
     }
 
     // The sky into the mirrored surroundings' map (the page's drawSky toMap, ModelView.html ~3765-3766): without the near
@@ -89,19 +104,95 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _sky.Draw(list, target, size, size, view.ViewProjection, view.Eye, sky, toMap: true);
     }
 
-    // The water (#112 4f): made on the render thread; the location shown's water put on the GPU when it changes.
+    // The water: the location whose water is wanted, and the one whose water is on the GPU and shown (its quads made on
+    // another thread: CutsceneWater.Prepare, then Use here). Prepared waters by location (at most the shown and the next).
     private CutsceneWater? _water;
     private CutsceneLocation? _waterLocation;
-    private bool _waterNew;
+    private CutsceneLocation? _waterShown;
+    private readonly Dictionary<CutsceneLocation, System.Threading.Tasks.Task<CutsceneWater.Prepared>> _waterPrepared =
+      new Dictionary<CutsceneLocation, System.Threading.Tasks.Task<CutsceneWater.Prepared>>();
     // The mission script's wind (null: the page's breeze) and the swell's centre, scene-local (null: round the camera).
     private float? _waterWind;
     private Vector3? _swellAt;
+
+    // The water exact (a still frame: the simulations a pure function of the time) only when stopped by the user, not
+    // when the section ran out while the scene plays on (its next section follows: computing the swell afresh there
+    // took 115 ms at bc_3's section ends).
+    private bool WaterExact => !_playing && !_ranOut;
+    private bool _ranOut;
+
+    // A location's water made on the GPU on another thread (below the render thread), once.
+    private void PrepareWater(CutsceneLocation location)
+    {
+      if (_water == null || location.Water.Count < 4 || _waterPrepared.ContainsKey(location))
+      {
+        return;
+      }
+      // (At most the wanted one and the next: older ones let go once made.)
+      foreach (var old in _waterPrepared.Keys.Where(k => !ReferenceEquals(k, _waterLocation)).ToList())
+      {
+        var dropped = _waterPrepared[old];
+        _waterPrepared.Remove(old);
+        var device = _water.Device;
+        dropped.ContinueWith(d =>
+        {
+          if (d.IsCompletedSuccessfully)
+          {
+            device.Retire(d.Result.Dispose);
+          }
+        });
+      }
+      var water = _water;
+      _waterPrepared[location] = System.Threading.Tasks.Task.Run(() =>
+      {
+        var thread = System.Threading.Thread.CurrentThread;
+        var priority = thread.Priority;
+        thread.Priority = System.Threading.ThreadPriority.BelowNormal;
+        try
+        {
+          return water.Prepare(location);
+        }
+        finally
+        {
+          thread.Priority = priority;
+        }
+      });
+    }
+
+    // The wanted water shown once it is made (the render thread, each frame); the prepared ones no longer wanted let go.
+    private void ShowWater()
+    {
+      if (_water == null || _waterLocation == null || ReferenceEquals(_waterLocation, _waterShown))
+      {
+        return;
+      }
+      if (_waterLocation.Water.Count < 4)
+      {
+        _waterShown = _waterLocation;
+        return;
+      }
+      PrepareWater(_waterLocation);
+      if (!_waterPrepared.TryGetValue(_waterLocation, out var task) || !task.IsCompleted)
+      {
+        return;
+      }
+      if (task.IsCompletedSuccessfully)
+      {
+        _water.Use(task.Result);
+      }
+      else
+      {
+        D3D12Device.Log("water not made: " + task.Exception?.GetBaseException().Message);
+      }
+      _waterPrepared.Remove(_waterLocation);
+      _waterShown = _waterLocation;
+    }
 
     /// <summary>
     /// The water as the mission script leaves it (the page's "water" message): the wind it forces (null: none), and the
     /// point the sea's swell keeps round (the mission's marker, scene-local; null: the camera).
     /// </summary>
-    public void SetWater(float? wind, Vector3? swellAt) => Order(() =>
+    public void SetWater(float? wind, Vector3? swellAt) => Order("  order: set water", () =>
     {
       _waterWind = wind;
       _swellAt = swellAt;
@@ -111,25 +202,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                                Vortice.Direct3D12.CpuDescriptorHandle depth, int width, int height, SceneView view,
                                Vortice.Direct3D12.ID3D12Resource? depthBuffer)
     {
-      if (_lighting == null || _waterLocation == null || _waterLocation.Water.Count < 4)
+      if (_lighting == null || _water == null || _waterShown == null || _waterShown.Water.Count < 4)
       {
         return;
-      }
-      _water ??= new CutsceneWater(device, ToneMapper.LightFormat, PanelSwapChainFormats.Depth);
-      if (_waterNew)
-      {
-        _waterNew = false;
-        using var allocator = device.Device.CreateCommandAllocator(Vortice.Direct3D12.CommandListType.Direct);
-        using var upload = device.Device.CreateCommandList<Vortice.Direct3D12.ID3D12GraphicsCommandList>(0, Vortice.Direct3D12.CommandListType.Direct, allocator, null);
-        var uploads = new List<Vortice.Direct3D12.ID3D12Resource>();
-        _water.SetWater(_waterLocation, upload, uploads);
-        upload.Close();
-        device.Queue.ExecuteCommandList(upload);
-        device.WaitIdle();
-        foreach (var u in uploads)
-        {
-          u.Dispose();
-        }
       }
       var cycle = _lighting.CycleAt(view.Eye, view.ViewProjection);
       var sky = SkyParams.From(cycle, _lighting.Hour, CutsceneSky.CloudPhase(cycle, _time, false));
@@ -154,21 +229,31 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
         _water.EndMirror(list);
       }
-      // (Its simulation warms up and catches up over the first frames by itself; exact while still: the water a pure
-      // function of the section's time, while playing a small nudge back of the sync held.)
+      // (Its simulations brought to the time by DrawBackground's Advance already; exact only when stopped by the user.)
       _water.Draw(list, lightTarget, depth, width, height, view.ViewProjection, view.Eye, view.Light, WaterParams.From(cycle, _lighting.Hour, sky, _waterWind, _swellAt), _time,
-                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null, exact: !view.Playing, depthBuffer: depthBuffer);
+                  _renderer is { SunShadowDrawn: true } r ? r.SunShadowMap : null, exact: WaterExact, depthBuffer: depthBuffer);
     }
-
     public void Dispose()
     {
+      // (Made on another thread: waited for, then let go.)
+      try
+      {
+        _sky ??= _skyMade?.GetAwaiter().GetResult();
+        _water ??= _waterMade?.GetAwaiter().GetResult();
+      }
+      catch (Exception)
+      {
+        // Not made: nothing to let go.
+      }
       _sky?.Dispose();
       _sky = null;
       _water?.Dispose();
       _water = null;
     }
-    private readonly DispatcherQueue _dispatcher;
-    private readonly ConcurrentQueue<Action> _orders = new ConcurrentQueue<Action>();
+    // Runs an action on the UI thread (the app: its DispatcherQueue; cutgen: at once).
+    private readonly Action<Action> _tell;
+    // The orders for the render thread, each with the profiler's name for it.
+    private readonly ConcurrentQueue<(string What, Action Run)> _orders = new ConcurrentQueue<(string, Action)>();
 
     /// <summary>The frame shown changed (whole frames), and whether it plays on.</summary>
     public Action<int, bool>? FrameChanged { get; set; }
@@ -186,6 +271,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private MeshRenderer? _renderer;
     private readonly Dictionary<CutActor, int[]> _castInstances = new Dictionary<CutActor, int[]>();
     private float _far = 1000;
+    private float _drawDistance;
 
     // Models go onto the GPU on a thread of their own, one load at a time (the drawing goes on meanwhile): the cast in
     // group 1, each location (by its origin's key, as CutsceneView keeps them) in a group of its own.
@@ -383,14 +469,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return true;
     }
 
-    public CutscenePlayer(DispatcherQueue dispatcher)
+    /// <summary><paramref name="tell"/> runs an action on the UI thread (the callbacks: FrameChanged, Loaded, ...).</summary>
+    public CutscenePlayer(Action<Action> tell)
     {
-      _dispatcher = dispatcher;
+      _tell = tell;
+      // The drawing code compiled ahead, not by the first frame that draws a location.
+      JitWarmUp.Start(typeof(MeshRenderer), typeof(ToneMapper), typeof(TextureCache), typeof(CutscenePlayer), typeof(CutsceneWater), typeof(CutsceneSky),
+                      typeof(CutsceneLights), typeof(CutscenePose), typeof(CutsceneLighting), typeof(CutsceneSunShadow));
     }
 
-    private void Order(Action order) => _orders.Enqueue(order);
+    private void Order(Action order) => _orders.Enqueue(("  order: other", order));
 
-    private void Tell(Action action) => _dispatcher.TryEnqueue(() => action());
+    private void Order(string what, Action order) => _orders.Enqueue((what, order));
+
+    private void Tell(Action action) => _tell(action);
 
     /// <summary>Every actor of the scene (its models put on the GPU in the background; shown while a section has it).</summary>
     public void SetCast(IReadOnlyList<CutActor> actors)
@@ -424,11 +516,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// The location shown, by its origin's key (null: none), and how far the camera sees (its far plane). One not on the
     /// GPU yet is put there in the background; the one shown so far stays until it is there.
     /// </summary>
-    public void SetLocation(string? key, CutsceneLocation? location, float drawDistance) => Order(() =>
+    public void SetLocation(string? key, CutsceneLocation? location, float drawDistance) => Order("  order: set location", () =>
     {
-      _far = CutsceneDrawing.FarClip(location, drawDistance);
+      // The far plane with the location's reach once a loading thread has worked it out (LoadLocation; until then, while
+      // the location isn't shown either, without it).
+      _drawDistance = drawDistance;
+      CutsceneDrawing.TryFarClip(location, drawDistance, out _far);
       _shownLocation = location != null ? key : null;
-      if (location != null && (_skyTextures is not var (c, d) || !ReferenceEquals(c, location.Clouds) || !ReferenceEquals(d, location.CloudDetail)))
+      if (location != null && (_skyTextures is not var (c, d) || !SameBytes(c, location.Clouds) || !SameBytes(d, location.CloudDetail)))
       {
         _skyTextures = (location.Clouds, location.CloudDetail);
         _skyTexturesNew = true;
@@ -436,7 +531,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (location != null && !ReferenceEquals(location, _waterLocation))
       {
         _waterLocation = location;
-        _waterNew = true;
+        PrepareWater(location);
       }
       if (key != null && location != null && !_locations.ContainsKey(key))
       {
@@ -446,16 +541,17 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     });
 
     /// <summary>A location put on the GPU ahead, not shown (the next section's at another origin).</summary>
-    public void PrepareLocation(string key, CutsceneLocation location) => Order(() =>
+    public void PrepareLocation(string key, CutsceneLocation location) => Order("  order: prepare location", () =>
     {
       if (!_locations.ContainsKey(key))
       {
         LoadLocation(key, location);
       }
+      PrepareWater(location);
     });
 
     /// <summary>A location no longer wanted: off the GPU (or not put there, if it is still loading).</summary>
-    public void DropLocation(string key) => Order(() =>
+    public void DropLocation(string key) => Order("  order: drop location", () =>
     {
       if (_locations.Remove(key, out var group) && group.Registered && _renderer != null)
       {
@@ -475,6 +571,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         var prepared = renderer.Prepare(models.Select(m => ModelSource.Shown(m, false, baked: true)).ToList());
         var lamps = new CutsceneLights(location);
+        // The far plane's reach (every vertex: here, not on the render thread).
+        CutsceneDrawing.BackgroundReach(location);
+        // The coronas' sprite and the light volumes' lookup (the same for every location): made here, once.
+        int corona = !_coronaSpriteSet && location.Corona != null ? renderer.PrepareTexture(location.Corona) : 0;
+        int volume = !_volumeLookupSet && location.LightVolume != null ? renderer.PrepareTexture(location.LightVolume) : 0;
         return () =>
         {
           // Dropped (or another load for the key) meanwhile: not wanted any more.
@@ -489,19 +590,23 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                                                                      mirrored: o.Far, mainView: !o.MirrorOnly)).ToArray();
           group.Lights = lamps;
           // The coronas' sprite (coronas.wtd's, the same for every location): once.
-          if (!_coronaSpriteSet && location.Corona != null)
+          if (corona != 0)
           {
-            renderer.SetCoronaSprite(location.Corona);
+            renderer.UseCoronaSprite(corona);
             _coronaSpriteSet = true;
           }
           // The light volumes' lookup texture (lights_occluders.wtd's, the same for every location): once.
-          if (!_volumeLookupSet && location.LightVolume != null)
+          if (volume != 0)
           {
-            renderer.SetVolumeLookup(location.LightVolume);
+            renderer.UseVolumeLookup(volume);
             _volumeLookupSet = true;
           }
           group.Reach =CutsceneSunShadow.LocationReach(location, m => renderer.Bounds(numbers[m]));
           group.Registered = true;
+          if (key == _shownLocation)
+          {
+            _far = CutsceneDrawing.FarClip(location, _drawDistance);
+          }
           ShowLocations();
           LogScene(renderer, "location " + key + ": " + objects.Count + " objects");
         };
@@ -524,11 +629,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         await _loading.WaitAsync();
         var watch = Stopwatch.StartNew();
+        // Below the render thread: a load never takes time from a frame (restored: a thread of the pool).
+        var thread = System.Threading.Thread.CurrentThread;
+        var priority = thread.Priority;
+        thread.Priority = System.Threading.ThreadPriority.BelowNormal;
         try
         {
           var then = prepare(renderer);
           long ms = watch.ElapsedMilliseconds;
-          Order(() =>
+          Order("  order: loaded (register)", () =>
           {
             then();
             _pendingLoads--;
@@ -546,6 +655,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         }
         finally
         {
+          thread.Priority = priority;
           _loading.Release();
         }
       });
@@ -597,7 +707,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                            CutsceneMessages.SectionFade? fade = null, IReadOnlyList<float[]>? drawSteps = null)
     {
       var poses = motions.ToDictionary(m => m.Actor, m => new CutscenePose(m));
-      Order(() =>
+      Order("  order: set section", () =>
       {
         _poses = poses;
         // The free view fitted to the first section's cast (the page: "if (list.length && first) fit()").
@@ -622,6 +732,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>To a frame of the section (as the page's seek).</summary>
     public void Seek(int frame) => Order(() =>
     {
+      _ranOut = false;
       _time = Math.Clamp(frame, 0, _frames - 1) / _fps;
       _reportedFrame = -1;
     });
@@ -651,12 +762,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     });
 
     /// <summary>The light of the time cycle at the clock (null: a plain light, as without a location).</summary>
-    public void SetLighting(CutsceneLighting? lighting) => Order(() => _lighting = lighting);
+    public void SetLighting(CutsceneLighting? lighting) => Order("  order: set lighting", () => _lighting = lighting);
 
     private CutsceneLighting? _lighting;
 
     private void StartPlaying(bool on)
     {
+      _ranOut = false;
       if (on && _time * _fps >= _frames - 1)
       {
         _time = 0;
@@ -688,16 +800,34 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (_renderer == null)
       {
         _renderer = renderer;
+        // The sky and the water made on another thread (their shaders compiled, their pipelines made: ~100 ms), taken
+        // once ready; the water's noise and base come with its first frames.
+        var device = renderer.Device;
+        _skyMade = System.Threading.Tasks.Task.Run(() => new CutsceneSky(device, ToneMapper.LightFormat));
+        _waterMade = System.Threading.Tasks.Task.Run(() => new CutsceneWater(device, ToneMapper.LightFormat, PanelSwapChainFormats.Depth));
         foreach (var waiting in _waiting)
         {
           waiting();
         }
         _waiting.Clear();
       }
+      // (Profiling: each order's time as a CPU stage of its name.)
+      var profiler = renderer.Profiler;
       while (_orders.TryDequeue(out var order))
       {
-        order();
+        long started = profiler != null ? GpuProfiler.Now : 0;
+        order.Run();
+        profiler?.CpuSince(order.What, started);
       }
+      if (_sky == null && _skyMade is { IsCompletedSuccessfully: true })
+      {
+        _sky = _skyMade.Result;
+      }
+      if (_water == null && _waterMade is { IsCompletedSuccessfully: true })
+      {
+        _water = _waterMade.Result;
+      }
+      ShowWater();
       // The clock, as the page's tick: on by the time passed, stopping at the section's end.
       if (_playing)
       {
@@ -710,6 +840,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         {
           _time = length;
           _playing = false;
+          _ranOut = true;
           _reportedFrame = -1;
         }
       }
@@ -723,7 +854,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
 
       // (Profiling: the update's parts as CPU stages.)
-      var profiler = renderer.Profiler;
       long stage = profiler != null ? GpuProfiler.Now : 0;
       foreach (var (actor, pose) in _poses)
       {

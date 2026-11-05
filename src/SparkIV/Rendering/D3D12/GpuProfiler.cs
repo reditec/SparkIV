@@ -193,9 +193,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
       }
       _current = -1;
       _frameCount++;
+      _lastCpu = new double[_cpuNames.Count];
       for (int i = 0; i < _cpuNames.Count; i++)
       {
         _cpu[i].Add(_cpuFrame[i]);
+        _lastCpu[i] = _cpuFrame[i];
         _cpuFrame[i] = 0;
       }
       CpuFrames++;
@@ -364,12 +366,34 @@ namespace SparkIV.WinUI.Rendering.D3D12
             _draws[n].Add(draws[n]);
           }
         }
+        _lastGpu = gpu;
         GpuFrames++;
         slot.Sent = false;
         slot.Mark = 0;
       }
     }
 
+    // The last frame read: its GPU ms per pass name, and the last frame sent: its CPU stages.
+    private double[] _lastGpu = Array.Empty<double>();
+    private double[] _lastCpu = Array.Empty<double>();
+
+    /// <summary>
+    /// The last frame read and the last sent, in a line: the GPU total, then the costliest <paramref name="top"/> passes
+    /// (GPU ms) and CPU stages (ms, not counts) - to see what a long frame spent its time on.
+    /// </summary>
+    public string LastFrame(int top)
+    {
+      var inv = CultureInfo.InvariantCulture;
+      int frame = _nameIndex.TryGetValue(FrameName, out int f) ? f : -1;
+      var gpu = _lastGpu.Select((ms, n) => (Name: _names[n], Ms: ms)).Where(x => x.Name != FrameName && x.Ms > 0).OrderByDescending(x => x.Ms).Take(top);
+      var cpu = _lastCpu.Select((ms, i) => (Name: _cpuNames[i], Ms: ms, Count: _isCount[i])).Where(x => !x.Count && x.Ms > 0).OrderByDescending(x => x.Ms).Take(top);
+      return string.Format(inv, "GPU {0:0.0} ms [{1}] CPU [{2}]", frame >= 0 && frame < _lastGpu.Length ? _lastGpu[frame] : 0,
+        string.Join(", ", gpu.Select(x => x.Name.Trim() + " " + x.Ms.ToString("0.0", inv))),
+        string.Join(", ", cpu.Select(x => x.Name.Trim() + " " + x.Ms.ToString("0.0", inv))));
+    }
+
+    /// <summary>The last frame read's GPU total (ms; 0 before any).</summary>
+    public double LastGpuMs => _nameIndex.TryGetValue(FrameName, out int f) && f < _lastGpu.Length ? _lastGpu[f] : 0;
     /// <summary>Waits for the GPU and reads every frame sent (at the end of a bench).</summary>
     public void Flush()
     {

@@ -883,6 +883,76 @@ recorded. Expected in the app at 60 Hz: the intro pipelined (CPU ~4 ms + GPU ~14
 2 refreshes of latency (before: 30 fps once over); bc_3 and bc_1 serial, 60 fps, 1 refresh of latency. Still on the
 render thread in the intro: the water's mirror meshes (1.0 ms) and waiting for the solid pass's workers (0.8 ms).
 
+## Section and location changes without long frames (2026-11-05)
+
+The app held 60 fps but for single long frames (120-420 ms) at some section changes (SparkIV-d3d12.log, 17:05 to
+17:08). Now no frame over 33 ms at any section or location change of the intro or bc_3.
+
+**Reproduced offline:** cutgen's `D3D12PLAY=1` (`tests/visual/werkzeug/cutgen/Play.cs`) plays the whole cutscene
+through `CutscenePlayer`, the class the app uses, offscreen at 1920 x 1080. It drives the player as `CutsceneView`
+does:
+- the cast;
+- the location of each section's origin, and the next one's prepared ahead;
+- the time cycle's light anew each game minute;
+- the water;
+- a clock of 1/60 s per frame, each frame waited for.
+
+Per frame it records the render thread's time (update to submit) and the GPU's. Frames over `D3D12PLAYLIMIT` (33 ms)
+are listed with their costliest passes and CPU stages (`GpuProfiler.LastFrame`), and the worst frame within 3 s of each
+section change is reported. The player is now free of WinUI for this:
+- it takes an `Action<Action>` for the UI thread instead of a `DispatcherQueue`;
+- `IRenderScene` and `SceneView` moved to `RenderScene.cs`;
+- `OrbitCamera.WalkKey` takes a virtual-key code.
+
+`scene update` is broken down by the player's orders (`order: set location`, `prepare location`, `drop location`,
+`loaded (register)`, `set section`, `set lighting`, `set water`) and the drawing's own steps (`draw: sky textures
+upload`, `draw: water advance`).
+
+**Causes found and fixes:**
+
+| Cause (measured) | Fix |
+|---|---|
+| The water's 20 000-step warmed-up base, 2 000 steps a list: 10 frames of ~140 ms GPU when the water first showed | The base is written to a disk cache (`%LOCALAPPDATA%\SparkIV\D3D12\water-base-<key>.bin`, keyed by the adapter, the shader and the warm-up's numbers), read instead of the steps. Without the cache, while playing at most 48 steps a frame (~3 ms). A capture, which always warms up itself, compares what it made with the cache and logs it ("water base made again: the same as the cache"). `SPARKIV_D3D12_WATERCACHE=0`: no cache. |
+| The water simulated only once the location was drawn: the swell caught up the section's seconds at once (frame 179 of bc_3: 113 ms; intro section 2: 230 ms with the upload) | `CutsceneWater.Advance` from `DrawBackground` every frame from the section's start, also while the location isn't shown yet: a step a frame. `Draw` leaves what Advance did that frame. |
+| The water exact (a still frame) at a section's end while the scene plays on: the swell recomputed from flat, 115 ms (bc_3, last frame of sections 2 and 3) | Exact only when stopped by the user (`_ranOut`). |
+| The water's quads uploaded on the render thread with `WaitIdle` (20-42 ms) | `CutsceneWater.Prepare` on another thread, on the copy queue; `Use` swaps them in on the render thread, the old ones retired. |
+| `WaitIdle` in `SetCoronaSprite` while the next location's uploads ran on the direct queue (530 ms) | Uploads on a **copy queue** (`D3D12Device.CopyQueue`, `CopyAndWait`): `MeshRenderer.Prepare`, the water's quads and the sprites. Copy lists leave what they copy into in COMMON, which the direct queue promotes to any read state. The corona sprite and volume lookup are made on the loading thread (`PrepareTexture`, `UseCoronaSprite`, `UseVolumeLookup`). |
+| `RemoveGroup` (drop location): `WaitIdle` and freeing thousands of buffers and textures on the render thread (73-262 ms) | `D3D12Device.Retire`: freed once the GPU is past the frames that may use them, on a thread below normal priority. `ReleaseRetired` is called each frame (`PanelSwapChain.Begin`, `OffscreenTarget.Begin`); `ReleaseRetiredNow` before the renderer goes. |
+| `FarClip` walked every vertex of the location on the render thread (13-34 ms) | `CutsceneDrawing.BackgroundReach`, cached per location and worked out on the loading thread (`Parallel.For` over the objects). `TryFarClip` on the render thread; the exact plane is set when the location is registered, before it shows. |
+| The first frame drawing a location compiled the drawing code (recording 50 ms, workers 12 ms each) and made the targets (G-buffer, sun cascades, depth copies, mirror) | `JitWarmUp` compiles the renderer's, the player's and the water's methods on a background thread at the player's start. `MeshRenderer.MakeTargetsAhead` makes one kind of target per frame while nothing is drawn yet; `CutsceneWater.MakeTargets` does the same for the water. The sky and the water (shader compiles) are made on another thread. |
+| A location's GPU prepare took 2 s on one thread | `MeshRenderer.Prepare` spreads the models over up to 4 threads (each its own copy list); `TextureCache` makes textures outside its lock (a slot is reserved first). Loading threads run at BelowNormal; the render thread at normal. |
+
+Also, while the view draws, `GCSettings.LatencyMode` is `SustainedLowLatency` (no blocking full collections where they
+can be avoided; restored on Dispose). Sky textures are made again only when their bytes change: every location has
+skydome.wtd's.
+
+**Prefetch:** the next section is prepared while the current one plays:
+- `CutsceneView.NativeSectionOf` makes its motions and camera on another thread;
+- `PrepareLocation` puts the next origin's location on the GPU, with its lamps (`CutsceneLights`), the far plane's reach,
+  its water's quads and the sprites;
+- at the change the render thread only swaps prepared objects in: `set section` 0.0 ms, `set location` ≤ 2 ms.
+
+A seek to another section loads on demand as before. At most the shown and the next location and water are kept.
+
+**Measured** (cutgen `D3D12PLAY=1`, Release, 1920 x 1080, RTX 2060; worst frame within 3 s of each change, CPU = render
+thread update to submit, GPU = the frame's list):
+
+| Change | Before: worst frame (cause) | After |
+|---|---|---|
+| intro s1 (start, location) | 96 ms CPU (first frame) | 30 ms CPU (first frame: lights list 9 ms, camera/light 7 ms, recording 8 ms) |
+| intro: the harbour first drawn (s2) | 239 ms CPU / 360 ms GPU (water upload, swell catch-up), then 10 frames of 140 ms (base), then 533 ms (`loaded`, WaitIdle behind uploads) | ≤ 20.6 ms (frame 9: the water's targets and the cached base made) |
+| intro s3 (location) | 268 ms CPU (drop location) | 1.4 ms CPU / 4.7 ms GPU |
+| intro s4 (location) | 121 ms CPU (drop 73 ms, set location 34 ms) | 9.0 ms CPU / 6.6 ms GPU |
+| intro s5, s6 | 15.0 / 16.8 ms GPU | 15.1 / 13.7 ms GPU (unchanged: no loading) |
+| bc_3 s1 (start, location) | 140 ms CPU / 282 ms GPU, then 10 x 140 ms GPU | 31 ms CPU (first frame), 21.6 ms (frame 14: the water's targets and cached base made); the first frame drawing the harbour under 20 ms |
+| bc_3 s2, s3 ends | 115 ms (exact swell) | 1.5 ms CPU / 8.4 ms GPU |
+| whole run, frames over 33 ms | intro 14, bc_3 13 | intro 0, bc_3 0 (over 20 ms: 2 each, both in the first 15 frames) |
+
+Without the water cache (first run on a machine, bc_3): the base warms over the first ~420 frames at ~4 ms GPU each, and
+no frame is over 33 ms (worst 31.5 ms, the first frame drawing the harbour, measured before the targets were made ahead). Pictures are byte-identical to before on all
+8 references checked (bc_3 s3 f357.25, s1 f292.5; intro s4 f420.5, s3 f49.5; bc_1 s1 f144, f940; et01_aa s3 f49.75;
+et01_ba f468). The debug layer reports no new kinds of message (the copy queue's textures are made in COMMON).
+
 ## Next steps (#112)
 
 4. **Port the page's logic**, game-specific parts in their own module (as `gtaiv-pc.js` now): camera and animation

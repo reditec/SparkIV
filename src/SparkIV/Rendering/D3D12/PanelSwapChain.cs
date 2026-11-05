@@ -162,6 +162,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
       _device.Wait(_beforeLastMark);
       profiler?.CpuSince("wait for the buffer's fence", start);
       ReadGpuTime(index);
+      // What was retired and the GPU is done with, freed (D3D12Device.Retire).
+      _device.ReleaseRetired();
       _allocators[index].Reset();
       CommandList.Reset(_allocators[index], null);
       CommandList.EndQuery(_timeHeap, QueryType.Timestamp, (uint)(index * 2));

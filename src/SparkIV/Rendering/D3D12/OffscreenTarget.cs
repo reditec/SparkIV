@@ -84,6 +84,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
     {
       _slot = (_slot + 1) % 2;
       _device.Wait(_marks[_slot]);
+      _device.ReleaseRetired();
       var allocator = _slot == 0 ? _allocator : _allocator2;
       allocator.Reset();
       CommandList.Reset(allocator, null);

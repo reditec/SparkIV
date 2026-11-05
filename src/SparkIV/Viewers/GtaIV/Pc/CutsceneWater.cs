@@ -779,6 +779,9 @@ float4 PSWater(VsOut i) : SV_Target
     /// <summary>The water level (the most frequent corner height, to 0.1 m, scene-local), or null without water.</summary>
     public float? Level => _level;
 
+    /// <summary>The device it draws with.</summary>
+    public D3D12Device Device => _device;
+
     // Whether Draw runs the wave texture's simulation (water quads, outside, a water level, waves, the noise made).
     private bool SimActive => _quadIndexCount > 0 && _quadVertices != null && _outdoors && _level.HasValue && _waves && _noise != null;
 
@@ -827,24 +830,86 @@ float4 PSWater(VsOut i) : SV_Target
         _quadVertices = null;
         _quadIndices = null;
       }
-      _quadIndexCount = 0;
-      _boxes.Clear();
-      _level = null;
-      _outdoors = location.Outdoors;
-      _waves = location.WaterSurface != null;   // the page's waterWaves (the texture itself is never sampled)
-      _waterZ = location.WaterOriginZ;
-      _swellStarted = false;
-      _swellM = -1;
-      Array.Clear(_height);
-      Array.Clear(_speed);
-      _maskX0 = _maskY0 = int.MinValue;
-      // The playback starts again from the base (which, as the noise, stays: the same for every location).
-      _simN = -1;
+      Take(MakeQuads(location, list, uploads));
+      if (_noise == null && _waves)
+      {
+        _noise = MakeNoise(list, uploads);
+      }
+    }
 
+    /// <summary>A location's water made on the GPU ahead (see <see cref="Prepare"/>), taken by <see cref="Use"/>.</summary>
+    public sealed class Prepared : IDisposable
+    {
+      /// <summary>Its buffers freed (one never used; the GPU done with it).</summary>
+      public void Dispose()
+      {
+        Vertices?.Dispose();
+        Indices?.Dispose();
+        Vertices = Indices = null;
+      }
+
+      internal ID3D12Resource? Vertices, Indices;
+      internal VertexBufferView VertexView;
+      internal IndexBufferView IndexView;
+      internal uint IndexCount;
+      internal List<(float X0, float Y0, float X1, float Y1)> Boxes = new List<(float, float, float, float)>();
+      internal float? Level;
+      internal bool Outdoors, Waves;
+      internal float WaterZ;
+    }
+
+    /// <summary>
+    /// A location's water quads made on the GPU from any thread (a loading one: copied on the copy queue and waited for
+    /// there), for <see cref="Use"/> on the drawing thread: nothing is waited for when the location is shown.
+    /// </summary>
+    public Prepared Prepare(CutsceneLocation location)
+    {
+      var d3d = _device.Device;
+      using var allocator = d3d.CreateCommandAllocator(CommandListType.Copy);
+      using var list = d3d.CreateCommandList<ID3D12GraphicsCommandList>(0, CommandListType.Copy, allocator, null);
+      var uploads = new List<ID3D12Resource>();
+      var prepared = MakeQuads(location, list, uploads);
+      list.Close();
+      _device.CopyAndWait(list);
+      foreach (var u in uploads)
+      {
+        u.Dispose();
+      }
+      return prepared;
+    }
+
+    /// <summary>
+    /// The drawing thread: a prepared water shown from now on (the simulations started afresh, as by SetWater); the
+    /// quads before freed once the GPU is past them (D3D12Device.Retire, not waited for).
+    /// </summary>
+    public void Use(Prepared water)
+    {
+      var oldVertices = _quadVertices;
+      var oldIndices = _quadIndices;
+      if (oldVertices != null || oldIndices != null)
+      {
+        _device.Retire(() =>
+        {
+          oldVertices?.Dispose();
+          oldIndices?.Dispose();
+        });
+      }
+      Take(water);
+    }
+
+    // The quads' buffers (copies recorded into the list) and the water's figures.
+    private Prepared MakeQuads(CutsceneLocation location, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
+    {
+      var made = new Prepared
+      {
+        Outdoors = location.Outdoors,
+        Waves = location.WaterSurface != null,   // the page's waterWaves (the texture itself is never sampled)
+        WaterZ = location.WaterOriginZ,
+      };
       var water = location.Water;
       if (water.Count < 4)
       {
-        return;
+        return made;
       }
       int quads = water.Count / 4;
       var vertices = new float[quads * 4 * QuadVertexFloats];
@@ -869,7 +934,7 @@ float4 PSWater(VsOut i) : SV_Target
           x1 = Math.Max(x1, p.X);
           y1 = Math.Max(y1, p.Y);
         }
-        _boxes.Add((x0, y0, x1, y1));
+        made.Boxes.Add((x0, y0, x1, y1));
         // The page's (q, q+1, q+2, q+1, q+3, q+2).
         uint b = (uint)(q * 4);
         indices[q * 6] = b;
@@ -879,21 +944,40 @@ float4 PSWater(VsOut i) : SV_Target
         indices[q * 6 + 4] = b + 3;
         indices[q * 6 + 5] = b + 2;
       }
-      _quadVertices = Upload(vertices, list, uploads, out ulong vertexBytes);
-      _quadIndices = Upload(indices, list, uploads, out ulong indexBytes);
-      _quadVertexView = new VertexBufferView(_quadVertices.GPUVirtualAddress, (uint)vertexBytes, QuadVertexFloats * 4);
-      _quadIndexView = new IndexBufferView(_quadIndices.GPUVirtualAddress, (uint)indexBytes, Format.R32_UInt);
-      _quadIndexCount = (uint)indices.Length;
-
+      made.Vertices = Upload(vertices, list, uploads, out ulong vertexBytes);
+      made.Indices = Upload(indices, list, uploads, out ulong indexBytes);
+      made.VertexView = new VertexBufferView(made.Vertices.GPUVirtualAddress, (uint)vertexBytes, QuadVertexFloats * 4);
+      made.IndexView = new IndexBufferView(made.Indices.GPUVirtualAddress, (uint)indexBytes, Format.R32_UInt);
+      made.IndexCount = (uint)indices.Length;
       // The page's waterLevel: the most frequent corner height rounded to 0.1 m (the first such on a tie).
-      _level = water.Take(quads * 4).GroupBy(p => MathF.Round(p.Z * 10) / 10).OrderByDescending(g => g.Count()).First().Key;
-
-      if (_noise == null && _waves)
-      {
-        _noise = MakeNoise(list, uploads);
-      }
+      made.Level = water.Take(quads * 4).GroupBy(p => MathF.Round(p.Z * 10) / 10).OrderByDescending(g => g.Count()).First().Key;
+      return made;
     }
 
+    // A made water taken (the drawing thread): its quads and figures, the simulations started afresh (the wave noise and
+    // the warmed-up base stay: the same for every location).
+    private void Take(Prepared water)
+    {
+      _quadVertices = water.Vertices;
+      _quadIndices = water.Indices;
+      _quadVertexView = water.VertexView;
+      _quadIndexView = water.IndexView;
+      _quadIndexCount = water.IndexCount;
+      _boxes.Clear();
+      _boxes.AddRange(water.Boxes);
+      _level = water.Level;
+      _outdoors = water.Outdoors;
+      _waves = water.Waves;
+      _waterZ = water.WaterZ;
+      _swellStarted = false;
+      _swellM = -1;
+      Array.Clear(_height);
+      Array.Clear(_speed);
+      _maskX0 = _maskY0 = int.MinValue;
+      // The playback starts again from the base (which, as the noise, stays: the same for every location).
+      _simN = -1;
+      _advanced = null;
+    }
     // The wave step's noise: 1024 x 1024 random bytes (the page's Math.random; seeded here), read nearest, wrapped.
     private unsafe ID3D12Resource MakeNoise(ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
     {
@@ -943,7 +1027,11 @@ float4 PSWater(VsOut i) : SV_Target
       upload.Unmap(0);
       list.ResourceBarrierTransition(buffer, ResourceStates.Common, ResourceStates.CopyDest);
       list.CopyBufferRegion(buffer, 0, upload, 0, bytes);
-      list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, ResourceStates.VertexAndConstantBuffer | ResourceStates.IndexBuffer);
+      // (On the copy queue left to decay to COMMON: the direct queue promotes it.)
+      if (list.CommandListType != CommandListType.Copy)
+      {
+        list.ResourceBarrierTransition(buffer, ResourceStates.CopyDest, ResourceStates.VertexAndConstantBuffer | ResourceStates.IndexBuffer);
+      }
       return buffer;
     }
 
@@ -954,29 +1042,15 @@ float4 PSWater(VsOut i) : SV_Target
     // step's noise shift by its index. Continued step by step where it can (the same as computed afresh), else the
     // base restored and stepped again; at most StepsPerList steps per list (the rest in the lists after). Not exact
     // (while playing): a small step back is held, and a run past the cap goes on instead of starting again.
-    private unsafe void Simulate(ID3D12GraphicsCommandList list, WaterParams p, double seconds, bool exact)
+    private unsafe void Simulate(ID3D12GraphicsCommandList list, WaterParams p, double seconds, bool exact, int budget = StepsPerList)
     {
       if (!_baseReady && !_simCleared)
       {
-        for (int k = 0; k < 2; k++)
-        {
-          if (_simState[k] != ResourceStates.RenderTarget)
-          {
-            list.ResourceBarrierTransition(_sim[k], _simState[k], ResourceStates.RenderTarget);
-            _simState[k] = ResourceStates.RenderTarget;
-          }
-          list.ClearRenderTargetView(_rtvHeap.GetCPUDescriptorHandleForHeapStart() + k * (int)_rtvSize,
-                                     new Vortice.Mathematics.Color4(128 / 255f, 128 / 255f, 128 / 255f, 128 / 255f));
-          list.ResourceBarrierTransition(_sim[k], ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
-          _simState[k] = ResourceStates.PixelShaderResource;
-        }
-        _simCurrent = 0;
-        _simCleared = true;
+        ClearSims(list);
       }
       list.RSSetViewport(new Vortice.Mathematics.Viewport(SimSize, SimSize));
       list.RSSetScissorRect(SimSize, SimSize);
       list.SetPipelineState(_stepPipeline);
-      int budget = StepsPerList;
       if (!_baseReady)
       {
         int steps = Math.Min(_warmUpLeft, budget);
@@ -991,6 +1065,7 @@ float4 PSWater(VsOut i) : SV_Target
           return;
         }
         CopySimToBase(list);
+        SaveBase(list);
         _baseReady = true;
         _simN = 0;
         _simStart = 0;
@@ -1034,6 +1109,213 @@ float4 PSWater(VsOut i) : SV_Target
       _simN += todo;
     }
 
+    // Both states cleared to 128 (the page's start), left PIXEL_SHADER_RESOURCE.
+    private void ClearSims(ID3D12GraphicsCommandList list)
+    {
+      for (int k = 0; k < 2; k++)
+      {
+        if (_simState[k] != ResourceStates.RenderTarget)
+        {
+          list.ResourceBarrierTransition(_sim[k], _simState[k], ResourceStates.RenderTarget);
+          _simState[k] = ResourceStates.RenderTarget;
+        }
+        list.ClearRenderTargetView(_rtvHeap.GetCPUDescriptorHandleForHeapStart() + k * (int)_rtvSize,
+                                   new Vortice.Mathematics.Color4(128 / 255f, 128 / 255f, 128 / 255f, 128 / 255f));
+        list.ResourceBarrierTransition(_sim[k], ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
+        _simState[k] = ResourceStates.PixelShaderResource;
+      }
+      _simCurrent = 0;
+      _simCleared = true;
+    }
+
+    // ---- Ahead of the drawing (the app's player) ----
+
+    // While playing, at most this many of the base's warm-up steps a frame (about 3 ms on an RTX 2060), so no frame waits
+    // on the 20000; the playback's steps (one a frame) not limited further. Drawn by a capture (exact) as before.
+    private const int PlayingWarmUpSteps = 48;
+
+    // The section's time and exactness the simulations were last brought to by Advance (Draw then leaves them).
+    private (double Seconds, bool Exact)? _advanced;
+
+    /// <summary>
+    /// The simulations brought to <paramref name="seconds"/> of the section ahead of the drawing (the drawing thread,
+    /// into the frame's list, every frame from the section's start - also while the location isn't shown yet - so they
+    /// go on a step a frame instead of catching up seconds at once when the water first shows): the wave noise made on
+    /// first use, the warmed-up base read from the disk cache or warmed up (while playing <c>PlayingWarmUpSteps</c> a
+    /// frame), the wave texture's steps, the swell. The state at a time is the same as Draw alone makes it.
+    /// </summary>
+    public void Advance(ID3D12GraphicsCommandList list, WaterParams p, double seconds, Vector3 eye, bool exact)
+    {
+      PollBaseCache();
+      if (_quadIndexCount == 0 || _quadVertices == null)
+      {
+        return;
+      }
+      if (_waves && _noise == null)
+      {
+        var uploads = new List<ID3D12Resource>();
+        _noise = MakeNoise(list, uploads);
+        _device.Retire(() => uploads.ForEach(u => u.Dispose()));
+      }
+      if (!_baseReady && !_baseTried)
+      {
+        LoadBase(list);
+      }
+      var profiler = _device.Profiler;
+      list.SetGraphicsRootSignature(_rootSignature);
+      list.SetDescriptorHeaps(_srvHeap);
+      list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+      if (SimActive)
+      {
+        profiler?.Begin(list, "water: sim");
+        Simulate(list, p, seconds, exact, exact ? StepsPerList : PlayingWarmUpSteps);
+        profiler?.End(list, "water: sim");
+      }
+      if (_outdoors && _level.HasValue)
+      {
+        Swell(p, eye, seconds, exact);
+      }
+      _advanced = (seconds, exact);
+    }
+
+    // The warmed-up base on disk (it is the same for every location and every run: seeded noise, fixed steps): read
+    // instead of the 20000 steps, written once made. Keyed by the adapter, the shader and the warm-up's numbers.
+    // SPARKIV_D3D12_WATERCACHE=0: neither.
+    private static readonly bool s_baseCacheOn = Environment.GetEnvironmentVariable("SPARKIV_D3D12_WATERCACHE") != "0";
+    private bool _baseTried;
+    private ID3D12Resource? _baseReadback;
+    private ulong _baseReadbackMark;
+
+    private string BaseCachePath()
+    {
+      var key = System.Text.Encoding.UTF8.GetBytes(string.Join("|", _device.AdapterName, Shader, SimSize, WarmUpSteps, WarmUpKick, WarmUpStep, WarmSeed, NoiseSeed));
+      string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(key)).Substring(0, 16).ToLowerInvariant();
+      return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SparkIV", "D3D12", "water-base-" + hash + ".bin");
+    }
+
+    // The base from the cache into the list (made ready at once), when there.
+    private unsafe void LoadBase(ID3D12GraphicsCommandList list)
+    {
+      _baseTried = true;
+      if (!s_baseCacheOn)
+      {
+        return;
+      }
+      byte[] bytes;
+      try
+      {
+        string path = BaseCachePath();
+        if (!System.IO.File.Exists(path))
+        {
+          return;
+        }
+        bytes = System.IO.File.ReadAllBytes(path);
+      }
+      catch (Exception)
+      {
+        return;
+      }
+      const int pitch = SimSize * 4;
+      if (bytes.Length != pitch * SimSize)
+      {
+        return;
+      }
+      var upload = _device.Device.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None,
+                                                          ResourceDescription.Buffer((ulong)bytes.Length), ResourceStates.GenericRead);
+      void* mapped;
+      upload.Map(0, null, &mapped).CheckError();
+      fixed (byte* source = bytes)
+      {
+        Buffer.MemoryCopy(source, mapped, bytes.Length, bytes.Length);
+      }
+      upload.Unmap(0);
+      if (_baseState != ResourceStates.CopyDest)
+      {
+        list.ResourceBarrierTransition(_simBase, _baseState, ResourceStates.CopyDest);
+      }
+      var footprint = new PlacedSubresourceFootPrint { Offset = 0, Footprint = new SubresourceFootPrint(SimFormat, SimSize, SimSize, 1, pitch) };
+      list.CopyTextureRegion(new TextureCopyLocation(_simBase, 0), 0, 0, 0, new TextureCopyLocation(upload, footprint), null);
+      list.ResourceBarrierTransition(_simBase, ResourceStates.CopyDest, ResourceStates.CopySource);
+      _baseState = ResourceStates.CopySource;
+      _device.Retire(upload.Dispose);
+      if (!_simCleared)
+      {
+        ClearSims(list);
+      }
+      _warmUpLeft = 0;
+      _baseReady = true;
+      _simN = -1;
+    }
+
+    // The base just made copied for the cache (read once the GPU is done: PollBaseCache).
+    private void SaveBase(ID3D12GraphicsCommandList list)
+    {
+      if (!s_baseCacheOn || _baseReadback != null)
+      {
+        return;
+      }
+      const int pitch = SimSize * 4;
+      _baseReadback = _device.Device.CreateCommittedResource(new HeapProperties(HeapType.Readback), HeapFlags.None,
+                                                             ResourceDescription.Buffer((ulong)pitch * SimSize), ResourceStates.CopyDest);
+      var footprint = new PlacedSubresourceFootPrint { Offset = 0, Footprint = new SubresourceFootPrint(SimFormat, SimSize, SimSize, 1, pitch) };
+      list.CopyTextureRegion(new TextureCopyLocation(_baseReadback, footprint), 0, 0, 0, new TextureCopyLocation(_simBase, 0), null);
+      _baseReadbackMark = 0;
+    }
+
+    // At the next call (the list with the copy sent by then): a mark; once the GPU is past it, the file written (another thread).
+    private unsafe void PollBaseCache()
+    {
+      if (_baseReadback == null)
+      {
+        return;
+      }
+      if (_baseReadbackMark == 0)
+      {
+        _baseReadbackMark = _device.Signal();
+        return;
+      }
+      if (!_device.IsDone(_baseReadbackMark))
+      {
+        return;
+      }
+      var readback = _baseReadback;
+      _baseReadback = null;
+      const int length = SimSize * 4 * SimSize;
+      var bytes = new byte[length];
+      void* mapped;
+      readback.Map(0, null, &mapped).CheckError();
+      fixed (byte* target = bytes)
+      {
+        Buffer.MemoryCopy(mapped, target, length, length);
+      }
+      readback.Unmap(0);
+      readback.Dispose();
+      string path = BaseCachePath();
+      System.Threading.Tasks.Task.Run(() =>
+      {
+        try
+        {
+          System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+          // (Made again with a cache there - by a capture, which always warms up itself: checked against it.)
+          if (System.IO.File.Exists(path))
+          {
+            bool same = System.IO.File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes);
+            D3D12Device.Log("water base made again: " + (same ? "the same as the cache" : "DIFFERENT from the cache, written anew"));
+            if (same)
+            {
+              return;
+            }
+          }
+          string temp = path + ".tmp";
+          System.IO.File.WriteAllBytes(temp, bytes);
+          System.IO.File.Move(temp, path, true);
+        }
+        catch (Exception ex)
+        {
+          D3D12Device.Log("water base cache not written: " + ex.Message);
+        }
+      });
+    }
     // The latest state into the base (both states stay PIXEL_SHADER_RESOURCE between steps, the base COPY_SOURCE).
     private void CopySimToBase(ID3D12GraphicsCommandList list)
     {
@@ -1284,6 +1566,57 @@ float4 PSWater(VsOut i) : SV_Target
       int mw = Math.Max(1, width >> 1), mh = Math.Max(1, height >> 1);
       var rtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
       var dsv = _mirrorDsv.GetCPUDescriptorHandleForHeapStart();
+      SizeMirror(mw, mh);
+      list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 0));
+      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
+      return (rtv, dsv, mw, mh);
+    }
+
+    /// <summary>
+    /// The mirror's and the depth copy's targets made for a picture of this size ahead (the drawing thread, while the
+    /// water isn't drawn yet), not by the first frame that draws the water.
+    /// </summary>
+    public void MakeTargets(int width, int height)
+    {
+      SizeMirror(Math.Max(1, width >> 1), Math.Max(1, height >> 1));
+      if (_outdoors)
+      {
+        SizeBehind(width, height);
+      }
+    }
+
+    // The scene's depth copy at the size (read as R32F, slot 5; left readable).
+    private void SizeBehind(int width, int height)
+    {
+      if (_behind != null && _behindWidth == width && _behindHeight == height)
+      {
+        return;
+      }
+      var d3d = _device.Device;
+      if (_behind != null)
+      {
+        _device.WaitIdle();
+        _behind.Dispose();
+      }
+      _behind = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
+        ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
+        ResourceStates.PixelShaderResource, new ClearValue(Format.D32_Float, 1.0f, 0));
+      _behindWidth = width;
+      _behindHeight = height;
+      d3d.CreateShaderResourceView(_behind, new ShaderResourceViewDescription
+      {
+        Format = Format.R32_Float,
+        ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
+        Shader4ComponentMapping = ShaderComponentMapping.Default,
+        Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
+      }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 5 * (int)_srvSize);
+    }
+
+    // The mirror's targets at the size (mw x mh).
+    private void SizeMirror(int mw, int mh)
+    {
+      var rtv = _rtvHeap.GetCPUDescriptorHandleForHeapStart() + 2 * (int)_rtvSize;
+      var dsv = _mirrorDsv.GetCPUDescriptorHandleForHeapStart();
       if (_mirror == null || _mirrorWidth != mw || _mirrorHeight != mh)
       {
         if (_mirror != null)
@@ -1310,9 +1643,6 @@ float4 PSWater(VsOut i) : SV_Target
         d3d.CreateDepthStencilView(_mirrorDepth, null, dsv);
         d3d.CreateShaderResourceView(_mirror, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 4 * (int)_srvSize);
       }
-      list.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 0));
-      list.ClearDepthStencilView(dsv, ClearFlags.Depth, 1.0f, 0);
-      return (rtv, dsv, mw, mh);
     }
 
     /// <summary>The mirror drawn: its samples resolved into the texture the water reads, shown by the next <see cref="Draw"/>.</summary>
@@ -1359,31 +1689,8 @@ float4 PSWater(VsOut i) : SV_Target
       bool behindOn = false;
       if (depthBuffer != null && _outdoors && Environment.GetEnvironmentVariable("D3D12NOWATERBEHIND") != "1")
       {
-        var d3d = _device.Device;
-        if (_behind == null || _behindWidth != width || _behindHeight != height)
-        {
-          if (_behind != null)
-          {
-            _device.WaitIdle();
-            _behind.Dispose();
-          }
-          _behind = d3d.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None,
-            ResourceDescription.Texture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, 1, 0, ResourceFlags.AllowDepthStencil),
-            ResourceStates.CopyDest, new ClearValue(Format.D32_Float, 1.0f, 0));
-          _behindWidth = width;
-          _behindHeight = height;
-          d3d.CreateShaderResourceView(_behind, new ShaderResourceViewDescription
-          {
-            Format = Format.R32_Float,
-            ViewDimension = Vortice.Direct3D12.ShaderResourceViewDimension.Texture2D,
-            Shader4ComponentMapping = ShaderComponentMapping.Default,
-            Texture2D = new Texture2DShaderResourceView { MipLevels = 1 },
-          }, _srvHeap.GetCPUDescriptorHandleForHeapStart() + 5 * (int)_srvSize);
-        }
-        else
-        {
-          list.ResourceBarrierTransition(_behind, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
-        }
+        SizeBehind(width, height);
+        list.ResourceBarrierTransition(_behind!, ResourceStates.PixelShaderResource, ResourceStates.CopyDest);
         list.ResourceBarrierTransition(depthBuffer, ResourceStates.DepthWrite, ResourceStates.CopySource);
         list.CopyResource(_behind, depthBuffer);
         list.ResourceBarrierTransition(depthBuffer, ResourceStates.CopySource, ResourceStates.DepthWrite);
@@ -1395,7 +1702,11 @@ float4 PSWater(VsOut i) : SV_Target
       list.SetGraphicsRootSignature(_rootSignature);
       list.SetDescriptorHeaps(_srvHeap);
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-      if (SimActive)
+      PollBaseCache();
+      // (Brought there by Advance this frame already: not again.)
+      bool advanced = _advanced is { } done && done.Seconds == seconds && done.Exact == exact;
+      _advanced = null;
+      if (SimActive && !advanced)
       {
         profiler?.End(list, "water: draw");
         profiler?.Begin(list, "water: sim");
@@ -1412,7 +1723,10 @@ float4 PSWater(VsOut i) : SV_Target
       float level = _level ?? 0;
       if (seaOn)
       {
-        Swell(p, eye, seconds, exact);
+        if (!advanced)
+        {
+          Swell(p, eye, seconds, exact);
+        }
         if (_swellX0 != _maskX0 || _swellY0 != _maskY0)
         {
           MakeMask(_swellX0, _swellY0);

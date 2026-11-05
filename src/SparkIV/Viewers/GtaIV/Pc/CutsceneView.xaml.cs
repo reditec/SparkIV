@@ -285,7 +285,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Native.Visibility = Visibility.Visible;
       try
       {
-        _player = new CutscenePlayer(DispatcherQueue)
+        _player = new CutscenePlayer(action => DispatcherQueue.TryEnqueue(() => action()))
         {
           FrameChanged = OnFrame,
           FpsMeasured = OnFps,
@@ -453,7 +453,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _shiftDown = KeyIsDown(Windows.System.VirtualKey.Shift);
       bool combined = KeyIsDown(Windows.System.VirtualKey.Control) || KeyIsDown(Windows.System.VirtualKey.Menu) ||
                       KeyIsDown(Windows.System.VirtualKey.LeftWindows) || KeyIsDown(Windows.System.VirtualKey.RightWindows);
-      if (combined || OrbitCamera.WalkKey(e.Key) == null)
+      if (combined || OrbitCamera.WalkKey((int)e.Key) == null)
       {
         SendWalk();
         return;
@@ -497,7 +497,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       SendWalk();
     }
 
-    private void SendWalk() => _player?.Walk(_held.Select(k => OrbitCamera.WalkKey(k)!.Value), _shiftDown);
+    private void SendWalk() => _player?.Walk(_held.Select(k => OrbitCamera.WalkKey((int)k)!.Value), _shiftDown);
 
     /// <summary>The motions and camera of a section for the player, made once on another thread (as SectionDataOf).</summary>
     private readonly Dictionary<int, System.Threading.Tasks.Task<(List<CutsceneMessages.CastMotion> Motions, CutsceneCamera? Camera)>> _nativeSections =

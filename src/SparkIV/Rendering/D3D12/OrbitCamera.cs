@@ -191,15 +191,16 @@ namespace SparkIV.WinUI.Rendering.D3D12
       Distance = Math.Max(Math.Max(Math.Min(0.02f, r * 0.02f), r * 0.002f), Math.Min(r * 50, Distance * MathF.Pow(1.15f, Math.Sign(deltaSign))));
     }
 
-    /// <summary>A walking key's axis (0 forward, 1 right, 2 up) and direction (the page's walkKeys), or null.</summary>
-    public static (int Axis, int Sign)? WalkKey(Windows.System.VirtualKey key) => key switch
+    /// <summary>A walking key's axis (0 forward, 1 right, 2 up) and direction (the page's walkKeys), or null; the key as a
+    /// Windows virtual-key code (W, S, A, D, Q, E).</summary>
+    public static (int Axis, int Sign)? WalkKey(int virtualKey) => virtualKey switch
     {
-      Windows.System.VirtualKey.W => (0, 1),
-      Windows.System.VirtualKey.S => (0, -1),
-      Windows.System.VirtualKey.A => (1, -1),
-      Windows.System.VirtualKey.D => (1, 1),
-      Windows.System.VirtualKey.Q => (2, -1),
-      Windows.System.VirtualKey.E => (2, 1),
+      0x57 => (0, 1),
+      0x53 => (0, -1),
+      0x41 => (1, -1),
+      0x44 => (1, 1),
+      0x51 => (2, -1),
+      0x45 => (2, 1),
       _ => null,
     };
 

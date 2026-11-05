@@ -91,6 +91,8 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
       Queue = Device.CreateCommandQueue(new CommandQueueDescription(CommandListType.Direct));
       _fence = Device.CreateFence(0);
+      CopyQueue = Device.CreateCommandQueue(new CommandQueueDescription(CommandListType.Copy));
+      _copyFence = Device.CreateFence(0);
 
       if (debug)
       {
@@ -150,6 +152,122 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>Waits until the GPU has done everything sent so far.</summary>
     public void WaitIdle() => Wait(Signal());
 
+    /// <summary>
+    /// The copy queue (the GPU's copy engine): uploads sent there run beside the frames on the direct queue instead of
+    /// between their command lists. Its lists are of CommandListType.Copy; what they copy into is left in COMMON when they
+    /// are done, which the direct queue takes as any read state (implicit promotion), so no barriers to read states there.
+    /// </summary>
+    public ID3D12CommandQueue CopyQueue { get; }
+
+    private readonly ID3D12Fence _copyFence;
+    private ulong _copyValue;
+
+    /// <summary>A copy list (closed) sent to the copy queue and waited for (any thread; a loading one).</summary>
+    public void CopyAndWait(ID3D12GraphicsCommandList list)
+    {
+      ulong value;
+      lock (_signalLock)
+      {
+        CopyQueue.ExecuteCommandList(list);
+        value = ++_copyValue;
+        CopyQueue.Signal(_copyFence, value);
+      }
+      if (_copyFence.CompletedValue >= value)
+      {
+        return;
+      }
+      var done = _fenceEvents.Value!;
+      _copyFence.SetEventOnCompletion(value, done.SafeWaitHandle.DangerousGetHandle());
+      done.WaitOne();
+    }
+
+    // What waits to be freed until the GPU is past the frames that may still use it.
+    private readonly System.Collections.Generic.List<(ulong Mark, Action Release)> _retired = new System.Collections.Generic.List<(ulong, Action)>();
+
+    /// <summary>
+    /// Frees something the GPU may still read (buffers, textures, descriptor slots) once it is past everything sent so
+    /// far, without waiting here (<see cref="ReleaseRetired"/>, at the start of each frame, does it). From any thread.
+    /// </summary>
+    public void Retire(Action release)
+    {
+      ulong mark = Signal();
+      lock (_retired)
+      {
+        _retired.Add((mark, release));
+      }
+    }
+
+    // The freeing runs on another thread, one batch after the other (releasing thousands of a location's buffers and
+    // textures took the render thread 70-260 ms at a section change).
+    private System.Threading.Tasks.Task _releasing = System.Threading.Tasks.Task.CompletedTask;
+
+    /// <summary>
+    /// What <see cref="Retire"/> was handed and the GPU is done with, freed on another thread (the render thread asks
+    /// each frame; nothing waited for).
+    /// </summary>
+    public void ReleaseRetired()
+    {
+      var due = TakeDue();
+      if (due == null)
+      {
+        return;
+      }
+      lock (_retired)
+      {
+        _releasing = _releasing.ContinueWith(_ =>
+        {
+          var thread = Thread.CurrentThread;
+          var priority = thread.Priority;
+          thread.Priority = ThreadPriority.BelowNormal;
+          try
+          {
+            due.ForEach(release => release());
+          }
+          catch (Exception ex)
+          {
+            Log("freeing failed: " + ex.Message);
+          }
+          finally
+          {
+            thread.Priority = priority;
+          }
+        }, System.Threading.Tasks.TaskScheduler.Default);
+      }
+    }
+
+    /// <summary>Everything retired freed now, the GPU waited for (before the renderer's own things go).</summary>
+    public void ReleaseRetiredNow()
+    {
+      WaitIdle();
+      System.Threading.Tasks.Task releasing;
+      lock (_retired)
+      {
+        releasing = _releasing;
+      }
+      releasing.Wait();
+      TakeDue()?.ForEach(release => release());
+    }
+
+    // The retired things the GPU is done with, in the order retired.
+    private System.Collections.Generic.List<Action>? TakeDue()
+    {
+      System.Collections.Generic.List<Action>? due = null;
+      lock (_retired)
+      {
+        ulong done = _fence.CompletedValue;
+        for (int i = _retired.Count - 1; i >= 0; i--)
+        {
+          if (_retired[i].Mark <= done)
+          {
+            (due ??= new System.Collections.Generic.List<Action>()).Add(_retired[i].Release);
+            _retired.RemoveAt(i);
+          }
+        }
+      }
+      due?.Reverse();
+      return due;
+    }
+
     /// <summary>Debug build: the debug layer's messages since the last call, into the log.</summary>
     public void FlushMessages()
     {
@@ -196,8 +314,11 @@ namespace SparkIV.WinUI.Rendering.D3D12
       {
         // The device may be gone.
       }
+      ReleaseRetiredNow();
       FlushMessages();
       Profiler?.Dispose();
+      _copyFence.Dispose();
+      CopyQueue.Dispose();
       Profiler = null;
       _infoQueue?.Dispose();
       _fence.Dispose();
