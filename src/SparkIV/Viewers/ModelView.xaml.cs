@@ -26,6 +26,7 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
+using SparkIV.WinUI.Rendering.D3D12;
 using File = RageLib.FileSystem.Common.File;
 
 namespace SparkIV.WinUI.Viewers
@@ -96,7 +97,7 @@ namespace SparkIV.WinUI.Viewers
           if (SpotContainer.Visibility == Visibility.Visible)
           {
             args.Handled = true;
-            Post(new { type = "spot", step });
+            GoToSpot(step);
           }
         };
         KeyboardAccelerators.Add(accelerator);
@@ -165,6 +166,8 @@ namespace SparkIV.WinUI.Viewers
           }
           _textureVersion++;
           Post(new { type = "materials", materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)) });
+          // (Natively the model made again with its new textures.)
+          _player?.SetScene(_scene, false);
           ShowEmbeddedTextures();
           UpdateStatus();
         }
@@ -197,6 +200,12 @@ namespace SparkIV.WinUI.Viewers
         return;
       }
       _started = true;
+
+      if (D3D12View.Enabled)
+      {
+        StartNative();
+        return;
+      }
 
       if (!await ViewerPages.StartAsync(Web, null, _context, Core_WebMessageReceived, allowCopyMenu: false))
       {
@@ -282,19 +291,88 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    private void SendVisible(bool fit) => Post(new { type = "visible", ids = _scene.Root.CheckedMeshes().ToArray(), fit });
+    // The native renderer (#112 step 6), with SPARKIV_D3D12=1 instead of the page: the model drawn by a ModelScenePlayer,
+    // told at each place the page is told the same (its messages go nowhere without the page).
+    private D3D12View? _native;
+    private ModelScenePlayer? _player;
+    private NativeViewInput? _input;
 
-    private void SendOptions() => Post(new
+    private void StartNative()
     {
-      type = "options",
-      textures = TexturesButton.IsChecked == true,
-      wireframe = WireframeButton.IsChecked == true,
-      lights = LightsButton.IsChecked == true,
-    });
+      Web.Visibility = Visibility.Collapsed;
+      Native.Visibility = Visibility.Visible;
+      try
+      {
+        _player = new ModelScenePlayer(action => DispatcherQueue.TryEnqueue(() => action()))
+        {
+          SpotChanged = ShowSpot,
+          // (The page's "loaded": the spinner off once the textures are there.)
+          Loaded = () => Working.IsActive = false,
+        };
+        _input = new NativeViewInput(this, Native, _player, _context.Window);
+        _native = new D3D12View(Native, _player, text =>
+        {
+          Message.Text = text;
+          Message.Visibility = Visibility.Visible;
+        });
+      }
+      catch (Exception ex)
+      {
+        D3D12Device.Log("start failed: " + ex);
+        _player = null;
+        Working.IsActive = false;
+        Message.Text = "The Direct3D 12 renderer couldn't start: " + ex.Message;
+        Message.Visibility = Visibility.Visible;
+        return;
+      }
+      // As when the page is ready: the scene, its lights, the options, the background, what is shown (fitted).
+      _player.SetScene(_scene, false);
+      if (_scene.Lights.Count > 0)
+      {
+        _player.SetLights(ViewerLights(_scene));
+      }
+      SendOptions();
+      SendBackground();
+      SendVisible(fit: true);
+      if (_scene.Meshes.Count == 0)
+      {
+        Working.IsActive = false;
+        Message.Text = "This model has no meshes.";
+        Message.Visibility = Visibility.Visible;
+      }
+    }
+
+    /// <summary>A model's lights as the native view's markers (the page's "lights" message: SceneLight.ToMessage).</summary>
+    internal static List<ViewerLight> ViewerLights(ModelScene scene) =>
+      scene.Lights.Select(l => new ViewerLight(l.Position, new System.Numerics.Vector3(l.Red, l.Green, l.Blue), l.Spot, l.Direction, l.Falloff, l.Meshes)).ToList();
+
+    private void SendVisible(bool fit)
+    {
+      var ids = _scene.Root.CheckedMeshes().ToArray();
+      Post(new { type = "visible", ids, fit });
+      _player?.SetVisible(ids, fit);
+    }
+
+    private void SendOptions()
+    {
+      Post(new
+      {
+        type = "options",
+        textures = TexturesButton.IsChecked == true,
+        wireframe = WireframeButton.IsChecked == true,
+        lights = LightsButton.IsChecked == true,
+      });
+      _player?.SetOptions(TexturesButton.IsChecked == true, WireframeButton.IsChecked == true, LightsButton.IsChecked == true);
+    }
 
     private static readonly string[] BackgroundNames = { "", "grey", "black", "white" };
 
-    private void SendBackground() => Post(new { type = "background", name = BackgroundNames[Math.Clamp(BackgroundBox.SelectedIndex, 0, BackgroundNames.Length - 1)] });
+    private void SendBackground()
+    {
+      int index = Math.Clamp(BackgroundBox.SelectedIndex, 0, BackgroundNames.Length - 1);
+      Post(new { type = "background", name = BackgroundNames[index] });
+      _player?.SetBackground(index);
+    }
 
     private void UpdateStatus()
     {
@@ -336,8 +414,14 @@ namespace SparkIV.WinUI.Viewers
       SpotText.Text = index >= 0 ? "Spot " + (index + 1) + " / " + count : count + " spots";
     }
 
-    private void PreviousSpot_Click(object sender, RoutedEventArgs e) => Post(new { type = "spot", step = -1 });
-    private void NextSpot_Click(object sender, RoutedEventArgs e) => Post(new { type = "spot", step = 1 });
+    private void PreviousSpot_Click(object sender, RoutedEventArgs e) => GoToSpot(-1);
+    private void NextSpot_Click(object sender, RoutedEventArgs e) => GoToSpot(1);
+
+    private void GoToSpot(int step)
+    {
+      Post(new { type = "spot", step });
+      _player?.Spot(step);
+    }
 
     #endregion
 
@@ -434,7 +518,11 @@ namespace SparkIV.WinUI.Viewers
       SendBackground();
     }
 
-    private void Fit_Click(object sender, RoutedEventArgs e) => Post(new { type = "fit" });
+    private void Fit_Click(object sender, RoutedEventArgs e)
+    {
+      Post(new { type = "fit" });
+      _player?.Fit();
+    }
 
     private async void ExportModel_Click(object sender, RoutedEventArgs e)
     {
@@ -486,6 +574,10 @@ namespace SparkIV.WinUI.Viewers
     public void Dispose()
     {
       Services.FileChanges.Changed -= FileChanges_Changed;
+      _input?.Dispose();
+      _input = null;
+      _native?.Dispose();
+      _native = null;
       if (Web.CoreWebView2 != null)
       {
         Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;

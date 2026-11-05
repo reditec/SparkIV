@@ -38,7 +38,10 @@ namespace SparkIV.WinUI.Rendering.D3D12
   /// </summary>
   public sealed class D3D12View : IDisposable
   {
-    /// <summary>The switch for now: SPARKIV_D3D12=1 draws the cutscene view natively, else the WebView2 page as before.</summary>
+    /// <summary>
+    /// The switch for now: SPARKIV_D3D12=1 draws the cutscene, model and animation views natively, else the WebView2 page
+    /// as before.
+    /// </summary>
     public static bool Enabled { get; } = Environment.GetEnvironmentVariable("SPARKIV_D3D12") == "1";
 
     private readonly SwapChainPanel _panel;
@@ -168,31 +171,43 @@ namespace SparkIV.WinUI.Rendering.D3D12
           }
           var view = _scene.Update(_renderer, now, _swapChain.Width, _swapChain.Height);
           profiler?.CpuSince("scene update", stage);
-          _toneMapper.Resize(_swapChain.Width, _swapChain.Height);
-          // The eye adapts to the last measure read (a few frames old): gently while playing, at once when stopped.
-          _toneMapper.ReadMeasure(wait: false);
-          _toneMapper.Adapt(view.Tone, view.Playing, last > 0 ? now - last : 0);
-          var list = _swapChain.Begin();
-          if (profiler != null)
+          bool measured = false;
+          ulong mark;
+          if (_scene is IViewerScene viewer)
           {
-            stage = GpuProfiler.Now;
+            // The model and animation views (#112 step 6): the scene draws the picture itself, no light target or tone mapping.
+            var viewerList = _swapChain.Begin();
+            viewer.Draw(_renderer, viewerList, _swapChain.BackBuffer, _swapChain.Width, _swapChain.Height);
+            mark = _swapChain.Submit();
           }
-          _toneMapper.BeginLight(list);
-          _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
-          _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
-                         l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view, _swapChain.DepthBuffer),
-                         view.Lights, _toneMapper.LightTexture, view.Coronas, _swapChain.DepthBuffer, view.Volumes,
-                         view.ParabolicHaze != null ? (l, t, n) => _scene.DrawParabolicSky(_device, l, t, n, view) : null, view.ParabolicHaze ?? 0);
-          _toneMapper.EndLight(list);
-          // Measured at most every 200 ms (as the page), else when the last measure is read.
-          bool measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);
-          if (measured)
+          else
           {
-            _lastMeasure = now;
+            _toneMapper.Resize(_swapChain.Width, _swapChain.Height);
+            // The eye adapts to the last measure read (a few frames old): gently while playing, at once when stopped.
+            _toneMapper.ReadMeasure(wait: false);
+            _toneMapper.Adapt(view.Tone, view.Playing, last > 0 ? now - last : 0);
+            var list = _swapChain.Begin();
+            if (profiler != null)
+            {
+              stage = GpuProfiler.Now;
+            }
+            _toneMapper.BeginLight(list);
+            _scene.DrawBackground(_device, list, _toneMapper.LightView, _swapChain.Width, _swapChain.Height, view);
+            _renderer.Draw(list, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, view.Eye, view.Light,
+                           l => _scene.DrawAfterSolid(_device, l, _toneMapper.LightView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view, _swapChain.DepthBuffer),
+                           view.Lights, _toneMapper.LightTexture, view.Coronas, _swapChain.DepthBuffer, view.Volumes,
+                           view.ParabolicHaze != null ? (l, t, n) => _scene.DrawParabolicSky(_device, l, t, n, view) : null, view.ParabolicHaze ?? 0);
+            _toneMapper.EndLight(list);
+            // Measured at most every 200 ms (as the page), else when the last measure is read.
+            measured = now - _lastMeasure >= 0.2 && _toneMapper.Measure(list);
+            if (measured)
+            {
+              _lastMeasure = now;
+            }
+            _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
+            profiler?.CpuSince("recording", stage);
+            mark = _swapChain.Submit();
           }
-          _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
-          profiler?.CpuSince("recording", stage);
-          ulong mark = _swapChain.Submit();
           double cpuMs = (Stopwatch.GetTimestamp() - cpuStart) * 1000.0 / Stopwatch.Frequency;
           // (How much of it the garbage collector held every thread.)
           profiler?.Cpu("GC pause", (GC.GetTotalPauseDuration() - pauseBefore).TotalMilliseconds);

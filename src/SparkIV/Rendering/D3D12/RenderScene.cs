@@ -65,6 +65,17 @@ namespace SparkIV.WinUI.Rendering.D3D12
     }
   }
 
+  /// <summary>
+  /// A scene that draws its picture itself (the model and animation views, #112 step 6: no light target or tone mapping,
+  /// see <see cref="MeshRenderer.DrawViewer"/>). <see cref="IRenderScene.Update"/> is still asked first each frame (its
+  /// view is not used).
+  /// </summary>
+  public interface IViewerScene : IRenderScene
+  {
+    /// <summary>Records the frame (render thread) into <paramref name="target"/> (B8G8R8A8, RENDER_TARGET, left so).</summary>
+    void Draw(MeshRenderer renderer, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.ID3D12Resource target, int width, int height);
+  }
+
   /// <summary>Through what and in what light a frame is seen (see <see cref="IRenderScene"/>).</summary>
   public readonly record struct SceneView(Matrix4x4 ViewProjection, Vector3 Eye, FrameLight Light, ToneParams Tone, bool Playing)
   {

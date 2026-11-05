@@ -76,6 +76,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
     /// <summary>The depth buffer itself (in DepthWrite between draws; the post effects read it).</summary>
     public ID3D12Resource DepthBuffer => _depth;
 
+    /// <summary>The colour texture itself (in RenderTarget between draws; the model view resolves into it).</summary>
+    public ID3D12Resource ColorBuffer => _color;
+
     /// <summary>
     /// Opens the command list for a frame (its allocator one of two, used again once the GPU is done with the frame
     /// before last: at most one frame on the GPU while this one is recorded, as in the app's loop).

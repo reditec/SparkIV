@@ -238,6 +238,16 @@ namespace SparkIV.WinUI.Rendering.D3D12
     }
 
     /// <summary>
+    /// The camera carried along by <paramref name="by"/> (goal and shown alike, as walking moves it): the animation view
+    /// following a ped through the world (the page's pose, ModelView.html ~2852-2861).
+    /// </summary>
+    public void Shift(Vector3 by)
+    {
+      Target += by;
+      _anchor += by;
+    }
+
+    /// <summary>
     /// Going on from another camera (leaving a cutscene's): from its eye, looking along its forward with its opening,
     /// turning about a point <paramref name="distance"/> ahead (the page's leaveFilmCamera); shown at once.
     /// </summary>

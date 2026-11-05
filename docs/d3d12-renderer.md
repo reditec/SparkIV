@@ -1,7 +1,8 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **step 4c, light and tone mapping** – in the app behind the switch `SPARKIV_D3D12=1`.
-Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly as before.
+Status: **steps 1-5 for the cutscene view, step 6 for the model and animation views** – in the app behind the switch
+`SPARKIV_D3D12=1`. Without it SparkIV draws with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) exactly
+as before.
 
 ## Why
 
@@ -987,6 +988,44 @@ Offline totals (intro, real time with the seeks):
   CPU and 21 ms GPU, including the return to the dropped location and the scrub.
 
 Pictures are unchanged: the 8 references are byte-identical.
+
+## The model and animation views (step 6, 2026-11-05)
+
+With `SPARKIV_D3D12=1` the model view (`ModelView`: .wdr, .wdd, .wft) and the animation view (`AnimationView`: .wad clips
+on a ped or map object) draw natively too; without it they use the page as before. Both views keep all their controls;
+at each place they tell the page something they tell the native scene the same (the page's messages go nowhere without
+the page), and they take back what the page said (`spot`, `frame`, `loaded`).
+
+| Class | Does |
+|---|---|
+| `ModelScenePlayer` (`Rendering/D3D12`, generic) | The views' `IViewerScene`: the page's messages as orders for the render thread (`SetScene`, `SetVisible`, `SetOptions`, `SetBackground`, `SetLights`, `Fit`, `Spot`, `SetAnimation`, `Play`, `Seek`, `SetSpeed`, `SetLoop`, `SetMove`, `SetFacials`); the page's `fit`/`fitDistance` (~3019-3076), `findSpots`/`goToSpot` (~1359-1457), playback `tick`/`play`/`seek`/`showFrame` (~2937-3014), `pose`'s camera following the movement through the world (~2852-2861); its camera `OrbitCamera` orbiting the model with the cutscene view's smoothing; near and far as the page's viewProjection (~3101-3107). The model goes onto the GPU on a loading thread (`MeshRenderer.Prepare`), all its meshes (shown or hidden by mesh id each frame, no reload when the tree changes). |
+| `IViewerScene` (`RenderScene.cs`) | A scene that draws its picture itself: `D3D12View` calls its `Draw` with the back buffer instead of the light target, tone mapper and `MeshRenderer.Draw` (the cutscene path is unchanged). |
+| `MeshRenderer.DrawViewer` (`MeshRenderer.Viewer.cs`, a partial of `MeshRenderer`) | The page's path for a lone model: its fragment shader with outdoor, grade and baked false and no cutscene lights (ModelView.html ~421-736), with gtaiv-pc.js's model-view parts (vehicleShine's last branch ~454-459 and the vehicle glass ~406-423, the stipple ~472-481): base texture (or the material's colour, the page's `hsl((id x 0.618) mod 1, 0.25, 0.62)`), paint3's second layer, terrain layers, dirt decals, cut-outs at 45/255, trees' 8 x 8 stipple (GL's rows from the bottom), normals turned to the camera, ped normal maps (`pedBumpedRaw` with the G-buffer's rounding) or the screen-space `bumped`, parallax, `*_reflect` environment, light 0.35 x around + 0.65 x n.l from the head light (~3116-3122), gta_spec's shine, emissives, see-through by texture alpha or 0.45. States per mesh as `drawMeshes` (~3381-3707): solid first, then the see-through ones (dirt decals first) ONE / INVSRCALPHA, depth written for vehicle and map glass, map glass culled, decals pulled (-0.25, -4), blended (-0.25, -2), depth less or equal. Then the wire frame (each edge once, ~1051-1070, in 0.95/0.75/0.25), the ground grid while moving (~3130-3147, ~3962-3969) and the lights' markers (diamond / spot cone, MarkerSize 0.012, faint where hidden, ~1297-1346, ~3985-4003). Background: the gradient #68788a to #22252a, grey, black or white (~24-27). 4 samples a pixel, resolved into the target (the page's `antialias: true`). Own root signature and pipelines, made at the first frame. |
+| `AnimationPose` (`Viewers/GtaIV/Pc`, GTA IV PC) | The page's `sampledPose` with the facial clips (~1659-1709), `findFollowers`, `gameHelper`, `worldMatrices`, the mover (`pose`, `moverPath` ~2840-2882) and `updateUv` (~2910-2920) for the animation view's skeleton and clip (`ViewerSkeleton`, `ViewerClip`, made by `AnimationView` from the same data it sends the page). |
+| `NativeViewInput` (`Rendering/D3D12`, WinUI) | The panel's mouse and keys as the cutscene view's (CursorDrag for mouse drags, wheel, double-click fit, W/S/A/D/Q/E). |
+| `TextureCache.ImageMipmaps` | PNG textures with their smaller levels (2 x 2 means, the page's `generateMipmap`); on only for the views (the cutscenes' cast keeps none: their pictures are unchanged). |
+
+**Comparison with the page** (cutgen `MODELVIEW=...`, `tests/visual/werkzeug/cutgen/ModelMode.cs`: the native picture
+through `ModelScenePlayer`, and the same messages and camera for the page, `seite/baue-modellseite.ps1` ->
+`test_model.html` in headless Edge, the canvas laid over its background; 1280 x 720, mean greyscale difference /255):
+
+| Case | Model | Materials | page vs native |
+|---|---|---|---|
+| vehicle | vehicles.img admiral.wft (fitted view) | 4 glass, 4 blend | 0.33 |
+| vehicle from above | admiral.wft, yaw -2.2, pitch 0.6 (glass in view) | | 0.32 |
+| vehicle, plain colours, grey | admiral.wft, textures off | | 0.10 |
+| ped | componentpeds.img f_y_business_01.wdd | 8 cut-out | 0.25 |
+| map object | brook_s.img ci_clsdride2_01.wdr (rides) | 4 blend, 41 cut-out, 2 emissive | 0.42 |
+| map object with decals | brook_s.img ci5a_ksun.wdr | 2 decal, 2 blend, 20 cut-out | 0.56 |
+| big building | brook_s.img refinary1_01.wdr | 2 blend, 34 cut-out | 0.36 |
+| shop block | brook_s.img rt6a_ksunss.wdr | 1 blend, 1 emissive | 0.36 |
+| animation | Niko (playerped.rpf), anim.img move_player.wad walk, frame 12 | | 0.26 |
+
+No pixel is 48 or more apart except 0.02-0.05 % at the vehicle's edges. The differences are the edges (both draw 4
+samples a pixel, but ANGLE's and Direct3D 12's sample positions and resolve differ) and on large surfaces seen at a slant
+a faint texture filtering difference (mip levels made by the page's driver against the 2 x 2 means here; anisotropic
+filtering's footprint). The pose of the animation lies exactly over the page's. The wire frame, the ground grid and the
+markers are drawn after the page's picture is taken, so they are checked by eye only.
 
 ## Next steps (#112)
 

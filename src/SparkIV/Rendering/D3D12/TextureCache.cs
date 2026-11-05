@@ -84,6 +84,13 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     public ID3D12DescriptorHeap Heap => _heap;
 
+    /// <summary>
+    /// PNG blobs made with their smaller levels too, each the mean of the 2 x 2 texels above (the page's generateMipmap
+    /// for an image, ModelView.html ~1190-1196). Off by default (the cutscenes' casts stay as they were); the model and
+    /// animation views turn it on before their models are prepared.
+    /// </summary>
+    public bool ImageMipmaps { get; set; }
+
     /// <summary>Textures on the GPU (white not counted), those that couldn't be made (drawn white), their bytes.</summary>
     public int Count { get { lock (_sync) { return _known.Count; } } }
     public int Failed { get; private set; }
@@ -278,7 +285,36 @@ namespace SparkIV.WinUI.Rendering.D3D12
         System.Runtime.InteropServices.Marshal.Copy(locked.Scan0 + y * locked.Stride, pixels, y * width * 4, width * 4);
       }
       image.UnlockBits(locked);
-      Make(number, Format.B8G8R8A8_UNorm, width, height, new[] { (pixels, width * 4, height) }, MappingDefault, list, uploads, out bytes);
+      var levels = new List<(byte[] Bytes, int RowBytes, int Rows)> { (pixels, width * 4, height) };
+      if (ImageMipmaps)
+      {
+        // Down to 1 x 1, each level the mean of the 2 x 2 texels above (an odd edge's last texel taken twice), rounded.
+        int w = width, h = height;
+        var above = pixels;
+        while (w > 1 || h > 1)
+        {
+          int nw = Math.Max(1, w >> 1), nh = Math.Max(1, h >> 1);
+          var level = new byte[nw * nh * 4];
+          for (int y = 0; y < nh; y++)
+          {
+            int y0 = Math.Min(2 * y, h - 1), y1 = Math.Min(2 * y + 1, h - 1);
+            for (int x = 0; x < nw; x++)
+            {
+              int x0 = Math.Min(2 * x, w - 1), x1 = Math.Min(2 * x + 1, w - 1);
+              for (int c = 0; c < 4; c++)
+              {
+                int sum = above[(y0 * w + x0) * 4 + c] + above[(y0 * w + x1) * 4 + c] + above[(y1 * w + x0) * 4 + c] + above[(y1 * w + x1) * 4 + c];
+                level[(y * nw + x) * 4 + c] = (byte)((sum + 2) >> 2);
+              }
+            }
+          }
+          levels.Add((level, nw * 4, nh));
+          above = level;
+          w = nw;
+          h = nh;
+        }
+      }
+      Make(number, Format.B8G8R8A8_UNorm, width, height, levels.ToArray(), MappingDefault, list, uploads, out bytes);
     }
 
     /// <summary>A texture with its levels' data (rows of bytes each), copied over an upload buffer, into its slot (any thread).</summary>

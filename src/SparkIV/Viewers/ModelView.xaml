@@ -200,7 +200,11 @@
                 <Grid>
                     <!-- Drawn with WebGL by ModelView.html: left drag turns, middle or right drag moves, wheel zooms -->
                     <WebView2 x:Name="Web" Margin="3" DefaultBackgroundColor="Transparent" />
+                    <!-- With SPARKIV_D3D12=1 drawn by the native Direct3D 12 renderer instead (#112 step 6) -->
+                    <SwapChainPanel x:Name="Native" Margin="3" Visibility="Collapsed" />
                     <ProgressRing x:Name="Working" IsActive="True" Width="32" Height="32" />
+                    <TextBlock x:Name="Message" Visibility="Collapsed" TextWrapping="Wrap" MaxWidth="420" TextAlignment="Center"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Grid>
             </Border>
         </Grid>

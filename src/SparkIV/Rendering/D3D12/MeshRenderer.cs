@@ -91,7 +91,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
   /// table, the bones' matrices as a structured buffer (t1). Draws into any target. No WinUI here: the visual tests'
   /// cutgen builds it too.
   /// </summary>
-  public sealed class MeshRenderer : IDisposable
+  public sealed partial class MeshRenderer : IDisposable
   {
     // The light of a solid pixel as the page's outdoor path (spec: the page's GameGlsl outsideLight, used for every
     // cutscene with a location, inside too): the light from around (above to below by the normal's z) x the darkening
@@ -1476,6 +1476,16 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       public Vector3 Center { get; init; }
       public float Radius { get; init; }
 
+      // For the model and animation views (MeshRenderer.Viewer.cs): the mesh it is (shown or hidden by its id), whether
+      // the mesh has its own normals and alpha, its material, and its first vertex and vertex count in the model.
+      public int MeshId { get; init; }
+      public bool HasNormals { get; init; }
+      public bool HasAlphas { get; init; }
+      public bool HasTangents { get; init; }
+      public SceneMaterial? Material { get; init; }
+      public uint VertexBase { get; init; }
+      public int VertexCount { get; init; }
+
       public uint Start { get; }
       public uint Count { get; }
       public int Texture { get; }
@@ -2686,6 +2696,13 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           GlowBlend = material.Blend,
           Center = count > 0 ? (meshMin + meshMax) * 0.5f : Vector3.Zero,
           Radius = count > 0 ? (meshMax - meshMin).Length() * 0.5f : float.PositiveInfinity,
+          MeshId = mesh.Id,
+          HasNormals = normals,
+          HasAlphas = alphas,
+          HasTangents = mesh.Tangents != null,
+          Material = material,
+          VertexBase = first,
+          VertexCount = count,
         });
       }
       pending += textureBytes;
@@ -4258,6 +4275,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     public void Dispose()
     {
       Clear();
+      DisposeViewer();
       foreach (var b in _recorders.SelectMany(s => s))
       {
         b.List?.Dispose();
