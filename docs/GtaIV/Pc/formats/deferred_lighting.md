@@ -71,6 +71,17 @@ In SparkIV: cutscene lights in a room hit only characters; without AO factor.
 | c45 (VS) | (0.94, 0.06, 0.94, 0.06) | Day factor |
 | c51 | (1, 1, 1, 1) | `colorize` |
 
+## The sun's direction in the sun pass (c17)
+
+`gDirectionalLight` (PS c17): xyz the direction the light travels (minus the direction towards the sun), w the shine
+scale. The direction is GTAIV.exe 0xAEF0E0's (0x103FBE0), including its turn towards normalize(0.05, −0.5, 1) at night;
+formula in [../data-support.md](../data-support.md) ("Two suns").
+
+- **Measured:** `GTAIV.3.trace`, intro s2 f863 (05:15): c17 = (−0.8332, 0.2196, −0.5074, 1.9719), set at call 34227404,
+  read by the sun pass PS 0x2d593060 (draws 34238693, 34238698; G-buffer 34236494–34238573). The day formula alone would
+  give a sun 13° lower and lit the inside of the ship's bulwark that the game leaves in the sun's shadow (#115).
+- In SparkIV: `TimeCycle.SunDirection`. Status: **used**.
+
 ## The mirrored surroundings' map (paraboloid map) and its levels
 
 The sun pass (program 21) and the forward vehicle shaders read the map of the surroundings that the game draws each frame (the sky first, then map objects above the camera). Its smaller levels are not plain averages.

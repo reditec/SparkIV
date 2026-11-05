@@ -563,14 +563,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// time - before 6 o'clock t x pi/12, from 6 to 20 o'clock pi/2 + (t - 6) x pi/14, after it 3pi/2 + (t - 20) x
     /// pi/8, kept within pi/2 and 3pi/2 - then (1 - 2 x 0.1) x (angle - pi/2) + (0.1 + 0.5) x pi (0x103FC00 = 0.1),
     /// and the direction normalize(sin a - cos a x (0, -0.342, 0.940)) (the sun's axis at 0x103FBF0, 20° from
-    /// upright). At noon (0.179, -0.337, 0.925). Before 6 and after 20 o'clock the game also turns it towards
-    /// the horizon (not done here: the cutscenes so far are by day).
+    /// upright). At noon (0.179, -0.337, 0.925). Before 6 and after 20 o'clock (night) the game turns it towards a
+    /// fixed night light, normalize(0.05, -0.5, 1) (0xAEF0E0 after 0xAEF38E: 0xFE876C, 0xFE8D7C, 1, its length's
+    /// square 1.2525 at 0xEA8230): d = max(6 - t, t - 20) hours into the night, w = min(d / 3, 1), the direction
+    /// normalize(w x that + (1 - w) x the day's). GTAIV.3.trace (the intro at 05:15, s2 f863): the sun pass's c17
+    /// (set at call 34227404) is -(0.8332, -0.2196, 0.5074), this to 0.0001.
     /// </summary>
     public static Vector3 SunDirection(float hour)
     {
       double angle = Math.Clamp(SunAngle(hour), 1.570796, 4.712389);
       const double Offset = 0.1;
-      return SunOnAxis((1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI);
+      var day = SunOnAxis((1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI);
+      double t = ((hour % 24) + 24) % 24;
+      double intoNight = Math.Max(6 - t, t - 20);
+      if (intoNight <= 0)
+      {
+        return day;
+      }
+      float w = intoNight < 3 ? (float)(intoNight / 3) : 1;
+      var night = Vector3.Normalize(new Vector3(0.05f, -0.5f, 1f));
+      return Vector3.Normalize(w * night + (1 - w) * day);
     }
 
     /// <summary>

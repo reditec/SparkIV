@@ -739,6 +739,20 @@ Not changed: the cables' gap comes from the page's smoothing, which the game has
 Full run after round 7 (all 72): only f682.5 changed (-0.06), native mean 3.258. Above the page by more than 0.05:
 bc_3 s3 f140.5 +0.27, s1 f854.75 +0.09, s3 f829.5 +0.07 (water, noise), et01_ba f1292.25 +0.07 (open).
 
+### The sun's direction at night (#115, 2026-11-05)
+
+Intro s2 f863: the inside of the ship's bulwark (`ET_Shipin_hull02` mesh 1, gta_default `ET_ShipMetal_edges`, normal
++x towards the deck, vertex colour 0.51) came out cyan, (35, 64, 63) against the game's (13, 21, 24). `D3D12NOSUN=1`
+gave the game's colour exactly, so the sun reached it where the game's did not. Cause: the light's sun direction.
+`TimeCycle.SunDirection` had only the day path; GTAIV.exe 0xAEF0E0 turns it towards normalize(0.05, -0.5, 1) at night
+(see [data-support.md](GtaIV/Pc/data-support.md), "Two suns"). `GTAIV.3.trace` sun pass c17 (call 34227404, used by the
+draws 34238693/34238698) = -(0.8332, -0.2196, 0.5074); SparkIV had (0.951, -0.106, 0.290), now (0.8332, -0.2196,
+0.5074). With the sun 30.5° high instead of 16.9° the bulwark lies in the sun's shadow (the cascades follow the
+direction) as in the game. Shared C# (the page gets it as `sunDirection`), so both renderers change.
+Native: intro s2 f863 3.93 -> 2.83, s2 f352.75 3.96 -> 2.93, s2 f682.5 1.99 -> 1.91; s1 f399.5, s3 f569.75, s4
+f1833.25, bc_1 s3 f299.75, bc_3 s3 f829.5, et01_aa s2 f79.5 unchanged; et01_ba f468 4.89 -> 4.87, f908.5 4.84 -> 4.82;
+intro s6 f146 3.44 -> 3.46.
+
 ## Profiling (2026-11-05)
 
 `GpuProfiler` (`Rendering/D3D12`, generic) times each pass: a timestamp query heap (8 frame slots x 512 queries) and a
