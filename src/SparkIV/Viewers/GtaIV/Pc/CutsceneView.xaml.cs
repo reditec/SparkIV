@@ -980,6 +980,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     #region Playing
 
+    // Playing started with the sound: since when the picture waits for it, and the time it was sent to (Timer_Tick).
+    private System.Diagnostics.Stopwatch? _audioWait;
+    private double _audioFrom;
+
     /// <summary>To a time of the whole scene: the section it is in, the sound there; playing on or not.</summary>
     private void GoTo(double seconds, bool play)
     {
@@ -999,13 +1003,22 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       else
       {
         _frame = Math.Clamp(frame, 0, _frames - 1);
-        _player?.Seek(_frame);
+        // (The time with its fraction: a resumed scene goes on where it stood.)
+        _player?.Seek(Math.Clamp((seconds - _sectionStart[section]) * _fps, 0, _frames - 1));
         // (Its seek doesn't stop it: told the play state either way - a player still playing after the view stopped ran
         // to the section's end and stayed there.)
         _player?.Play(play);
         ShowFrame();
       }
       AudioTo(seconds, play);
+      // With the sound: the picture waits for it to run (Timer_Tick).
+      _audioWait = null;
+      if (play && _audio != null && _player != null)
+      {
+        _player.Play(false);
+        _audioFrom = seconds;
+        _audioWait = System.Diagnostics.Stopwatch.StartNew();
+      }
       _timer.Start();
     }
 
@@ -1042,6 +1055,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       double seconds = _audio.Position.TotalSeconds;
+      // Started (or sought) with the sound: the picture held until the sound really runs (#64: it starts some 100 to
+      // 200 ms after Play, and the picture running ahead was pulled back by the sync several times - the frames before
+      // played again, then on), at most half a second (no sound device: on without).
+      if (_audioWait != null)
+      {
+        if (seconds <= _audioFrom + 0.002 && _audioWait.Elapsed.TotalSeconds < 0.5)
+        {
+          return;
+        }
+        _audioWait = null;
+        _player?.Play(true);
+      }
       if (_audio.HasEnded || seconds >= _to - 0.001)
       {
         _playing = false;
@@ -1067,6 +1092,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       if (_playing)
       {
         _playing = false;
+        _audioWait = null;
         _player?.Play(false);
         try
         {
@@ -1079,8 +1105,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         ShowFrame();
         return;
       }
-      // At the end of the scene: from the start.
-      GoTo(Now >= _to - 1 / (double)_fps ? _from : Now, play: true);
+      // At the end of the scene: from the start; else on from the time shown, with its fraction (the whole frame went
+      // back a little first, #64).
+      double at = Now >= _to - 1 / (double)_fps ? _from
+                : _player != null && _section >= 0 ? _sectionStart[_section] + _player.SectionSeconds : Now;
+      GoTo(at, play: true);
     }
 
     private void Step(int by) => GoTo(Now + by / (double)_fps, play: false);
