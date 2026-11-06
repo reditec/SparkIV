@@ -295,6 +295,43 @@ namespace SparkIV.WinUI
     }
 
     /// <summary>
+    /// Opens any file from disk, as when SparkIV is started with it: an archive here, any other file in its
+    /// viewer, in a window of its own.
+    /// </summary>
+    private async void OpenFile_Click(object sender, RoutedEventArgs e)
+    {
+      var picker = new FileOpenPicker();
+      picker.FileTypeFilter.Add("*");
+      InitializeWithWindow(picker);
+      var file = await picker.PickSingleFileAsync();
+      if (file == null)
+      {
+        return;
+      }
+
+      string path = file.Path;
+      if (FileLaunch.IsArchive(path))
+      {
+        await OpenArchiveAsync(path);
+        return;
+      }
+
+      GameInstall? install = Games.ForFile(path);
+      if (install == null && Games.NeedsGame(path))
+      {
+        install = await GameChooserWindow.AskAsync(path, optional: true);
+      }
+      try
+      {
+        FileLaunch.OpenInViewer(path, install);
+      }
+      catch (Exception ex)
+      {
+        ShowMessage(InfoBarSeverity.Error, "Could not open " + Path.GetFileName(path), ex.Message);
+      }
+    }
+
+    /// <summary>
     /// Opens an .rpf or .img file (also when SparkIV is started with one). Its key comes from its game:
     /// the one it lies in, else the one asked for (<paramref name="install"/> when that was asked already).
     /// </summary>
