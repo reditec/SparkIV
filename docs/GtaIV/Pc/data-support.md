@@ -28,6 +28,8 @@ Detailed descriptions of individual formats with all findings are under [formats
 - [ide-mlo.md](formats/ide-mlo.md): interiors, rooms, portals
 - [timecyclemodifiers.md](formats/timecyclemodifiers.md): modifier columns, AmbientDownMult, GlobEnvRefl
 - [2dfx-lights.md](formats/2dfx-lights.md): lights in models, shadow lamps, lights for forward-drawn objects
+- [drawable.md](formats/drawable.md): the vertex buffer's layout in `.wdr` / `.wdd` / `.wft`; older patches' files
+  (1.1.2.0) leave `pLockedData` null
 - [deferred_lighting.md](formats/deferred_lighting.md): lighting shaders, stencil, frame sequence
 - [wbs.md](formats/wbs.md): a cutscene ped's face shapes (blend shapes) and how the face clip weights them
 
@@ -355,6 +357,16 @@ Not yet fully recorded. Known so far:
 | `misc.BloomIntensityClamp.HD` (10) | used | 0x103F9B4, clamps the bloom. |
 | `misc.HiDof.nearBlur/midBlur/farBlur`, `misc.cutscene.nearBlurMin` | **unclear** | Not used. Whether the PC version uses them is unresolved. |
 | `misc.CrossPMultiplier.*` | **unclear** | Not used (RimLight 0.7, Gamma 1.15, Desaturation 1.29 …). |
+
+## Models: vertex buffers (`.wdr`, `.wdd`, `.wft`)
+
+Details: [formats/drawable.md](formats/drawable.md).
+
+| Field | Status | Content / source |
+|---|---|---|
+| vertex buffer +0x08 `pLockedData` | used when not 0 | The vertices in the graphics segment. Set in the current game's files; **0** in files of older patches (`vigero.wft` of 1.1.2.0). |
+| vertex buffer +0x18 `piVertexBuffer` | used when +0x08 is 0 | The same pointer; the only one in older files. Since 2026-11-06 (before, older files' meshes all read from the segment's start: spikes). |
+| structure vtables (first dword) | ignored | Exe addresses in current files; other values (hashes?) in 1.1.2.0 files. **unclear** what those are. |
 
 ## Other formats and tools
 
