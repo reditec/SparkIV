@@ -198,6 +198,19 @@ stays at 393.984 in every intro frame of GTAIV.3.trace). Below the horizon faded
 dome, and the near fog's share. The main view, the water's mirror (below, "The water's mirror") and the mirrored
 surroundings' map (`toMap`, below). In the app the player draws it through `IRenderScene.DrawBackground`.
 
+**Checked against the trace, still open (#82, 2026-11-06).** TLAD et01_ba f1394.75 (`GTAIV.2.trace`, sky draw 224299438,
+PS 0x2ce67260, perlin pass 224279527): every constant of the sky and the clouds matches the native `SkyParams`
+(SkyColor, the azimuth colours and height, SunColor, HDRExposure 44.78 / 44.95, the cloud colour, threshold, bias,
+detail, top clouds, fade), the clouds' Phase too (595.4131 / 595.4086), and the rage_perlinnoise program is the native
+one step for step. The dome's texture coordinates (vertex buffer, call 188512) are u = 0.5 + k x, v = 0.5 + k z in the
+dome's space (z = the world's -y), as `DomeUv`. In the box between the pillars the game's HDR light shows grey clouds
+(about 5.4 / 5.3 / 5.3) darker than the clear sky beside them (6.3 / 9.3 / 12.3); natively the clouds are there (cover
+and fade as the game's: the box lies at 11-13° above the horizon, fade 0.43-0.54) but come out about as bright as the
+sky, so the box stays even and pale. The formula with the traced constants gives clouds of 0.22-0.3 x HDRExposure,
+brighter than the sky, so something darkens the game's clouds (by about 2.5) that isn't found yet. cutgen helpers:
+`D3D12SKYINFO=1` (the frame's SkyParams), `D3D12CLOUDFADE=<x>` (CloudFadeOut set), `D3D12PERLINFILE=<file>` (the
+clouds' noise from 256 x 256 BGRA bytes, e.g. the game's perlin target; `CutsceneSky.FixPerlin`).
+
 ### The water (step 4f, first version)
 
 `CutsceneWater` (GTA IV PC) draws the location's water between the solid meshes and the see-through ones

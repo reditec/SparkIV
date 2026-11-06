@@ -559,6 +559,18 @@ float4 PSSky(VsOut i) : SV_Target
       return texture;
     }
 
+    private ID3D12Resource? _perlinFixed;
+
+    /// <summary>
+    /// For comparisons: the clouds' noise taken from a texture as it is (a "SXT1" blob, e.g. the game's perlin target
+    /// read from a trace) instead of made by rage_perlinnoise; it stays until the sky is disposed.
+    /// </summary>
+    public void FixPerlin(byte[] blob, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
+    {
+      _perlinFixed?.Dispose();
+      _perlinFixed = Make(blob, 2, list, uploads);
+    }
+
     // rage_perlinnoise into its target (the page's perlinNoise: only when the Phase moved).
     private unsafe void DrawPerlin(ID3D12GraphicsCommandList list, float phase)
     {
@@ -606,7 +618,7 @@ float4 PSSky(VsOut i) : SV_Target
       list.SetGraphicsRootSignature(_rootSignature);
       list.SetDescriptorHeaps(_srvHeap);
       list.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-      if (clouds && _perlinPhase != p.CloudPhase)
+      if (clouds && _perlinPhase != p.CloudPhase && _perlinFixed == null)
       {
         DrawPerlin(list, p.CloudPhase);
       }
@@ -657,6 +669,7 @@ float4 PSSky(VsOut i) : SV_Target
       _clouds?.Dispose();
       _detail?.Dispose();
       _perlin.Dispose();
+      _perlinFixed?.Dispose();
       _constants.Unmap(0);
       _constants.Dispose();
       _srvHeap.Dispose();
