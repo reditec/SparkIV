@@ -28,9 +28,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// </summary>
   internal static class GtaIVPcViewers
   {
-    /// <summary>The model view's GTA IV (PC) part (gtaiv-pc.js, embedded): see ModelViewPage.</summary>
-    public const string PageScript = "SparkIV.GtaIV.Pc.gtaiv-pc.js";
-
     public static void Register(IDictionary<string, IViewer> byExtension)
     {
       byExtension[".cut"] = new CutsceneViewer();

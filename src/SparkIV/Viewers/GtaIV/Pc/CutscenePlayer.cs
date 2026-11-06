@@ -124,11 +124,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private float? _waterWind;
     private Vector3? _swellAt;
 
-    // The water exact (a still frame: the simulations a pure function of the time) only when stopped by the user, not
+    // The water exact (a still frame: the simulations a pure function of the time) only after a seek while stopped, not
     // when the section ran out while the scene plays on (its next section follows: computing the swell afresh there
-    // took 115 ms at bc_3's section ends).
-    private bool WaterExact => !_playing && !_ranOut;
+    // took 115 ms at bc_3's section ends), nor when paused: the state just played is kept (#64 - recomputed afresh, the
+    // waves and the swell went through their steps again over several frames of up to 190 ms: the picture jerked a
+    // moment after pausing).
+    private bool WaterExact => !_playing && !_ranOut && !_paused;
     private bool _ranOut;
+    private bool _paused;
 
     // A location's water made on the GPU on another thread (below the render thread), once.
     private void PrepareWater(CutsceneLocation location)
@@ -733,6 +736,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _fps = fps > 0 ? fps : 30;
         _frames = Math.Max(1, frames);
         _time = Math.Clamp(frame, 0, _frames - 1) / _fps;
+        // (Another section, or one shown again: a time of its own, not one played on to.)
+        _paused = false;
+        _playing = false;
         StartPlaying(play);
         ShowActors();
       });
@@ -742,6 +748,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public void Seek(int frame) => Order(() =>
     {
       _ranOut = false;
+      _paused = false;
       _time = Math.Clamp(frame, 0, _frames - 1) / _fps;
       _reportedFrame = -1;
     });
@@ -787,6 +794,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     private void StartPlaying(bool on)
     {
+      // (Stopped while playing: paused, the water kept as played.)
+      _paused = !on && (_playing || _paused);
       _ranOut = false;
       if (on && _time * _fps >= _frames - 1)
       {

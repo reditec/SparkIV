@@ -107,21 +107,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// <summary>Outside: the far versions (lod…) placed beyond the near objects, up to the scene's draw distance.</summary>
     public int Far { get; private set; }
 
-    /// <summary>A texture's key for the page: "m" and the model's number, then its key in the model's scene.</summary>
-    public static string TextureKey(int model, string key) => "m" + model + "/" + key;
-
-    /// <summary>The water's surface texture's key (see <see cref="WaterSurface"/>).</summary>
-    public const string WaterKey = "mwater/surface";
-
     /// <summary>
     /// The water's surface (pc\textures\water.wtd's waterclear, as ModelScene.Raw makes it): its blue and alpha
     /// are the slope of the little waves the game's water shader lays over it, three times in different
     /// sizes; null without it.
     /// </summary>
     public byte[]? WaterSurface { get; private set; }
-
-    /// <summary>The clouds' noise textures' keys (see <see cref="Clouds"/>).</summary>
-    public const string CloudKey = "msky/clouds", CloudDetailKey = "msky/detail";
 
     /// <summary>
     /// Outside: the clouds' noise (pc\textures\skydome.wtd's baseperlinnoise3channel, which rage_perlinnoise turns
@@ -137,9 +128,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public byte[]? StarField { get; private set; }
     public byte[]? Galaxy { get; private set; }
 
-    /// <summary>The light volumes' lookup texture's key (see <see cref="LightVolume"/>).</summary>
-    public const string LightVolumeKey = "mlight/volume";
-
     /// <summary>
     /// The lookup texture the light volumes of lamps without flag 0x100000 read (deferred_lighting's ps18/ps19,
     /// gDeferredLightSampler2): "volume" of pc\textures\lights_occluders.wtd, as GTAIV.exe takes it (0xAD1A90 from the
@@ -148,70 +136,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public byte[]? LightVolume { get; private set; }
 
-    /// <summary>The coronas' sprite's key (see <see cref="Corona"/>).</summary>
-    public const string CoronaKey = "mlight/corona";
-
     /// <summary>
     /// The sprite of the lamps' coronas: "corona" of pc\textures\coronas.wtd (GTAIV.exe: platform:/textures/coronas; 128 x
     /// 128 DXT5 in the bc_1 trace GTAIV.trace, call 168093), as ModelScene.Raw makes it; null without it.
     /// </summary>
     public byte[]? Corona { get; private set; }
-
-    /// <summary>
-    /// The models' textures in packs of about <see cref="PackBytes"/> each (keys "mpack/0" ...), as the scene
-    /// message lists them: the page asks for a few dozen instead of two thousand, one by one (bc_3: 10 s
-    /// waiting on the requests alone).
-    /// </summary>
-    private const string PackKey = "mpack/";
-    private const int PackBytes = 16 << 20;
-    private readonly List<List<string>> _packs = new List<List<string>>();
-
-    /// <summary>A pack: "SXP1", then each texture's length (uint32) and bytes, in the list's order.</summary>
-    private byte[] Pack(List<string> keys)
-    {
-      using var stream = new MemoryStream();
-      using var writer = new BinaryWriter(stream);
-      writer.Write("SXP1"u8);
-      foreach (string key in keys)
-      {
-        byte[] texture = Texture(key) ?? Array.Empty<byte>();
-        writer.Write((uint)texture.Length);
-        writer.Write(texture);
-      }
-      writer.Flush();
-      return stream.ToArray();
-    }
-
-    /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
-    public byte[]? Texture(string key)
-    {
-      if (key == WaterKey)
-      {
-        return WaterSurface;
-      }
-      if (key == CloudKey || key == CloudDetailKey)
-      {
-        return key == CloudKey ? Clouds : CloudDetail;
-      }
-      if (key == LightVolumeKey)
-      {
-        return LightVolume;
-      }
-      if (key == CoronaKey)
-      {
-        return Corona;
-      }
-      if (key.StartsWith(PackKey, StringComparison.Ordinal))
-      {
-        return int.TryParse(key.AsSpan(PackKey.Length), out int pack) && pack >= 0 && pack < _packs.Count ? Pack(_packs[pack]) : null;
-      }
-      int slash = key.IndexOf('/');
-      if (slash < 2 || key[0] != 'm' || !int.TryParse(key.AsSpan(1, slash - 1), out int model) || model < 0 || model >= Models.Count)
-      {
-        return null;
-      }
-      return Models[model].Textures.TryGetValue(key.Substring(slash + 1), out var png) ? png : null;
-    }
 
     // The placements and models of a game's maps, read once per game folder while SparkIV runs.
     private sealed class MapIndex
@@ -1308,239 +1237,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                         lod >= 0 && parents >= 0 ? parents + lod : -1));
       }
     }
-
-    /// <summary>
-    /// The "scene" messages adding the location to the page's (after the cast's ids), as JSON text, at most
-    /// <paramref name="meshesPerPart"/> meshes each (the page adds every scene message to what it has): every object's
-    /// meshes moved into the scene, in the background (not fitted to); the first with its models' materials, the
-    /// water's and the texture packs. Made one by one while they are taken (not the whole location at once: the
-    /// intro's harbour as one tree and one text took some 5 GB, and one message is one string on the page, at most
-    /// ~536 million characters in V8). The meshes shown are added to <paramref name="visible"/>.
-    /// </summary>
-    public IEnumerable<string> MessageParts(Func<string, string> url, int firstMesh, int firstMaterial, List<int> visible, int meshesPerPart = 1000)
-    {
-      var materials = new JsonArray();
-      var materialStart = new int[Models.Count];
-      int nextMaterial = firstMaterial;
-      // The textures the materials name, each once, for the packs.
-      var named = new List<string>();
-      var namedOnce = new HashSet<string>(StringComparer.Ordinal);
-      string Named(string key)
-      {
-        if (namedOnce.Add(key))
-        {
-          named.Add(key);
-        }
-        return url(key);
-      }
-      for (int m = 0; m < Models.Count; m++)
-      {
-        materialStart[m] = nextMaterial;
-        foreach (var material in Models[m].Materials)
-        {
-          int model = m;
-          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => Named(TextureKey(model, key))))!.AsObject();
-          node["id"] = materialStart[m] + material.Id;
-          // A decal of a model with dirt decals: the whole model's decals drawn first, in the model's order (see the
-          // page's dirtFirst; bc_1's PUB_3BShdows1, the pony skin rug, then its shadow dirt over it).
-          if (material.Decal && Models[m].Materials.Any(x => x.Decal && x.DirtMask != null))
-          {
-            node["dirtModel"] = true;
-          }
-          materials.Add(node);
-          nextMaterial = Math.Max(nextMaterial, materialStart[m] + material.Id + 1);
-        }
-      }
-      int water = nextMaterial;
-      if (Water.Count >= 4)
-      {
-        materials.Add(new JsonObject
-        {
-          ["id"] = water, ["glass"] = true, ["water"] = true, ["cutout"] = false, ["blend"] = false, ["decal"] = false, ["hidden"] = false,
-          ["texture"] = null, ["color"] = new JsonArray(0.18f, 0.38f, 0.42f),
-          ["normal"] = WaterSurface != null ? url(WaterKey) : null,
-          // (Its points' world height less theirs: water.fxc fades the mirror by the world z.)
-          ["worldZ"] = WaterOriginZ,
-        });
-      }
-      _packs.Clear();
-      long filled = 0;
-      foreach (string key in named)
-      {
-        if (Texture(key) is not byte[] texture)
-        {
-          continue;
-        }
-        if (_packs.Count == 0 || (filled > 0 && filled + texture.Length > PackBytes))
-        {
-          _packs.Add(new List<string>());
-          filled = 0;
-        }
-        _packs[^1].Add(key);
-        filled += texture.Length;
-      }
-      var packs = new JsonArray();
-      for (int i = 0; i < _packs.Count; i++)
-      {
-        packs.Add(new JsonObject { ["url"] = url(PackKey + i), ["textures"] = new JsonArray(_packs[i].Select(k => (JsonNode)JsonValue.Create(url(k))!).ToArray()) });
-      }
-
-      var part = new JsonObject { ["type"] = "scene", ["packs"] = packs, ["materials"] = materials };
-      var meshes = new JsonArray();
-      int nextMesh = firstMesh;
-      foreach (var obj in Objects)
-      {
-        var scene = Models[obj.Model];
-        var shown = scene.Root.CheckedMeshes().ToHashSet();
-        foreach (var mesh in scene.Meshes)
-        {
-          if (!shown.Contains(mesh.Id))
-          {
-            continue;
-          }
-          var node = JsonSerializer.SerializeToNode(mesh.ToMessage())!.AsObject();
-          int id = nextMesh++;
-          node["id"] = id;
-          node["material"] = materialStart[obj.Model] + mesh.Material;
-          node["background"] = true;
-          node["room"] = obj.Room;
-          // A far version (drawn into the mirrored surroundings' map), and one only for that map.
-          if (obj.Far)
-          {
-            node["far"] = true;
-          }
-          if (obj.MirrorOnly)
-          {
-            node["mirrorOnly"] = true;
-          }
-          if (obj.FloatAt is Vector3 floatAt)
-          {
-            node["floatAt"] = new JsonArray(floatAt.X, floatAt.Y, floatAt.Z);
-          }
-          // Moved and turned into the scene; it doesn't move with bones there.
-          node["positions"] = Floats(Transform(mesh.Positions, obj.Place, true));
-          if (mesh.Normals != null)
-          {
-            node["normals"] = Floats(Transform(mesh.Normals, obj.Place, false));
-          }
-          // Its normal map's tangents turned the same way (x, y, z and the binormal's side w).
-          if (mesh.Tangents != null)
-          {
-            var tangents = (float[])mesh.Tangents.Clone();
-            for (int i = 0; i + 3 < tangents.Length; i += 4)
-            {
-              var t = Vector3.Normalize(Vector3.TransformNormal(new Vector3(tangents[i], tangents[i + 1], tangents[i + 2]), obj.Place));
-              tangents[i] = t.X; tangents[i + 1] = t.Y; tangents[i + 2] = t.Z;
-            }
-            node["tangents"] = Floats(tangents);
-          }
-          node.Remove("skinBones");
-          node.Remove("skinWeights");
-          meshes.Add(node);
-          visible.Add(id);
-          if (meshes.Count >= meshesPerPart)
-          {
-            part["meshes"] = meshes;
-            yield return part.ToJsonString();
-            part = new JsonObject { ["type"] = "scene", ["materials"] = new JsonArray() };
-            meshes = new JsonArray();
-          }
-        }
-      }
-      if (Water.Count >= 4)
-      {
-        var positions = Water.SelectMany(p => new[] { p.X, p.Y, p.Z }).ToArray();
-        var indices = new List<ushort>();
-        for (int q = 0; q + 3 < Water.Count && q + 3 < ushort.MaxValue; q += 4)
-        {
-          // Corners in the file's order: 0, 1 one edge, 2, 3 the other.
-          indices.AddRange(new[] { (ushort)q, (ushort)(q + 1), (ushort)(q + 2), (ushort)(q + 1), (ushort)(q + 3), (ushort)(q + 2) });
-        }
-        int id = nextMesh++;
-        meshes.Add(new JsonObject
-        {
-          ["id"] = id, ["material"] = water, ["background"] = true,
-          ["positions"] = Floats(positions),
-          ["normals"] = Floats(Water.SelectMany(_ => new[] { 0f, 0f, 1f }).ToArray()),
-          ["colors"] = Floats(WaterColors.SelectMany(c => new[] { c.X, c.Y, c.Z }).ToArray()),
-          ["indices"] = Convert.ToBase64String(MemoryMarshal.AsBytes(indices.ToArray().AsSpan())),
-        });
-        visible.Add(id);
-      }
-      if (meshes.Count > 0 || part.ContainsKey("packs"))
-      {
-        part["meshes"] = meshes;
-        yield return part.ToJsonString();
-      }
-    }
-    /// <summary>
-    /// The "mapLights" message: the lights of the objects' models (lamps, wall lights; the light the game
-    /// puts there), moved into the scene: place, direction, colour, range, a spot's angle in degrees from its axis
-    /// (0 for a light all round). With them the interiors' rooms (by their numbers in the objects' room):
-    /// the interior's place, the turn from the scene into it, the box there.
-    /// </summary>
-    /// <summary>
-    /// The "mapLights" message; <paramref name="volumeTexture"/> and <paramref name="coronaTexture"/>: the addresses
-    /// of <see cref="LightVolume"/> and <see cref="Corona"/>, or null.
-    /// </summary>
-    public object LightsMessage(string? volumeTexture = null, string? coronaTexture = null)
-    {
-      var lights = new List<object>();
-      foreach (var obj in Objects)
-      {
-        foreach (var light in Models[obj.Model].Lights)
-        {
-          var at = Vector3.Transform(light.Position, obj.Place);
-          var way = Vector3.TransformNormal(light.Direction, obj.Place);
-          way = way.LengthSquared() > 1e-8f ? Vector3.Normalize(way) : new Vector3(0, 0, -1);
-          var across = Vector3.TransformNormal(light.Tangent, obj.Place);
-          lights.Add(new
-          {
-            position = new[] { at.X, at.Y, at.Z },
-            direction = new[] { way.X, way.Y, way.Z },
-            color = new[] { light.Red, light.Green, light.Blue },
-            // How far it lights (Distance); its Range is how far it is seen.
-            range = light.Distance > 0 ? light.Distance : light.Range,
-            cone = light.Spot ? light.Falloff : 0f,
-            hotSpot = light.Spot ? light.HotSpot : 0f,
-            intensity = light.Intensity,
-            corona = light.CoronaSize,
-            // As GTAIV.exe hands it to the deferred light (0xC1E200 → 0xABCCD0): the radius is Distance
-            // (+0x38; none without it), the strength Range (+0x3C); Flags say when it is on (0xC1F9A0).
-            radius = light.Distance,
-            strength = light.Range,
-            flags = light.Flags,
-            // Drawn by the lighting's shadow program: its own flag 0x8000 and its object's instance flag 0x100.
-            shadows = obj.LampShadows && (light.Flags & 0x8000) != 0,
-            // Its light volume (flag 0x80000; GTAIV.exe 0xAC2270): strength = its own x Range, size x the radius.
-            volume = (light.Flags & 0x80000) != 0 && light.VolumeIntensity != 0 && light.VolumeSize != 0
-              ? new[] { light.VolumeIntensity * light.Range, light.VolumeSize }
-              : null,
-            // Its second axis (the volume's mesh is turned by it: gDeferredLightTangent).
-            tangent = new[] { across.X, across.Y, across.Z },
-            // From how far from the camera it fades out (-1 never; see the page's lampFade).
-            fade = light.FadeDistance,
-          });
-        }
-      }
-      var rooms = Rooms.Select(r => new
-      {
-        name = r.Name,
-        at = new[] { r.At.X, r.At.Y, r.At.Z },
-        turn = new[] { r.Turn.X, r.Turn.Y, r.Turn.Z, r.Turn.W },
-        min = new[] { r.Min.X, r.Min.Y, r.Min.Z },
-        max = new[] { r.Max.X, r.Max.Y, r.Max.Z },
-        blend = r.Blend,
-        portals = r.Portals.Select(q => new
-        {
-          centre = new[] { q.Centre.X, q.Centre.Y, q.Centre.Z }, radius = q.Radius, to = q.To,
-          corners = q.Corners.SelectMany(c => new[] { c.X, c.Y, c.Z }).ToArray(), link = q.Link,
-        }).ToList(),
-      }).ToList();
-      return new { type = "mapLights", lights, rooms, volumeTexture, coronaTexture };
-    }
-
-    private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
 
     private static float[] Transform(float[] values, Matrix4x4 place, bool isPoint)
     {

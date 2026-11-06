@@ -22,13 +22,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.Web.WebView2.Core;
 using RageLib.GtaIV.Pc.Animation;
 
 namespace SparkIV.WinUI.Viewers
@@ -65,15 +62,12 @@ namespace SparkIV.WinUI.Viewers
   }
 
   /// <summary>
-  /// The clips of an animation dictionary (.wad) played on a ped, in the 3D view of ModelView.html, which
-  /// moves the ped's skin with its bones. Playing runs in the page (smooth between frames); it reports the
-  /// frame shown.
+  /// The clips of an animation dictionary (.wad) played on a ped in 3D (the Direct3D 12 renderer), which
+  /// moves the ped's skin with its bones; smooth between frames, it reports the frame shown.
   /// </summary>
   public sealed partial class AnimationView : UserControl, IDisposable
   {
-    private const string Host = "https://anim.sparkiv/";
     private static readonly float[] Speeds = { 0.1f, 0.25f, 0.5f, 1f, 1.5f, 2f, 2.5f };
-    private static readonly string[] BackgroundNames = { "", "grey", "black", "white" };
 
     // Remembered while SparkIV runs.
     private static int s_background;
@@ -86,13 +80,12 @@ namespace SparkIV.WinUI.Viewers
     private readonly ViewerContext _context;
     private readonly AnimationDocument _document;
     private bool _started;
-    private bool _pageReady;
     private bool _ready;
     private bool _settingSlider;
     private bool _playing;
     private int _frame;
 
-    // Map objects: the model shown (of the selected clip), and whether to play when the page has it.
+    // Map objects: the model shown (of the selected clip), and whether to play once it is there.
     private ObjectModel? _object;
     private string? _objectName;
     private bool _playWhenReady;
@@ -160,8 +153,8 @@ namespace SparkIV.WinUI.Viewers
     }
 
     /// <summary>
-    /// The selected clip in the page. For a map object, its model first (loaded in the background, then the
-    /// page starts again with it) when it is another object's than the one shown.
+    /// The selected clip in the view. For a map object, its model first (loaded in the background, then the
+    /// view starts again with it) when it is another object's than the one shown.
     /// </summary>
     private async void ShowClip(bool play)
     {
@@ -184,127 +177,40 @@ namespace SparkIV.WinUI.Viewers
           }
           _object = loaded;
           ShowPedMessage();
-          // The spinner goes on until the page has the model and its textures ("loaded").
+          // The spinner goes on until the view has the model and its textures.
           Working.IsActive = loaded.Scene != null;
           _playWhenReady = play;
-          RestartPage();
+          RestartScene();
           return;
         }
       }
       SendClip(play);
     }
 
-    #region Page
+    #region View
 
-    private async void AnimationView_Loaded(object sender, RoutedEventArgs e)
+    private void AnimationView_Loaded(object sender, RoutedEventArgs e)
     {
       if (_started)
       {
         return;
       }
       _started = true;
-
-      if (Rendering.D3D12.D3D12View.Enabled)
-      {
-        StartNative();
-        return;
-      }
-
-      if (!await ViewerPages.StartAsync(Web, null, _context, Core_WebMessageReceived, allowCopyMenu: false))
-      {
-        Working.IsActive = false;
-        return;
-      }
-      var core = Web.CoreWebView2;
-      core.AddWebResourceRequestedFilter(Host + "*", CoreWebView2WebResourceContext.All);
-      core.WebResourceRequested += Core_WebResourceRequested;
-      core.NavigationStarting += (s, args) =>
-      {
-        if (!args.Uri.StartsWith(Host, StringComparison.OrdinalIgnoreCase))
-        {
-          args.Cancel = true;
-        }
-      };
-      core.Navigate(Host + "index.html");
+      StartNative();
     }
 
-    private void Core_WebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
-    {
-      string name = new Uri(args.Request.Uri).AbsolutePath.TrimStart('/');
-      byte[]? body = null;
-      string type = "image/png";
-      if (name == "index.html")
-      {
-        body = ModelViewPage.Bytes();
-        type = "text/html; charset=utf-8";
-      }
-      else
-      {
-        Scene?.Textures.TryGetValue(name, out body);
-      }
-      args.Response = sender.Environment.CreateWebResourceResponse(new MemoryStream(body ?? Array.Empty<byte>()).AsRandomAccessStream(),
-                                                                   body != null ? 200 : 404, body != null ? "OK" : "Not Found",
-                                                                   "Content-Type: " + type);
-    }
-
-    private void Core_WebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
-    {
-      using var message = JsonDocument.Parse(args.WebMessageAsJson);
-      var root = message.RootElement;
-      switch (root.GetProperty("type").GetString())
-      {
-        case "ready":
-          _pageReady = true;
-          if (root.GetProperty("webgl").GetBoolean() && Scene != null)
-          {
-            // The spinner stays until the page says the textures are there ("loaded").
-            Working.IsActive = true;
-            SendScene();
-          }
-          else
-          {
-            Working.IsActive = false;
-          }
-          if (root.GetProperty("webgl").GetBoolean())
-          {
-            SendClip(play: _playWhenReady);
-          }
-          _playWhenReady = false;
-          break;
-        case "loaded":
-          Working.IsActive = false;
-          break;
-        case "frame":
-          _frame = root.GetProperty("frame").GetInt32();
-          _playing = root.GetProperty("playing").GetBoolean();
-          ShowFrame();
-          break;
-      }
-    }
-
-    private void Post(object message)
-    {
-      if (_pageReady)
-      {
-        Web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
-      }
-    }
-
-    // The native renderer (#112 step 6), by default (SPARKIV_D3D12=0: the page): the ped or object drawn and played by
-    // a ModelScenePlayer, told at each place the page is told the same; it says the frame shown as the page does.
+    // The Direct3D 12 renderer: the ped or object drawn and played by a ModelScenePlayer, which says the frame shown.
     private Rendering.D3D12.D3D12View? _native;
     private Rendering.D3D12.ModelScenePlayer? _player;
     private Rendering.D3D12.NativeViewInput? _input;
 
     private void StartNative()
     {
-      Web.Visibility = Visibility.Collapsed;
-      Native.Visibility = Visibility.Visible;
       try
       {
         _player = new Rendering.D3D12.ModelScenePlayer(action => DispatcherQueue.TryEnqueue(() => action()))
         {
-          // (The page's "frame" and "loaded".)
+          // (The frame shown, and the textures there.)
           FrameChanged = (frame, playing) =>
           {
             _frame = frame;
@@ -332,7 +238,7 @@ namespace SparkIV.WinUI.Viewers
       StartNativeScene();
     }
 
-    // As when the page is ready: the scene (the spinner until its textures are there), then the clip.
+    // The scene (the spinner until its textures are there), then the clip.
     private void StartNativeScene()
     {
       if (Scene != null)
@@ -357,43 +263,22 @@ namespace SparkIV.WinUI.Viewers
       {
         return;
       }
-      Post(new
-      {
-        type = "scene",
-        materials = scene.Materials.Select(m => m.ToMessage(key => Host + key)),
-        meshes = scene.Meshes.Select(m => m.ToMessage()),
-      });
       // A model without a skeleton gets its one bone with the clip (SendClip).
       var bones = scene.Bones.OrderBy(b => b.Index).ToList();
       _skeleton = null;
       if (bones.Count > 0)
       {
-        Post(new
-        {
-          type = "skeleton",
-          parent = bones.Select(b => b.Parent),
-          position = bones.SelectMany(b => new[] { b.X, b.Y, b.Z }),
-          rotation = bones.SelectMany(b => b.Quaternion),
-          names = bones.Select(b => b.Name),
-        });
         _skeleton = new GtaIV.Pc.ViewerSkeleton(bones.Select(b => b.Parent).ToArray(), bones.SelectMany(b => new[] { b.X, b.Y, b.Z }).ToArray(),
                                                 bones.SelectMany(b => b.Quaternion).ToArray(), bones.Select(b => b.Name).ToArray());
       }
-      Post(new { type = "options", textures = true, wireframe = false });
-      Post(new { type = "background", name = BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
       var ids = scene.Root.CheckedMeshes().ToArray();
-      Post(new { type = "visible", ids, fit = true });
-      Post(new { type = "speed", value = Speeds[Math.Clamp(s_speed, 0, Speeds.Length - 1)] });
-      Post(new { type = "loop", on = s_loop });
-      Post(new { type = "move", on = s_move });
-      Post(new { type = "facials", on = s_facials });
       if (_player != null)
       {
-        // The same natively (the scene's meshes moving with bones).
+        // The scene's meshes moving with bones.
         _player.SetScene(scene, true);
         _player.SetAnimation(null, false);
         _player.SetOptions(true, false, false);
-        _player.SetBackground(Math.Clamp(s_background, 0, BackgroundNames.Length - 1));
+        _player.SetBackground(Math.Clamp(s_background, 0, 3));
         _player.SetVisible(ids, true);
         _player.SetSpeed(Speeds[Math.Clamp(s_speed, 0, Speeds.Length - 1)]);
         _player.SetLoop(s_loop);
@@ -402,8 +287,7 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    // The skeleton the page has now (the "skeleton" messages: the scene's, or a model without one its one bone of the
-    // clip), for the native view's pose.
+    // The skeleton shown now (the scene's, or a model without one its one bone of the clip), for the pose.
     private GtaIV.Pc.ViewerSkeleton? _skeleton;
 
     private static float FramesPerSecond(Animation clip) =>
@@ -424,13 +308,6 @@ namespace SparkIV.WinUI.Viewers
       }
       return values;
     }
-
-    /// <summary>Values for the page: base64 of their little-endian bytes.</summary>
-    private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
-
-    /// <summary>Tracks for the page's clip message.</summary>
-    private static List<object> TrackMessages(IEnumerable<GtaIV.Pc.ClipTrack> tracks) =>
-      tracks.Select(t => (object)new { bone = t.Bone, kind = t.Position ? "position" : "rotation", values = Base64(t.Values) }).ToList();
 
     /// <summary>
     /// A map object's root track, as its change since the first frame applied to the root's rest: the track
@@ -520,7 +397,7 @@ namespace SparkIV.WinUI.Viewers
     }
 
     /// <summary>
-    /// The clip for the page: its bone tracks; its movement through the world (model tracks); the facial
+    /// The clip shown: its bone tracks; its movement through the world (model tracks); the facial
     /// clips it starts (FacialAnimation track: the hash of a facial clip's name, from the ped's game). The
     /// events list shows every whole-number track's changes.
     /// </summary>
@@ -540,22 +417,16 @@ namespace SparkIV.WinUI.Viewers
       Dictionary<int, int>? oneBone = _document.IsObjects ? OneBoneOf(clip, objectNotes) : null;
       var tracks = BoneTracks(clip, out int matched, out int notInPed, oneBone);
       var uvTrack = _document.IsObjects ? TextureMatrix(clip, objectNotes) : null;
-      object? uv = uvTrack == null ? null : new[] { new { material = uvTrack.Material, row0 = Base64(uvTrack.Row0), row1 = Base64(uvTrack.Row1) } };
 
       var moverPosition = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelPosition && t.IsDecoded);
       var moverRotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelRotation && t.IsDecoded);
       var moverPositionValues = moverPosition == null ? null : Sampled(clip, moverPosition, 3);
       var moverRotationValues = moverRotation == null ? null : Sampled(clip, moverRotation, 4);
-      object? mover = moverPosition == null && moverRotation == null ? null : new
-      {
-        position = moverPositionValues == null ? null : new { bone = 0, kind = "position", values = Base64(moverPositionValues) },
-        rotation = moverRotationValues == null ? null : new { bone = 0, kind = "rotation", values = Base64(moverRotationValues) },
-      };
-      MoveButton.IsEnabled = mover != null;
+      bool hasMover = moverPosition != null || moverRotation != null;
+      MoveButton.IsEnabled = hasMover;
 
       // Events, and the facial clips started.
       var events = new List<AnimationEventRow>();
-      var facials = new List<object>();
       var facialClips = new List<GtaIV.Pc.FacialClip>();
       int facialsFound = 0, facialsMissing = 0;
       foreach (var track in clip.Tracks.Where(t => t.DataType == 3 && t.IsDecoded))
@@ -587,13 +458,6 @@ namespace SparkIV.WinUI.Viewers
               {
                 text = facial.Clip.ShortName + "   (" + facial.Source + ", " + facial.Clip.FrameCount + " frames)";
                 facialsFound++;
-                facials.Add(new
-                {
-                  start = f,
-                  frames = Math.Max(1, facial.Clip.FrameCount),
-                  fps = FramesPerSecond(facial.Clip),
-                  tracks = TrackMessages(facialTracks),
-                });
                 facialClips.Add(new GtaIV.Pc.FacialClip(f, Math.Max(1, facial.Clip.FrameCount), FramesPerSecond(facial.Clip), facialTracks));
               }
               else
@@ -626,13 +490,12 @@ namespace SparkIV.WinUI.Viewers
       events.Sort((a, b) => a.Frame.CompareTo(b.Frame));
       EventList.ItemsSource = events;
       NoEventsText.Visibility = events.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-      FacialsButton.IsEnabled = facials.Count > 0;
+      FacialsButton.IsEnabled = facialClips.Count > 0;
       ShowFrame();
 
-      Post(new { type = "clip", frames, fps, tracks = TrackMessages(tracks), mover = _document.IsObjects ? null : mover, facials, uv, play });
       if (_player != null)
       {
-        // Natively: the pose of the skeleton the page has now and this clip (its movement through the world only a ped's).
+        // The pose of the skeleton shown now and this clip (its movement through the world only a ped's).
         bool moves = !_document.IsObjects;
         var data = new GtaIV.Pc.ViewerClip(frames, fps, tracks,
                                            moves && moverPositionValues != null ? new GtaIV.Pc.ClipTrack(0, true, moverPositionValues) : null,
@@ -646,7 +509,7 @@ namespace SparkIV.WinUI.Viewers
       {
         notes.Add(_object.Source);
       }
-      if (matched > 0 || uv == null)
+      if (matched > 0 || uvTrack == null)
       {
         notes.Add(matched + " bone tracks played");
       }
@@ -663,7 +526,7 @@ namespace SparkIV.WinUI.Viewers
       {
         notes.Add(facialsMissing + " facial " + (facialsMissing == 1 ? "event" : "events") + " without a clip for this face");
       }
-      if (mover != null && !_document.IsObjects)
+      if (hasMover && !_document.IsObjects)
       {
         notes.Add("moves through the world" + (s_move ? "" : " (off)"));
       }
@@ -672,7 +535,7 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>
     /// For a model without a skeleton (bkn2_bs_logobust2): the clip turns it as a whole when it moves one
-    /// bone besides the root (the object's own, its pivot at that track's place); the page gets that one
+    /// bone besides the root (the object's own, its pivot at that track's place); the view gets that one
     /// bone, in rest where the clip starts. Null otherwise (the model's bones are used).
     /// </summary>
     private Dictionary<int, int>? OneBoneOf(Animation clip, List<string> notes)
@@ -701,14 +564,6 @@ namespace SparkIV.WinUI.Viewers
       var rotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.BoneRotation && t.BoneId == id && t.IsDecoded)?.GetValue(0, clip.SequenceFrameLimit);
       var restPosition = position == null ? new[] { 0f, 0f, 0f } : new[] { position[0], position[1], position[2] };
       var restRotation = rotation == null ? new[] { 0f, 0f, 0f, 1f } : new[] { rotation[0], rotation[1], rotation[2], rotation[3] };
-      Post(new
-      {
-        type = "skeleton",
-        parent = new[] { -1 },
-        position = restPosition,
-        rotation = restRotation,
-        names = new[] { AnimationViewer.ModelNameOf(clip) },
-      });
       _skeleton = new GtaIV.Pc.ViewerSkeleton(new[] { -1 }, restPosition, restRotation, new[] { AnimationViewer.ModelNameOf(clip) });
       return new Dictionary<int, int> { [id] = 0 };
     }
@@ -804,28 +659,24 @@ namespace SparkIV.WinUI.Viewers
     private void Facials_Click(object sender, RoutedEventArgs e)
     {
       s_facials = FacialsButton.IsChecked == true;
-      Post(new { type = "facials", on = s_facials });
       _player?.SetFacials(s_facials);
     }
 
     private void Move_Click(object sender, RoutedEventArgs e)
     {
       s_move = MoveButton.IsChecked == true;
-      Post(new { type = "move", on = s_move });
       _player?.SetMove(s_move);
       Status.Text = s_move ? Status.Text.Replace("moves through the world (off)", "moves through the world")
                            : Status.Text.Replace("moves through the world", "moves through the world (off)").Replace("(off) (off)", "(off)");
       if (!s_move)
       {
-        Post(new { type = "fit" });
         _player?.Fit();
       }
     }
 
-    // To a frame, stopped (the page's "seek").
+    // To a frame, stopped.
     private void SeekTo(int frame)
     {
-      Post(new { type = "seek", frame });
       _player?.Seek(frame);
     }
 
@@ -860,7 +711,6 @@ namespace SparkIV.WinUI.Viewers
     private void Play_Click(object sender, RoutedEventArgs e)
     {
       _playing = !_playing;
-      Post(new { type = "play", on = _playing });
       _player?.Play(_playing);
       ShowFrame();
     }
@@ -898,7 +748,6 @@ namespace SparkIV.WinUI.Viewers
     private void Loop_Click(object sender, RoutedEventArgs e)
     {
       s_loop = LoopButton.IsChecked == true;
-      Post(new { type = "loop", on = s_loop });
       _player?.SetLoop(s_loop);
     }
 
@@ -909,7 +758,6 @@ namespace SparkIV.WinUI.Viewers
         return;
       }
       s_speed = SpeedBox.SelectedIndex;
-      Post(new { type = "speed", value = Speeds[s_speed] });
       _player?.SetSpeed(Speeds[s_speed]);
     }
 
@@ -920,17 +768,15 @@ namespace SparkIV.WinUI.Viewers
         return;
       }
       s_background = Math.Max(0, BackgroundBox.SelectedIndex);
-      Post(new { type = "background", name = BackgroundNames[s_background] });
       _player?.SetBackground(s_background);
     }
 
     private void Fit_Click(object sender, RoutedEventArgs e)
     {
-      Post(new { type = "fit" });
       _player?.Fit();
     }
 
-    /// <summary>Another ped: loaded in the background, then the page starts again with it.</summary>
+    /// <summary>Another ped: loaded in the background, then the view starts again with it.</summary>
     private async void PedBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
       if (!_ready || PedBox.SelectedItem is not PedChoice ped || ped == _document.Ped)
@@ -944,38 +790,15 @@ namespace SparkIV.WinUI.Viewers
       PedBox.IsEnabled = true;
       ShowPedMessage();
       _playing = false;
-      RestartPage();
+      RestartScene();
     }
 
-    /// <summary>
-    /// The page from the start, for another ped or object; it asks for the scene when ready. Navigating
-    /// again rather than Reload: Reload fails while the page is still loading (two objects' clips clicked
-    /// quickly). Nothing when the page isn't there yet (it loads with the scene then) or the view closed.
-    /// </summary>
-    private void RestartPage()
+    /// <summary>The new scene and clip, for another ped or object (nothing once the view closed).</summary>
+    private void RestartScene()
     {
-      if (_disposed)
-      {
-        return;
-      }
-      // Natively the new scene and clip at once (the player keeps no state of the page's to start again from).
-      if (_player != null)
+      if (!_disposed && _player != null)
       {
         StartNativeScene();
-        return;
-      }
-      if (Web.CoreWebView2 == null)
-      {
-        return;
-      }
-      _pageReady = false;
-      try
-      {
-        Web.CoreWebView2.Navigate(Host + "index.html");
-      }
-      catch (COMException)
-      {
-        // The view is closing.
       }
     }
 
@@ -1001,11 +824,6 @@ namespace SparkIV.WinUI.Viewers
       _input = null;
       _native?.Dispose();
       _native = null;
-      if (Web.CoreWebView2 != null)
-      {
-        Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;
-      }
-      Web.Close();
     }
   }
 }

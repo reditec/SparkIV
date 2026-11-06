@@ -1,8 +1,9 @@
 # Native Direct3D 12 renderer (#112)
 
-Status: **steps 1-6** – the cutscene, model and animation views draw natively by default. `SPARKIV_D3D12=0` still
-draws them with the WebView2/WebGL page (`src/SparkIV/Viewers/ModelView.html`) as before; that path is to be removed.
-(Elsewhere in this document "with `SPARKIV_D3D12=1`" means the native path, now the default.)
+Status: **steps 1-6** – the cutscene, model and animation views draw with Direct3D 12 only. The WebView2/WebGL page
+(`src/SparkIV/Viewers/ModelView.html`, `src/SparkIV/Viewers/GtaIV/Pc/gtaiv-pc.js`) and the `SPARKIV_D3D12` switch were
+removed on 2026-11-06; where this document cites the page (file and line numbers), it means those files as they were
+before then (git history, e.g. commit 5433710). "With `SPARKIV_D3D12=1`" below means the renderer as it is now.
 
 ## Why
 
