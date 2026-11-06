@@ -325,9 +325,28 @@ Findings:
 Effect (native, game-frame diff): intro s2 f682.5 2.09 → 2.03 (page 1.98), all of it from the 0x10000 rule (the room
 rule alone: 2.09); every other reference unchanged.
 
+**Update 2026-11-06 (#113): solved for the four outside frames, ported (native).** Matched again with the lamps'
+objects (`D3D12LAMPDUMP=1` now prints `objroom`, the room the lamp's object is listed in by the interior's `.ide`, and
+each room's portals to the outside with their distance and share of the screen):
+
+| Frame (camera outside) | Game draws of the rooms | Nearest outside portal on screen |
+|---|---|---|
+| s2 f71.25 | none | room 1's big window, 162 m, 0.2 % of the screen |
+| s2 f352.75 | none | none on screen |
+| s2 f682.5 | all 45 of room 1 (on, before the far clip), none of rooms 0, 2, 3 | room 1's windows, 7.5-13.7 m (the big one 48 %) |
+| s2 f863 | none | room 0's hatch 16.8 m (2.6 %), room 1's window 62 m |
+
+- **The two 0xac060 lamps** the game draws from outside (f71.25, f863) lie in room 1's box, but their object is in no
+  room of the interior: they are the outside's lamps (the bridge's outer wall). SparkIV took a lamp's room from the box
+  it stands in; now from its object (`LocationObject.Room`; an object of the interior's limbo still by the box).
+- **From outside**, a room's lamps are drawn only when one of its portals to the outside is on screen and within 15 m of
+  the camera (`CutsceneLights.OutsidePortalReach`), on through its portals as from inside. The 15 m is fitted: the
+  game's test lies between 13.7 and 16.8 m - or it is a share of the screen between 2.6 % and 48 %, or the camera's
+  distance from the interior; the four frames don't tell these apart. cutgen `D3D12ALLROOMSOUTSIDE=1` keeps every
+  room's lamps (as before).
+
 Open:
-- What drops interior lamps seen from outside (f863: room 0 in full, room 1 but two): a portal occlusion or facing
-  test, or a distance limit; the sphere test 0x431E40 is in the encrypted part.
+- What the game's own test from outside is (see above); the sphere test 0x431E40 is in the encrypted part.
 - Seen from room 3 (s3 f569.75) the game also draws 4 lamps of room 0, which `SeenRooms` doesn't reach.
 - What sets the table entry of flag 0x10000 (0x15E88F0 at DAT_01174790), and whether such lamps' coronas are drawn.
 
