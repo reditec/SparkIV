@@ -477,7 +477,9 @@ Five pieces of the page that native lacked, each ported as the page does it (all
   -w..w is this on 0..w), back faces culled, writing depth, LESSEQUAL, ONE / INVSRCALPHA for gta_emissive (glowOver),
   ONE / ONE for the others. gta_glass_emissive is no longer left out of the models (the page draws it). cutgen:
   `D3D12NOGLOW=1`. This drew the intro's 3D credits (csTitles*, gta_emissive bucket 5), bc_3's pier wall lamps and
-  bc_1's globe lamps.
+  bc_1's globe lamps. The glow's fog (#97, `PSGlow`): by its own distance as the game's fog pass after it, a
+  gta_emissive's (`PartFlags.GlowOver`, blended over) going towards the fog's colour, the added ones darkened by it;
+  before, every glow was only darkened and the intro's credits came out grey and faint (see `fxc.md`).
 - **The see-through pass's order** (ModelView.html ~3352-3380): in the decal pass first the dirt decals and the decals
   of a location model with dirt decals (`Part.DirtFirst`, the page's `dirtFirst` / `dirtModel`), in the see-through
   pass first the glowing see-through parts (the page's `glowFirst`: in a room multiplier over 0, outside

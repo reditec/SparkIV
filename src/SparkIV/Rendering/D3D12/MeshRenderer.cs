@@ -204,7 +204,7 @@ StructuredBuffer<PartData> Parts : register(t2);
 static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64, GlowLit = 128;
 static const uint FNormal = 1, FSpec = 2, FSpecFlat = 4, FEnv = 8, FEnvSpec = 16, FPaint2 = 32, FDirt = 64, FStipple = 128,
   FVehGlass = 256, FVehLights = 512, FDecalBelow = 1024, FDecalAoBelow = 2048, FForwardShine = 4096, FTextureAlpha = 8192,
-  FTextured = 16384, FFixedAlpha = 32768, FForwardLit = 65536, FRawAo = 131072;
+  FTextured = 16384, FFixedAlpha = 32768, FForwardLit = 65536, FRawAo = 131072, FGlowOver = 262144;
 
 // The stipple's share kept per level (stipple.wtd all_stips: of 64) and a vehicle lamp's dimmers (by its vertex alpha).
 static const float Kept[16] = { 0, 6, 8, 12, 11, 12, 16, 24, 32, 40, 48, 52, 52, 56, 58, 64 };
@@ -1052,7 +1052,14 @@ float4 PSGlow(VsOut input) : SV_Target
     }
   }
   float3 rgb = texel.rgb * d.Tint.rgb * input.color * d.Material.w;
-  rgb *= 1 - FogAmount(length(f.Eye.xyz - input.world));
+  // The fog as the game's (#97): its unlit_draw programs have none (GTAIV.3.trace, the intro's credits, call 9023010,
+  // PS 0x2c471ea0: texture x vertex colour x emissiveMultiplier x colorize); the fog pass after them (9023536,
+  // PS 0x2d2e5740) fogs the light by the depth the glows wrote too (the credits stay bright over the far city). So a
+  // glow blended over (gta_emissive) goes towards the fog's colour by its distance, an added one (the others) is
+  // darkened by it - the same as the game's fog over the glow and what is behind it together.
+  float distance = length(f.Eye.xyz - input.world);
+  float amount = FogAmount(distance);
+  rgb = (bits & FGlowOver) != 0 ? lerp(rgb, FogColour(distance), amount) : rgb * (1 - amount);
   return float4(rgb * a, a);
 }
 
@@ -1400,7 +1407,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     {
       NormalMap = 1, SpecularMap = 2, SpecularFlat = 4, Environment = 8, EnvironmentSpecular = 16, Paint2 = 32, Dirt = 64,
       Stipple = 128, VehicleGlass = 256, VehicleLights = 512, DecalBelow = 1024, DecalAoBelow = 2048, ForwardShine = 4096,
-      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768, ForwardLit = 65536, RawAo = 131072,
+      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768, ForwardLit = 65536, RawAo = 131072, GlowOver = 262144,
     }
 
     /// <summary>
@@ -2659,6 +2666,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         if (material.VehicleLights)
         {
           flags |= PartFlags.VehicleLights;
+        }
+        // A see-through gta_emissive's glow (not strong, not night): blended over what is behind (the fog in PSGlow).
+        if (material.Emissive && textured && pass is Pass.Blend or Pass.Glass && !material.EmissiveStrong && !material.EmissiveAtNight)
+        {
+          flags |= PartFlags.GlowOver;
         }
         // The maps: normal map, specular map, environment (each only with the texture itself).
         int normal = 0, specular = 0, environment = 0, dirtTexture = 0;

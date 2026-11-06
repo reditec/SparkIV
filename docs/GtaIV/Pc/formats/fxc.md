@@ -41,6 +41,18 @@ SRCALPHA / INVSRCALPHA, the table lamp's `gta_emissivestrong` (12) with SRCALPHA
 (`GTAIV.1.trace`, `gta_emissivestrong`, 88298834) with SRCALPHA / ONE. `gta_emissive`'s ps 2 also scales its alpha by
 `globalScalars.x` and `.y` for fading (1 and 1 in those frames: alpha unchanged).
 
+**No fog in these programs; the fog comes after** (#97, `GTAIV.3.trace`, intro s2 f71.25, the frame ending at call
+9025327). The intro's 3D credits (`csTitlesIntroA3`, `gta_emissive` bucket 5, skinned) are drawn by
+`unlit_drawskinned` at calls 9023010 and 9023014: PS 0x2c471ea0 = texture × vertex colour × `emissiveMultiplier` (c66 =
+5) × `colorize` (c51 = 1), alpha = texture.a × vertex.a (`globalScalars` c39 = (1, 1, 0.996, 0.543): unchanged),
+SRCALPHA / INVSRCALPHA, ZWRITE on. No fog. After the see-through draws a full-screen pass (call 9023536, PS
+0x2d2e5740: `globalFogParams` c41, `globalFogColor` c42, `globalFogColorN` c43, `gDepthFxParams` c16, `dofProj` c66,
+reading `GBufferTextureSampler3` and `HDRSampler`) puts the depth effect and the fog over the HDR light by depth, none
+where the depth is 1 (the sky). The credits stay bright where they lie over the far city, so that depth is the one
+the glows wrote too: a glow is fogged by its own distance, the fog's colour mixed over it and over what shows through
+it alike. For a glow blended over (`gta_emissive`) that is the glow going towards the fog's colour; for an added one
+(SRCALPHA / ONE) the glow darkened by the fog. `gta_emissivestrong`'s `unlit_draw` (ps 2) has no fog either.
+
 ## Shine read from the G-buffer programs
 
 The G-buffer pass (`deferred_draw`) writes the shine into GB2: GB2.x = half the strength, GB2.y² × 512 the power
