@@ -2,6 +2,18 @@
 
 Versions follow [Semantic Versioning](docs/versioning.md); 1.0 will be the first version that fully supports GTA IV (PC). SparkIV shows this file in Settings → About, and after an update the part of the new version.
 
+## v0.9.0-alpha.6 – 2026-11-06
+
+- Cutscenes, models and animations are now drawn by SparkIV's own Direct3D 12 renderer instead of a web page: much smoother playback (also in busy scenes like the intro's harbour), faster loading, and a picture closer to the game.
+- Cutscenes: playback no longer jumps back and forth after pausing and resuming; the picture follows the sound smoothly.
+- Cutscenes: a cutscene's .wad file opens in the cutscene view with just its section, with its models, place, sound and subtitles.
+- Cutscenes: the night sky has its stars and the galaxy, and the clouds drift with the time of day.
+- Cutscenes: the cutscene's own lights and the lamps around light the scene as in the game; lamps inside buildings only shine out where a door or window is near.
+- Cutscenes: glowing signs fade into the haze in the distance, car and ped glass is lit as in the game, and worn props such as glasses always show.
+- Cutscene view: in the free view the cutscene's camera is shown again, the background choice works again, and the Fit button is gone.
+- New "Open file" button (Ctrl+O) opens a single file from disk.
+- Models: vehicles that showed nothing (e.g. dukes.wft) open again.
+
 ## v0.9.0-alpha.5 – 2026-11-04
 
 - Cutscenes: the intro starts at 05:15 and its clock stands still, as in the game.
