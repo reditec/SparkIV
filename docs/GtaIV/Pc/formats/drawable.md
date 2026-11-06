@@ -48,6 +48,25 @@ segment, `0x6xxxxxxx` into the graphics segment.
   (+0x20 / +0x30) are (-0.927, -2.690, -0.498) to (0.932, 2.212, 1.185).
 - The index buffers were already right: their only data pointer (+0x08) is set in both files.
 
+### Second file: a loose `dukes.wft` (origin unknown, likely modded)
+
+- **The file.** RSC header `52 53 43 05`, type 0x70, flags 0xE40DA020 (system 0x20000, graphics 0x360000). The same
+  hash-like vtables as the old vigero (drawable 0x49C27D95, vertex buffer 0x5CB234A6). All 34 vertex buffers of the
+  body's three LODs have +0x08 = **0** and the data pointer only at +0x18 (e.g. LOD 0 mesh 0:
+  `5CB234A6 00004C7D 00000000 00000044 5001EDB0 00000000 60000000 00000000`). Its "_hd" texture names and 46,348
+  triangles at LOD 0 (stock cars have about 10-15k) point to a modded car exported in the older layout; not confirmed.
+- **Before the fix** every buffer was read from the graphics segment's start, i.e. from LOD 0 mesh 0's data with each
+  mesh's own stride (44 to 68 bytes). Two meshes (LOD 0 meshes 5 and 13, strides 52 and 44) came out with **NaN
+  positions**. `Vector3.Min`/`Max` carry a NaN through (checked: `Min(NaN, 1)` and `Min(1, NaN)` are both NaN), so the
+  box the view fits to was NaN, so was the camera, and every vertex was clipped: the viewport stayed empty although
+  draws were issued and nothing was logged. (The old vigero had no NaN among its misread vertices; it showed spikes.)
+- **With the fix** the reader gives OpenIV's numbers: LOD 0 of the body 39,816 vertices / 46,348 triangles; with the two
+  wheel drawables (fragment children 15 and 16: 1,105 / 932 and 1,287 / 1,282) **42,208 vertices**, OpenIV's count. No
+  NaN or Inf, every index below its mesh's vertex count, the LOD 0 meshes' boxes inside the drawable's bounds
+  (+0x20 / +0x30: (-0.982, -2.875, -0.410) to (0.977, 2.512, 0.760); the lowest LOD reaches slightly beyond, to x 1.038).
+- **Not guarded.** The model view has no NaN check in its fit; a file whose vertices really are NaN would still show
+  nothing.
+
 ## Other differences between the two vigero files (no effect on SparkIV)
 
 - **vtables.** The old file's structures carry other values in their first dword (drawable 0x49C27D95, geometry
