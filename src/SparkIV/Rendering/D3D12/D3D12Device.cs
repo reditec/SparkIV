@@ -44,9 +44,9 @@ namespace SparkIV.WinUI.Rendering.D3D12
     {
       bool debug = false;
 #if DEBUG
-      // (SPARKIV_D3D12_DEBUG=0 leaves it off in a Debug build too: it checks every call, a harbour frame's thousands of
-      // draws take far longer then - for measuring.)
-      if (Environment.GetEnvironmentVariable("SPARKIV_D3D12_DEBUG") != "0" &&
+      // (Only with SPARKIV_D3D12_DEBUG=1: it checks every call, a cutscene frame's ~20,000 draws then take ~370 ms
+      // instead of ~15 - a Debug build started with F5 would play at a few frames a second.)
+      if (Environment.GetEnvironmentVariable("SPARKIV_D3D12_DEBUG") == "1" &&
           Vortice.Direct3D12.D3D12.D3D12GetDebugInterface(out ID3D12Debug? debugInterface).Success && debugInterface != null)
       {
         debugInterface.EnableDebugLayer();
