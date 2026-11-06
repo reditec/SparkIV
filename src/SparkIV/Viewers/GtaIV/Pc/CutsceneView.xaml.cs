@@ -135,23 +135,35 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _document = document;
 
       var cut = document.Cut;
-      SectionList.ItemsSource = cut.Sections.Select((s, i) => new CutSectionRow(i, s, document.Sections[i] != null)).ToList();
+      _only = document.OnlySection is int o && o >= 0 && o < cut.Sections.Count ? o : null;
+      SectionList.ItemsSource = cut.Sections.Select((s, i) => new CutSectionRow(i, s, document.Sections[i] != null))
+                                            .Where(row => _only == null || row.Index == _only).ToList();
       CastList.ItemsSource = document.Actors.Select(a => new CutActorRow(a)).ToList();
       _sectionStart = new double[cut.Sections.Count + 1];
       for (int i = 0; i < cut.Sections.Count; i++)
       {
         _sectionStart[i + 1] = _sectionStart[i] + cut.Sections[i].Duration;
       }
+      // Opened from one section's .wad: that section alone is played (the rest of the scene's time isn't reached).
+      _from = _only is int only ? _sectionStart[only] : 0;
+      _to = _only is int last ? _sectionStart[last + 1] : _sectionStart[^1];
+      _startSection = _only ?? 0;
       // Each part's subtitles from the start of that part's first section (a .cut of several scenes one after the other
       // times each part's [TEXT] from its own start).
       foreach (var subtitle in cut.Subtitles)
       {
         int first = cut.Sections.FindIndex(s => s.Part == subtitle.Part);
         double seconds = (first >= 0 ? _sectionStart[first] : 0) + subtitle.Start / 1000.0;
+        // (One section alone: only its subtitles.)
+        if (seconds < _from - 0.001 || seconds >= _to)
+        {
+          continue;
+        }
         _subtitles.Add(new CutSubtitleRow(subtitle, document.Texts.TryGetValue(subtitle.Key, out var text) ? text : subtitle.Key, seconds, Locate(seconds).Section));
       }
       SubtitleList.ItemsSource = _subtitles;
-      TimeSlider.Maximum = Math.Max(1, Math.Round(Length * 1000));
+      TimeSlider.Maximum = Math.Max(Math.Round(_from * 1000) + 1, Math.Round(_to * 1000));
+      TimeSlider.Minimum = Math.Round(_from * 1000);
 
       if (document.AudioFile != null && document.AudioTrack != null)
       {
@@ -203,6 +215,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>The whole scene, in seconds.</summary>
     private double Length => _sectionStart[^1];
+
+    // Only this section played (opened from its .wad), or null; the time played: all of the scene or that section's.
+    private readonly int? _only;
+    private readonly double _from, _to;
+    private readonly int _startSection;
 
     /// <summary>A section's frames a second: its clips' (30 in GTA IV's).</summary>
     private float FpsOf(int section)
@@ -536,7 +553,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // the end of a section while playing goes on with the next.
       if (_audio == null && _playing && !playing)
       {
-        if (_section + 1 < _document.Cut.Sections.Count)
+        if (_section + 1 < _document.Cut.Sections.Count && _only == null)
         {
           ShowSection(_section + 1, 0, play: true);
           return;
@@ -705,7 +722,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       SendScene();
-      ShowSection(Math.Max(0, _section), _frame, play: false);
+      ShowSection(_section >= 0 ? _section : _startSection, _frame, play: false);
     }
 
     private void Post(object message) => PostJson(JsonSerializer.Serialize(message));
@@ -834,7 +851,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private async void PreloadLocations()
     {
       string? folder = _document.GameFolder;
-      if (_locationLoading || _castLoading || folder == null || !s_location)
+      // (One section alone: no other section's location to load ahead.)
+      if (_locationLoading || _castLoading || folder == null || !s_location || _only != null)
       {
         return;
       }
@@ -1339,7 +1357,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       {
         return;
       }
-      seconds = Math.Clamp(seconds, 0, Length);
+      seconds = Math.Clamp(seconds, _from, _only != null ? Math.Max(_from, _to - 0.0005) : _to);
       var (section, frame) = Locate(seconds);
       _playing = play;
       if (section != _section)
@@ -1397,7 +1415,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       double seconds = _audio.Position.TotalSeconds;
-      if (_audio.HasEnded || seconds >= Length - 0.001)
+      if (_audio.HasEnded || seconds >= _to - 0.001)
       {
         _playing = false;
         _audio.Pause();
@@ -1438,7 +1456,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       // At the end of the scene: from the start.
-      GoTo(Now >= Length - 1 / (double)_fps ? 0 : Now, play: true);
+      GoTo(Now >= _to - 1 / (double)_fps ? _from : Now, play: true);
     }
 
     private void Step(int by) => GoTo(Now + by / (double)_fps, play: false);
@@ -1598,10 +1616,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         FpsText.Text = "";
         FpsSummary();
       }
-      FrameText.Text = TimeSpan.FromSeconds(now).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(Length).ToString(@"m\:ss\.f");
+      FrameText.Text = TimeSpan.FromSeconds(now - _from).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(_to - _from).ToString(@"m\:ss\.f");
       SectionText.Text = "Section " + (_section + 1) + " of " + _document.Cut.Sections.Count + "   ·   frame " + (_frame + 1) + " / " + _frames;
       _settingSlider = true;
-      TimeSlider.Value = Math.Clamp(Math.Round(now * 1000), 0, TimeSlider.Maximum);
+      TimeSlider.Value = Math.Clamp(Math.Round(now * 1000), TimeSlider.Minimum, TimeSlider.Maximum);
       _settingSlider = false;
       PlayGlyph.Glyph = ((char)(_playing ? 0xE769 : 0xE768)).ToString();
       ToolTipService.SetToolTip(PlayButton, _playing ? "Pause (space)" : "Play (space)");
@@ -1630,7 +1648,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // The track runs between the thumb's half widths at either end.
       const double inset = 10;
       double width = SectionMarks.ActualWidth - 2 * inset, height = SectionMarks.ActualHeight;
-      if (width <= 0 || Length <= 0)
+      // (One section alone: no marks.)
+      if (width <= 0 || Length <= 0 || _only != null)
       {
         return;
       }
