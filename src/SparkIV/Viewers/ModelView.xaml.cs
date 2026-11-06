@@ -22,10 +22,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.Web.WebView2.Core;
 using SparkIV.WinUI.Rendering.D3D12;
 using File = RageLib.FileSystem.Common.File;
 
@@ -33,12 +31,10 @@ namespace SparkIV.WinUI.Viewers
 {
   /// <summary>
   /// A model (.wdr), model dictionary (.wdd) or fragment (.wft) in 3D, with the tree of its parts to show
-  /// and hide. The scene is drawn by ModelView.html with WebGL; its textures are served from memory.
+  /// and hide, drawn by the Direct3D 12 renderer.
   /// </summary>
   public sealed partial class ModelView : UserControl, IDisposable
   {
-    private const string Host = "https://model.sparkiv/";
-
     // Remembered while SparkIV runs.
     private static int s_background;
     private static bool s_textures = true;
@@ -48,7 +44,6 @@ namespace SparkIV.WinUI.Viewers
     private readonly ViewerContext _context;
     private readonly ModelScene _scene;
     private bool _started;
-    private bool _pageReady;
 
     public ModelView(ViewerContext context, ModelScene scene)
     {
@@ -132,11 +127,6 @@ namespace SparkIV.WinUI.Viewers
       PartsPanel.Visibility = textures ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    // Raised up when the textures are made again, so the page doesn't take the old pictures from its cache.
-    private int _textureVersion;
-
-    private string TextureUrl(string key) => Host + key + "?v=" + _textureVersion;
-
     private bool _reloading;
     private bool _reloadAgain;
 
@@ -164,9 +154,7 @@ namespace SparkIV.WinUI.Viewers
             _context.ShowMessage("Textures not updated", "The model changed too much; open it again to see it.", true);
             return;
           }
-          _textureVersion++;
-          Post(new { type = "materials", materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)) });
-          // (Natively the model made again with its new textures.)
+          // (The model made again with its new textures.)
           _player?.SetScene(_scene, false);
           ShowEmbeddedTextures();
           UpdateStatus();
@@ -193,114 +181,23 @@ namespace SparkIV.WinUI.Viewers
       window.BringToFront();
     }
 
-    private async void ModelView_Loaded(object sender, RoutedEventArgs e)
+    private void ModelView_Loaded(object sender, RoutedEventArgs e)
     {
       if (_started)
       {
         return;
       }
       _started = true;
-
-      if (D3D12View.Enabled)
-      {
-        StartNative();
-        return;
-      }
-
-      if (!await ViewerPages.StartAsync(Web, null, _context, Core_WebMessageReceived, allowCopyMenu: false))
-      {
-        Working.IsActive = false;
-        return;
-      }
-
-      // The page comes from the same made-up host as the textures, so WebGL may use them.
-      var core = Web.CoreWebView2;
-      core.AddWebResourceRequestedFilter(Host + "*", CoreWebView2WebResourceContext.All);
-      core.WebResourceRequested += Core_WebResourceRequested;
-      core.NavigationStarting += (s, args) =>
-      {
-        if (!args.Uri.StartsWith(Host, StringComparison.OrdinalIgnoreCase))
-        {
-          args.Cancel = true;
-        }
-      };
-      core.Navigate(Host + "index.html");
+      StartNative();
     }
 
-    private void Core_WebResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
-    {
-      string name = new Uri(args.Request.Uri).AbsolutePath.TrimStart('/');
-      byte[]? body = null;
-      string type = "image/png";
-      if (name == "index.html")
-      {
-        body = ModelViewPage.Bytes();
-        type = "text/html; charset=utf-8";
-      }
-      else
-      {
-        _scene.Textures.TryGetValue(name, out body);
-      }
-
-      args.Response = sender.Environment.CreateWebResourceResponse(new MemoryStream(body ?? Array.Empty<byte>()).AsRandomAccessStream(),
-                                                                   body != null ? 200 : 404, body != null ? "OK" : "Not Found",
-                                                                   "Content-Type: " + type);
-    }
-
-    private void Core_WebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
-    {
-      using var message = JsonDocument.Parse(args.WebMessageAsJson);
-      var root = message.RootElement;
-      if (root.GetProperty("type").GetString() == "spot")
-      {
-        ShowSpot(root.GetProperty("index").GetInt32(), root.GetProperty("count").GetInt32());
-        return;
-      }
-      if (root.GetProperty("type").GetString() != "ready")
-      {
-        return;
-      }
-
-      _pageReady = true;
-      Working.IsActive = false;
-      if (!root.GetProperty("webgl").GetBoolean())
-      {
-        return;
-      }
-
-      Post(new
-      {
-        type = "scene",
-        materials = _scene.Materials.Select(m => m.ToMessage(TextureUrl)),
-        meshes = _scene.Meshes.Select(m => m.ToMessage()),
-      });
-      if (_scene.Lights.Count > 0)
-      {
-        Post(new { type = "lights", lights = _scene.Lights.Select(l => l.ToMessage()) });
-      }
-      SendOptions();
-      SendBackground();
-      SendVisible(fit: true);
-    }
-
-    private void Post(object message)
-    {
-      if (_pageReady)
-      {
-        Web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
-      }
-    }
-
-    // The native renderer (#112 step 6), by default (SPARKIV_D3D12=0: the page): the model drawn by a ModelScenePlayer,
-    // told at each place the page is told the same (its messages go nowhere without the page).
+    // The Direct3D 12 renderer: the model drawn by a ModelScenePlayer.
     private D3D12View? _native;
     private ModelScenePlayer? _player;
     private NativeViewInput? _input;
 
     private void StartNative()
     {
-      Web.Visibility = Visibility.Collapsed;
-      Native.Visibility = Visibility.Visible;
       try
       {
         _player = new ModelScenePlayer(action => DispatcherQueue.TryEnqueue(() => action()))
@@ -325,7 +222,7 @@ namespace SparkIV.WinUI.Viewers
         Message.Visibility = Visibility.Visible;
         return;
       }
-      // As when the page is ready: the scene, its lights, the options, the background, what is shown (fitted).
+      // The scene, its lights, the options, the background, what is shown (fitted).
       _player.SetScene(_scene, false);
       if (_scene.Lights.Count > 0)
       {
@@ -342,35 +239,25 @@ namespace SparkIV.WinUI.Viewers
       }
     }
 
-    /// <summary>A model's lights as the native view's markers (the page's "lights" message: SceneLight.ToMessage).</summary>
+    /// <summary>A model's lights as the view's markers.</summary>
     internal static List<ViewerLight> ViewerLights(ModelScene scene) =>
       scene.Lights.Select(l => new ViewerLight(l.Position, new System.Numerics.Vector3(l.Red, l.Green, l.Blue), l.Spot, l.Direction, l.Falloff, l.Meshes)).ToList();
 
     private void SendVisible(bool fit)
     {
       var ids = _scene.Root.CheckedMeshes().ToArray();
-      Post(new { type = "visible", ids, fit });
       _player?.SetVisible(ids, fit);
     }
 
     private void SendOptions()
     {
-      Post(new
-      {
-        type = "options",
-        textures = TexturesButton.IsChecked == true,
-        wireframe = WireframeButton.IsChecked == true,
-        lights = LightsButton.IsChecked == true,
-      });
       _player?.SetOptions(TexturesButton.IsChecked == true, WireframeButton.IsChecked == true, LightsButton.IsChecked == true);
     }
 
-    private static readonly string[] BackgroundNames = { "", "grey", "black", "white" };
-
     private void SendBackground()
     {
-      int index = Math.Clamp(BackgroundBox.SelectedIndex, 0, BackgroundNames.Length - 1);
-      Post(new { type = "background", name = BackgroundNames[index] });
+      // (Gradient, grey, black, white.)
+      int index = Math.Clamp(BackgroundBox.SelectedIndex, 0, 3);
       _player?.SetBackground(index);
     }
 
@@ -407,7 +294,7 @@ namespace SparkIV.WinUI.Viewers
 
     #region Spots
 
-    /// <summary>The page found the places of the model (index -1: the whole model is shown).</summary>
+    /// <summary>The view found the places of the model (index -1: the whole model is shown).</summary>
     private void ShowSpot(int index, int count)
     {
       SpotContainer.Visibility = count >= 2 ? Visibility.Visible : Visibility.Collapsed;
@@ -419,7 +306,6 @@ namespace SparkIV.WinUI.Viewers
 
     private void GoToSpot(int step)
     {
-      Post(new { type = "spot", step });
       _player?.Spot(step);
     }
 
@@ -520,7 +406,6 @@ namespace SparkIV.WinUI.Viewers
 
     private void Fit_Click(object sender, RoutedEventArgs e)
     {
-      Post(new { type = "fit" });
       _player?.Fit();
     }
 
@@ -578,11 +463,6 @@ namespace SparkIV.WinUI.Viewers
       _input = null;
       _native?.Dispose();
       _native = null;
-      if (Web.CoreWebView2 != null)
-      {
-        Web.CoreWebView2.WebResourceRequested -= Core_WebResourceRequested;
-      }
-      Web.Close();
     }
   }
 

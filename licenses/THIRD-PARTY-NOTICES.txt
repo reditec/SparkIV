@@ -9,6 +9,7 @@ licenses. The license texts of the components marked [file] are in the files nam
 - Ookii.Dialogs.WinForms (BSD-3-Clause), https://github.com/ookii-dialogs/ookii-dialogs-winforms
 - Velopack (MIT), https://github.com/velopack/velopack
 - Vortice.Windows (MIT), https://github.com/amerkoleci/Vortice.Windows
+- SharpGen.Runtime (MIT), https://github.com/SharpGenTools/SharpGenTools
 - DirectX Shader Compiler (Microsoft Software License Terms; LLVM Release License; MIT),
   https://github.com/microsoft/DirectXShaderCompiler, shipped by Vortice.Dxc.Native
   [file] DirectXShaderCompiler-LICENSE.txt, DirectXShaderCompiler-LLVM-LICENSE.txt,
@@ -81,6 +82,15 @@ Vortice.Windows (Vortice.Direct3D12, Vortice.DXGI, Vortice.Dxc, Vortice.Mathemat
 -------------------------------------------------------------------------------
 
 Copyright (c) Amer Koleci and Contributors
+
+Licensed under the MIT License, with the same terms as Velopack's below.
+
+
+-------------------------------------------------------------------------------
+SharpGen.Runtime, SharpGen.Runtime.COM (used by Vortice.Windows)
+-------------------------------------------------------------------------------
+
+Copyright (c) 2010-2017 Alexandre Mutel, 2017-2023 Jeremy Koritzinsky, 2023-2024 Amer Koleci
 
 Licensed under the MIT License, with the same terms as Velopack's below.
 

@@ -406,163 +406,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   }
 
   /// <summary>
-  /// What the page gets for a cutscene: all actors' meshes in one scene (each mesh tagged with its actor,
-  /// its textures under the actor's number), and per section every actor's clip and the camera's.
+  /// What the renderer gets for a cutscene beyond the actors' scenes: the props they wear, per section every actor's
+  /// motion, the camera's places, the fades.
   /// </summary>
   public static class CutsceneMessages
   {
     public static float FramesPerSecond(Animation clip) =>
       clip.Duration > 0 && clip.FrameCount > 1 ? (clip.FrameCount - 1) / clip.Duration : 30;
 
-    /// <summary>A texture's key for the page: the actor's number, then its key in the actor's scene.</summary>
-    public static string TextureKey(int actor, string key) => "a" + actor + "/" + key;
-
-    private const string PropKey = "p/";
-
-    /// <summary>The texture behind a key from <see cref="TextureKey"/>, or null.</summary>
-    public static byte[]? Texture(IEnumerable<CutActor> actors, string key)
-    {
-      int slash = key.IndexOf('/');
-      if (slash < 2 || !int.TryParse(key.AsSpan(1, slash - 1), out int id))
-      {
-        return null;
-      }
-      var actor = actors.FirstOrDefault(a => a.Id == id);
-      string rest = key.Substring(slash + 1);
-      var scene = actor?.Scene;
-      // The props' textures under "p/".
-      if (rest.StartsWith(PropKey, StringComparison.Ordinal))
-      {
-        scene = actor?.PropScene;
-        rest = rest.Substring(PropKey.Length);
-      }
-      return scene != null && scene.Textures.TryGetValue(rest, out var png) ? png : null;
-    }
-
-    /// <summary>The "scene" message (all actors) and the meshes shown.</summary>
-    public static (JsonObject Scene, List<int> Visible) Scene(IEnumerable<CutActor> actors, Func<string, string> url)
-    {
-      var materials = new JsonArray();
-      var meshes = new JsonArray();
-      var visible = new List<int>();
-      int nextMaterial = 0, nextMesh = 0;
-      foreach (var actor in actors)
-      {
-        var scene = actor.Scene;
-        if (scene == null)
-        {
-          continue;
-        }
-        int firstMaterial = nextMaterial;
-        foreach (var material in scene.Materials)
-        {
-          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => url(TextureKey(actor.Id, key))))!.AsObject();
-          node["id"] = firstMaterial + material.Id;
-          if (actor.Paint != null && material.PaintSlot > 0)
-          {
-            node["paint"] = new JsonArray(actor.Paint[material.PaintSlot - 1].Select(c => (JsonNode)c).ToArray());
-          }
-          if (actor.Paint != null && material.Paint2Slot > 0)
-          {
-            node["paint2"] = new JsonArray(actor.Paint[material.Paint2Slot - 1].Append(1f).Select(c => (JsonNode)c).ToArray());
-          }
-          if (material.Vehicle)
-          {
-            node["dirtLevel"] = actor.Dirt;
-            node["lightsOn"] = actor.LightsOn;
-            if (actor.Shine is float[] shine)
-            {
-              node["reflectivePower"] = shine[4];
-              // The second shine (gta_vehicle_paint2's deferred pixel shader): the third colour (slot 6), the
-              // exponent's factor 6.8 x specular2FactorED / specularFactorED, the strength's
-              // specular2ColorIntensityED² / specularColorFactorED (both then x spec map and reflectivity).
-              if (material.HasSpecular2 && actor.Paint != null)
-              {
-                node["specular2"] = new JsonArray(actor.Paint[5][0], actor.Paint[5][1], actor.Paint[5][2],
-                                                  6.8f * shine[2] / shine[0], shine[3] * shine[3] / shine[1]);
-              }
-            }
-          }
-          materials.Add(node);
-          nextMaterial = Math.Max(nextMaterial, firstMaterial + material.Id + 1);
-        }
-        var shown = scene.Root.CheckedMeshes().ToHashSet();
-        foreach (var mesh in scene.Meshes)
-        {
-          var node = JsonSerializer.SerializeToNode(mesh.ToMessage())!.AsObject();
-          int id = nextMesh++;
-          node["id"] = id;
-          node["material"] = firstMaterial + mesh.Material;
-          node["actor"] = actor.Id;
-          // Peds are lit as they are; props (a door) as the location is (no light of the camera).
-          node["ped"] = actor.IsPed;
-          if (actor.Faces.TryGetValue(mesh.Id, out var face))
-          {
-            node["face"] = FaceMessage(face);
-          }
-          meshes.Add(node);
-          if (shown.Contains(mesh.Id))
-          {
-            visible.Add(id);
-          }
-        }
-      }
-      // The props worn, after everyone's own meshes (their numbers stay as they were): each fixed to its
-      // bone, made where that bone is at rest (the dictionary's meshes are in the bone's own space: Bernie's
-      // glasses 3 to 8 cm before his head bone), so the page moves it with the bone as it moves the skin.
-      foreach (var actor in actors)
-      {
-        if (actor.Scene == null || actor.PropScene == null || actor.Props.Count == 0)
-        {
-          continue;
-        }
-        int firstMaterial = nextMaterial;
-        foreach (var material in actor.PropScene.Materials)
-        {
-          var node = JsonSerializer.SerializeToNode(material.ToMessage(key => url(TextureKey(actor.Id, PropKey + key))))!.AsObject();
-          node["id"] = firstMaterial + material.Id;
-          materials.Add(node);
-          nextMaterial = Math.Max(nextMaterial, firstMaterial + material.Id + 1);
-        }
-        var rest = RestOf(actor.Scene.Bones);
-        foreach (var (part, bone) in actor.Props)
-        {
-          var ids = part.CheckedMeshes().ToHashSet();
-          foreach (var mesh in actor.PropScene.Meshes.Where(m => ids.Contains(m.Id)))
-          {
-            var node = JsonSerializer.SerializeToNode(mesh.ToMessage())!.AsObject();
-            int id = nextMesh++;
-            node["id"] = id;
-            node["material"] = firstMaterial + mesh.Material;
-            node["actor"] = actor.Id;
-            node["ped"] = true;
-            var place = rest[bone];
-            node["positions"] = Floats(Moved(mesh.Positions, place, true));
-            if (mesh.Normals != null)
-            {
-              node["normals"] = Floats(Moved(mesh.Normals, place, false));
-            }
-            int count = mesh.Positions.Length / 3;
-            var bones = new float[count * 4];
-            var weights = new float[count * 4];
-            for (int i = 0; i < count; i++)
-            {
-              bones[i * 4] = bone;
-              weights[i * 4] = 1;
-            }
-            node["skinBones"] = Floats(bones);
-            node["skinWeights"] = Floats(weights);
-            meshes.Add(node);
-            visible.Add(id);
-          }
-        }
-      }
-      return (new JsonObject { ["type"] = "scene", ["materials"] = materials, ["meshes"] = meshes }, visible);
-    }
-
     /// <summary>
-    /// The props an actor wears (its PropScene's checked meshes of each part), each made where its bone is at rest and
-    /// fixed to that bone with weight 1, as <see cref="Scene"/> gives them to the page; for the native renderer.
+    /// The props an actor wears (its PropScene's checked meshes of each part), each made where its bone is at rest (the
+    /// dictionary's meshes are in the bone's own space: Bernie's glasses 3 to 8 cm before his head bone) and fixed to
+    /// that bone with weight 1, so it moves with the bone as the skin does.
     /// </summary>
     public static List<SceneMesh> WornProps(CutActor actor)
     {
@@ -592,8 +447,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             SkinBones = bones,
             SkinWeights = weights,
             Alphas = mesh.Alphas,
-            // The rest as the page's prop message keeps it (Section(): mesh.ToMessage() with only the positions,
-            // normals, bones and weights replaced): the vertex colours (a ped's AO is their red - without them a worn
+            // The rest as the mesh has it (only the positions, normals, bones and weights replaced): the vertex colours (a ped's AO is their red - without them a worn
             // helmet took the whole light from around and its reflections, et01_ba), the tangents as they are, the
             // layer coordinates and weights.
             Colors = mesh.Colors,
@@ -606,8 +460,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return meshes;
     }
 
-    // Where each bone of a skeleton is at rest, in the model: its place and turn on its parent's, as the page
-    // makes them (world = local × parent's world).
+    // Where each bone of a skeleton is at rest, in the model: its place and turn on its parent's (world = local ×
+    // parent's world).
     private static System.Numerics.Matrix4x4[] RestOf(IReadOnlyList<SceneBone> bones)
     {
       var byIndex = bones.ToDictionary(b => b.Index);
@@ -642,9 +496,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return result;
     }
 
-    private static string Floats(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
-
-    /// <summary>A track's values at every frame (3 or 4 a frame).</summary>
     /// <summary>
     /// Where a section's camera is (relative to its origin), every tenth frame (or every <paramref name="step"/>th):
     /// whether the scene is seen from outside (see CutsceneLocation.Load). None without its camera's clip.
@@ -750,109 +601,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
     }
 
-    /// <summary>A track's values at every frame (3 or 4 a frame), as the page takes them.</summary>
-    public static string Sampled(Animation clip, AnimationTrack track, int components)
-    {
-      int frames = Math.Max(1, clip.FrameCount);
-      var values = new float[frames * components];
-      for (int f = 0; f < frames; f++)
-      {
-        var value = track.GetValue(f, clip.SequenceFrameLimit);
-        for (int c = 0; c < components && value != null && c < value.Length; c++)
-        {
-          values[f * components + c] = value[c];
-        }
-      }
-      return Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
-    }
-
-    /// <summary>
-    /// A head mesh's face shapes for the page: per shape its key, the vertices it moves and their changes as the
-    /// game adds them before skinning (GTA IV (PC), docs/GtaIV/Pc/formats/wbs.md): position x, y, z / 4096, normal
-    /// and tangent x, y, z / 128 (each x the shape's weight).
-    /// </summary>
-    private static JsonArray FaceMessage(RageLib.GtaIV.Pc.Models.BlendShapeMesh face)
-    {
-      string Floats(IEnumerable<float> values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.ToArray().AsSpan()));
-      var shapes = new JsonArray();
-      foreach (var target in face.Targets.Where(t => t.Key >= 0))
-      {
-        shapes.Add(new JsonObject
-        {
-          ["key"] = target.Key,
-          ["name"] = target.Name,
-          ["vertices"] = Convert.ToBase64String(MemoryMarshal.AsBytes(target.Vertices.AsSpan())),
-          ["positions"] = Floats(target.Positions.Select(v => v / 4096f)),
-          ["normals"] = target.Normals == null ? null : Floats(target.Normals.Select(v => v / 128f)),
-          ["tangents"] = target.Tangents == null ? null : Floats(target.Tangents.Select(v => v / 128f)),
-        });
-      }
-      return shapes;
-    }
-
-    /// <summary>One number a frame (the camera's field of view).</summary>
-    private static string SampledScalar(Animation clip, AnimationTrack track)
-    {
-      int frames = Math.Max(1, clip.FrameCount);
-      var values = new float[frames];
-      for (int f = 0; f < frames; f++)
-      {
-        var value = track.GetValue(f, clip.SequenceFrameLimit);
-        values[f] = value != null && value.Length > 0 ? value[0] : 0;
-      }
-      return Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
-    }
-
-    /// <summary>
-    /// A scene message in parts of at most <paramref name="meshes"/> meshes each, the first with its materials and
-    /// texture packs, the others with their meshes only (the page adds every scene message to what it has): one
-    /// message is one string on the page, and V8 holds at most ~536 million characters in one.
-    /// </summary>
-    public static IEnumerable<JsonObject> SplitScene(JsonObject scene, int meshes)
-    {
-      if (scene["meshes"] is not JsonArray all || all.Count <= meshes)
-      {
-        yield return scene;
-        yield break;
-      }
-      var list = all.ToList();
-      all.Clear();
-      for (int at = 0; at < list.Count; at += meshes)
-      {
-        var part = at == 0 ? scene : new JsonObject { ["type"] = scene["type"]?.DeepClone(), ["materials"] = new JsonArray() };
-        var some = new JsonArray();
-        foreach (var mesh in list.Skip(at).Take(meshes))
-        {
-          some.Add(mesh);
-        }
-        part["meshes"] = some;
-        yield return part;
-      }
-    }
-
-    /// <summary>
-    /// A section's messages: the timeline (a clip without tracks, as long as the section), the cast with
-    /// each actor's skeleton and clip, the camera. Notes say what was missing.
-    /// </summary>
-    /// <param name="earlier">The sections played before it: their [VEHICLE_REMOVAL] parts stay off (see below).</param>
     /// <summary>
     /// The fades of a section, in its frames (frames of the section, fps its frame rate): in from black at the start of
-    /// the first until inEnd, out to black in the last from outStart to outEnd (-1: none), as CutFile.FadeIn,
-    /// FadeOut and FadeOutLength give them.
+    /// the first, out to black in the last, as CutFile.FadeIn, FadeOut and FadeOutLength give them (#112 4h).
     /// </summary>
-    public static object Fade(CutFile cut, int index, int frames, float fps)
-    {
-      var f = FadeOf(cut, index, frames, fps);
-      return new
-      {
-        type = "fade",
-        inEnd = f.InEnd,
-        outStart = f.OutStart,
-        outEnd = f.OutEnd,
-      };
-    }
-
-    /// <summary>A section's fades in its frames (see <see cref="Fade"/>), for the native renderer (#112 4h).</summary>
     public static SectionFade FadeOf(CutFile cut, int index, int frames, float fps)
     {
       var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
@@ -867,7 +619,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       public static SectionFade None => new SectionFade(0, -1, -1);
 
-      /// <summary>How dark the picture is at a frame (0 not, 1 black), as the page's showFade.</summary>
+      /// <summary>How dark the picture is at a frame (0 not, 1 black).</summary>
       public float At(double frame)
       {
         double dark = 0;
@@ -884,7 +636,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>
-    /// How an actor of a section moves (GTA IV (PC)), for the page (<see cref="Section"/>) and the native renderer:
+    /// How an actor of a section moves (GTA IV (PC)), for the renderer:
     /// its skeleton (bones by index), its clip (null: none), its bones' tracks (local place and turn every frame, the
     /// face clip's merged in, tracks made for a sibling as parent moved under the real one), the clip's model tracks
     /// (where a ped is in the scene; null: none), the bones [VEHICLE_REMOVAL] takes off and the face clip's shape
@@ -971,136 +723,6 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         motions.Add(new CastMotion(actor, bones, clip, positions, rotations, rootPosition, rootRotation, removed, face));
       }
       return motions;
-    }
-
-    public static (object Timeline, object Cast, object? Camera, List<string> Notes) Section(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad,
-                                                                                         IEnumerable<CutSection>? earlier = null)
-    {
-      var notes = new List<string>();
-      var clips = wad?.Animations.ToDictionary(a => a.ShortName, StringComparer.OrdinalIgnoreCase) ?? new Dictionary<string, Animation>(StringComparer.OrdinalIgnoreCase);
-      if (wad == null)
-      {
-        notes.Add((section.Anim ?? "the section's animations") + ".wad isn't beside the file");
-      }
-      int frames = 1;
-      float fps = 30;
-      var anyClip = wad?.Animations.FirstOrDefault();
-      if (anyClip != null)
-      {
-        frames = Math.Max(1, anyClip.FrameCount);
-        fps = FramesPerSecond(anyClip);
-      }
-      else if (section.Duration > 0)
-      {
-        frames = (int)(section.Duration * fps) + 1;
-      }
-
-      var cast = new List<object>();
-      foreach (var motion in Motions(section, actors, wad, earlier, notes))
-      {
-        var (actor, bones, clip) = (motion.Actor, motion.Bones, motion.Clip);
-        object? skeleton = bones.Count == 0 ? null : new
-        {
-          parent = bones.Select(b => b.Parent),
-          position = bones.SelectMany(b => new[] { b.X, b.Y, b.Z }),
-          rotation = bones.SelectMany(b => b.Quaternion),
-          names = bones.Select(b => b.Name),
-        };
-        var tracks = new List<object>();
-        object? root = null;
-        if (clip != null)
-        {
-          foreach (var (bone, values) in motion.Positions)
-          {
-            tracks.Add(new { bone, kind = "position", values = Floats(values) });
-          }
-          foreach (var (bone, values) in motion.Rotations)
-          {
-            tracks.Add(new { bone, kind = "rotation", values = Floats(values) });
-          }
-          if (motion.RootPosition != null || motion.RootRotation != null)
-          {
-            root = new
-            {
-              position = motion.RootPosition == null ? null : new { bone = 0, kind = "position", values = Floats(motion.RootPosition) },
-              rotation = motion.RootRotation == null ? null : new { bone = 0, kind = "rotation", values = Floats(motion.RootRotation) },
-            };
-          }
-        }
-        var faceWeights = motion.Face.Select(f => (object)new { key = f.Key, values = Floats(f.Values) }).ToList();
-        cast.Add(new
-        {
-          id = actor.Id,
-          skeleton,
-          clip = clip == null ? null : new { frames = Math.Max(1, clip.FrameCount), fps = FramesPerSecond(clip), tracks },
-          root,
-          removedBones = motion.Removed,
-          face = faceWeights.Count == 0 ? null : faceWeights,
-          lightsOn = actor.LightsOn,
-          // A vehicle's model box (its body's least corner, for the tail lamp light; see ModelScene.BodyBoundsMin).
-          boundsMin = actor.Scene?.BodyBoundsMin,
-        });
-      }
-
-      object? camera = null;
-      if (section.Camera != null && clips.TryGetValue(section.Camera, out var cameraClip))
-      {
-        var position = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraPosition && t.IsDecoded);
-        var rotation = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraRotation && t.IsDecoded);
-        var fov = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraFov && t.IsDecoded);
-        // The depth of field: near and far in metres (and a third value, 0), per frame; GTAIV.exe hands them to
-        // its post effects (0xADD200 -> 0xADE560 -> 0x5E16F0), which in a cutscene blur what is beyond far.
-        var dof = cameraClip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.CameraDof && t.IsDecoded);
-        camera = new
-        {
-          frames = Math.Max(1, cameraClip.FrameCount),
-          fps = FramesPerSecond(cameraClip),
-          position = position == null ? null : Sampled(cameraClip, position, 3),
-          rotation = rotation == null ? null : Sampled(cameraClip, rotation, 4),
-          fov = fov == null ? null : SampledScalar(cameraClip, fov),
-          dof = dof == null ? null : Sampled(cameraClip, dof, 3),
-        };
-      }
-      else if (section.Camera != null)
-      {
-        notes.Add("no camera clip " + section.Camera);
-      }
-
-      // The scene's lights, each a clip: place, colour, range, strength, cone, direction per frame.
-      var lights = new List<object>();
-      foreach (string name in section.Lights)
-      {
-        if (!clips.TryGetValue(name, out var light))
-        {
-          continue;
-        }
-        AnimationTrack? Track(AnimationTrackKind kind) => light.Tracks.FirstOrDefault(t => t.Kind == kind && t.IsDecoded);
-        var place = Track(AnimationTrackKind.BonePosition);
-        if (place == null)
-        {
-          continue;
-        }
-        string? Scalar(AnimationTrackKind kind) => Track(kind) is AnimationTrack t ? SampledScalar(light, t) : null;
-        string? Vector(AnimationTrackKind kind) => Track(kind) is AnimationTrack t ? Sampled(light, t, 3) : null;
-        lights.Add(new
-        {
-          name,
-          frames = Math.Max(1, light.FrameCount),
-          fps = FramesPerSecond(light),
-          position = Sampled(light, place, 3),
-          // As GTAIV.exe hands them on (0x9CA7E0 to its lights, 0xABCC50): track 140 (OpenIV's "LightRange") the
-          // strength, 141 ("LightIntensity1") the range (its 11th argument: the sphere tested against the view),
-          // 142 ("LightIntensity2") the cone's outer angle from its axis in degrees (half of it the inner).
-          color = Vector(AnimationTrackKind.LightColor),
-          range = Scalar(AnimationTrackKind.LightIntensity1),
-          intensity = Scalar(AnimationTrackKind.LightRange),
-          cone = Scalar(AnimationTrackKind.LightIntensity2),
-          direction = Vector(AnimationTrackKind.LightDirection),
-        });
-      }
-
-      var timeline = new { type = "clip", frames, fps, tracks = Array.Empty<object>() };
-      return (timeline, new { type = "cast", actors = cast, lights }, camera == null ? null : new { type = "camera", camera }, notes);
     }
 
     // The parts of the player shown, one of each: the first variation there is (head_000_r before head_001_r).

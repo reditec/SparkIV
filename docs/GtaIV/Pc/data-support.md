@@ -150,7 +150,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
     - Vertex shader 0x22EC8A80: position = direction.xy / (distance + direction.z), depth 1 − 1/(distance + 1).
     - Pixel shader 0x1A37E8E0: discards everything below the camera. Light = ambient light × AO + sun, without shadows and lamps, with the distant fog on top.
   - It is read at 1 − (R.xy/(2(1 + sat R.z)) + 0.5), at level 4 − 4·sat(strength × 512 × `dReflectionParams.x`); the value is 1/230 in both captures.
-  - **In SparkIV:** `parabolicTarget`, `mirroredAround` in `gtaiv-pc.js`. The smaller levels are mipmaps; I have not rebuilt the game's downsampling shader.
+  - **In SparkIV:** the parabolic map in `MeshRenderer` (Direct3D 12; formerly `parabolicTarget`, `mirroredAround` in the removed `gtaiv-pc.js`). The smaller levels are mipmaps; I have not rebuilt the game's downsampling shader.
 - **Sun shadows:**
   - 4 cascades up to 9.5 / 20 / 50 / 175 m view depth (`gFacetCentre`).
   - Each is drawn at 4096 × 4096 pixels (R32F) and copied, 2 × 2 averaged, into an atlas of 8192 × 2048 pixels (R16F).

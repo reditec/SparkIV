@@ -1352,26 +1352,6 @@ namespace SparkIV.WinUI.Viewers
     public ushort[] Indices { get; }
 
     public int TriangleCount => Indices.Length / 3;
-
-    /// <summary>For the page: the arrays as base64 of their little-endian bytes.</summary>
-    public object ToMessage() => new
-    {
-      id = Id,
-      material = Material,
-      positions = Base64(Positions),
-      normals = Normals == null ? null : Base64(Normals),
-      uvs = Uvs == null ? null : Base64(Uvs),
-      skinBones = SkinBones == null ? null : Base64(SkinBones),
-      skinWeights = SkinWeights == null ? null : Base64(SkinWeights),
-      layerUvs = LayerUvs == null ? null : Base64(LayerUvs),
-      layerWeights = LayerWeights == null ? null : Base64(LayerWeights),
-      colors = Colors == null ? null : Base64(Colors),
-      alphas = Alphas == null ? null : Base64(Alphas),
-      tangents = Tangents == null ? null : Base64(Tangents),
-      indices = Convert.ToBase64String(MemoryMarshal.AsBytes(Indices.AsSpan())),
-    };
-
-    private static string Base64(float[] values) => Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan()));
   }
 
   /// <summary>A light of the model: where, which way, its colour (0 to 1), a spot's outer angle (degrees from its axis), the meshes of its drawable.</summary>
@@ -1396,18 +1376,6 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>Its second axis (a spot's "up"; the light volume's mesh is turned by it).</summary>
     public System.Numerics.Vector3 Tangent { get; init; }
-
-    /// <summary>For the page.</summary>
-    public object ToMessage() => new
-    {
-      position = new[] { Position.X, Position.Y, Position.Z },
-      direction = new[] { Direction.X, Direction.Y, Direction.Z },
-      color = new[] { Red, Green, Blue },
-      spot = Spot,
-      range = Range,
-      falloff = Falloff,
-      meshes = Meshes,
-    };
   }
 
   /// <summary>A bone: its place and turn relative to its parent (Euler angles in radians, as RageLib reads them).</summary>
@@ -1581,51 +1549,6 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>gta_ped_skin's light through the skin: SubColor (r, g, b), SubScatWrap, SubScatWidth; or null.</summary>
     public float[]? SubSurface { get; init; }
-
-    /// <summary>For the page; <paramref name="url"/> makes a texture key the address the page asks for.</summary>
-    public object ToMessage(Func<string, string> url) => new
-    {
-      id = Id,
-      glass = Glass,
-      ped = Ped,
-      vehicleLights = VehicleLights,
-      cutout = Cutout,
-      stipple = Stipple,
-      blend = Blend,
-      decal = Decal,
-      ownLight = OwnLight,
-      decalNormal = DecalNormal,
-      hidden = Hidden,
-      noWater = NoWater,
-      emissive = Emissive,
-      emissiveMultiplier = EmissiveMultiplier,
-      emissiveAtNight = EmissiveAtNight,
-      emissiveStrong = EmissiveStrong,
-      tree = Tree,
-      drawBucket = DrawBucket,
-      subSurface = SubSurface,
-      texture = TextureKey == null ? null : url(TextureKey),
-      color = Color ?? (RenderTarget ? new[] { 0f, 0f, 0f } : null),
-      layers = LayerKeys.Select(k => k == null ? null : url(k)).ToArray(),
-      normal = NormalKey == null ? null : url(NormalKey),
-      specular = SpecularKey == null ? null : url(SpecularKey),
-      environment = EnvironmentKey == null ? null : url(EnvironmentKey),
-      bumpiness = Bumpiness,
-      parallax = Parallax,
-      specularPower = SpecularPower,
-      specularIntensity = SpecularIntensity,
-      specularFlat = SpecularFlat,
-      envSpecular = EnvSpecular,
-      specularMask = SpecularMask,
-      dirtMask = DirtMask,
-      vehicle = Vehicle,
-      dirtTexture = DirtKey == null ? null : url(DirtKey),
-      dirtColor = DirtColor,
-      paint2Texture = Paint2Key == null ? null : url(Paint2Key),
-      paint2 = Paint2,
-      reflectivePower = ReflectivePower,
-      vehicleShine = VehicleShine,
-    };
 
     /// <summary>The material's draw bucket as the model stores it (what it means is the game's: see GtaIV.Pc.GtaIVPcMaterials).</summary>
     public int DrawBucket { get; init; }
