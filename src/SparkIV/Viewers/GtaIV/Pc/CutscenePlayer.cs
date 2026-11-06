@@ -745,13 +745,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>To a frame of the section (as the page's seek).</summary>
-    public void Seek(int frame) => Order(() =>
+    public void Seek(double frame) => Order(() =>
     {
       _ranOut = false;
       _paused = false;
       _time = Math.Clamp(frame, 0, _frames - 1) / _fps;
       _reportedFrame = -1;
     });
+
+    /// <summary>The section's time shown now, in seconds (with its fraction; read on any thread).</summary>
+    public double SectionSeconds => System.Threading.Volatile.Read(ref _time);
 
     /// <summary>Playing on or stopping (as the page's play).</summary>
     public void Play(bool on) => Order(() => StartPlaying(on));
@@ -764,8 +767,20 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return;
       }
       double d = Math.Clamp(frame, 0, _frames - 1) / _fps - _time;
-      _time += Math.Abs(d) > 0.4 ? d : d * 0.2;
+      if (Math.Abs(d) > 0.4)
+      {
+        _time += d;
+        _rate = 1;
+        return;
+      }
+      // Followed by the clock's rate, never by stepping back (#64: the picture runs a little ahead of the sound's reported
+      // time; pulled back by a fifth of it every 40 ms, it went back in time again and again - frames before shown, then
+      // on): up to a quarter slower or faster until it is there.
+      _rate = 1 + Math.Clamp(d * 2, -0.25, 0.25);
     });
+
+    // How fast the clock runs while following the sound (see Sync).
+    private double _rate = 1;
 
     /// <summary>The cutscene's camera shown as lines in the free view or not (the page's showCamera).</summary>
     public void ShowCamera(bool on) => Order(() => _showCamera = on);
@@ -802,6 +817,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         _time = 0;
       }
       _playing = on;
+      _rate = 1;
       _last = 0;
       _reportedFrame = -1;
       FpsReset();
@@ -863,7 +879,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         double dt = _last > 0 ? now - _last : 0;
         _last = now;
         double length = (_frames - 1) / _fps;
-        _time += dt;
+        _time += dt * _rate;
         if (_time > length)
         {
           _time = length;
