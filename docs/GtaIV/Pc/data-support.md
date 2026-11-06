@@ -198,8 +198,8 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 - **In SparkIV:** `SKY_FRAGMENT`, `PERLIN_FRAGMENT`, `perlinNoise` in `ModelView.html`; the values are in `TimeCycle.cs` as `skyHdr`.
 - **Open:**
   - One game hour is assumed to be 120 s of playback time; this is not read from the exe.
-  - `DetailOffset` moves along in the game; in SparkIV it is fixed.
-  - Stars, moon and galaxy (at night) are still missing, as is the blend to the water colour below the horizon (see above).
+  - `DetailOffset` = hour × CloudSpeed (column 107) × 0.0005, as in every traced frame (native renderer; the page keeps a fixed one).
+  - Stars and galaxy (native renderer): `StarFieldBrightness` = (3 s², 0.24 s, 3 s² g, 4) with s = column 108 and g = column 109 (GTAIV.exe 0x615ece; the intro at 05:15: (0.3986, 0.0875, 0.1165), as traced); skydome.wtd's `starfield` (× 8) and `galaxy` at the gta_atmoscatt_clouds vertex program's asin coordinates. The moon is still missing, as is the blend to the water colour below the horizon (see above).
   - The time of the bc_3 and bc_1 reference videos (12:00): the videos don't show the clock; it was around noon when they were recorded, the exact hour isn't known.
   - The light's sun direction (0x103FBE0) has not been found in a trace frame yet.
 

@@ -83,6 +83,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// TLAD's GTAIV.4: 12:50 0.010913.
     /// </summary>
     public float DetailOffset;
+    /// <summary>StarFieldBrightness's x, y, z: (3 s², 0.24 s, 3 s² g), s and g the time cycle's columns 108 and 109
+    /// (GTAIV.exe 0x615ece; see TimeCycle.StarStrength); 0 by day.</summary>
+    public Vector3 StarField;
 
     /// <summary>
     /// The sky of a time cycle (outside's, a room's, or a mix) at an hour, as the page's "sky" message has it
@@ -124,6 +127,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         CloudEdge = c.CloudEdge,
         CloudPhase = cloudPhase,
         DetailOffset = hour * c.CloudSpeed * 0.0005f,
+        StarField = new Vector3(3 * c.StarStrength * c.StarStrength, 0.24f * c.StarStrength, 3 * c.StarStrength * c.StarStrength * c.StarGalaxyShare),
       };
     }
   }
@@ -177,11 +181,14 @@ struct Sky
   float4 TopCloud;      // bias, detail, threshold, height
   float4 CloudShape;    // threshold, bias, shadow strength, inscattering range
   float4 CloudDetail;   // thickness, detail scale, detail strength, fade out
+  float4 Stars;         // xyz: StarFieldBrightness (3 s², 0.24 s, 3 s² g), w: stars on (1)
 };
 ConstantBuffer<Sky> s : register(b1);
 Texture2D Clouds : register(t0);     // baseperlinnoise of skydome.wtd
 Texture2D Detail : register(t1);     // noise16_p of skydome.wtd
 Texture2D Perlin : register(t2);     // rage_perlinnoise's target
+Texture2D StarField : register(t3);  // starfield of skydome.wtd
+Texture2D Galaxy : register(t4);     // galaxy of skydome.wtd
 SamplerState Wrap : register(s0);
 
 struct VsOut { float4 position : SV_Position; float2 ndc : TEXCOORD0; };
@@ -297,6 +304,20 @@ float4 PSSky(VsOut i) : SV_Target
   float3 sunLight2 = sunLight * sunLight;
   float3 glow = (sunLight + sunLight2 * sunLight2) * s.Hdr.y + saturate(saturate(1 - sun) * s.Hdr.y * skyV);
 
+  // The stars and the galaxy (gta_atmoscatt_clouds vs 0 / ps 8): in the dome's space (y up, z = the world's -y)
+  // n = (x, 1.5 y + 0.5, z) normalised, the galaxy at asin(n.x), asin(n.y) x 0.317732662 + GalaxyOffset (0 in the
+  // traces) + 0.5, the stars there x StarFieldUVRepeat (8); star x .x - .z, raised by the galaxy x .y (x 1.2 summed),
+  // the galaxy x .y over it, saturated, added to the sky before the clouds.
+  if (s.Stars.w > 0.5)
+  {
+    float3 nd = normalize(float3(dir.x + 1e-5, dir.z * 1.5 + 0.50001, -dir.y + 1e-5));
+    float2 galaxyUv = asin(clamp(nd.xy, -1, 1)) * 0.317732662 + 0.5;
+    float3 star = StarField.Sample(Wrap, galaxyUv * 8).rgb * s.Stars.x - s.Stars.z;
+    float3 milky = Galaxy.Sample(Wrap, galaxyUv).rgb;
+    star += star * dot(milky * s.Stars.y, 1.2);
+    glow += saturate(milky * s.Stars.y + star);
+  }
+
   if (s.Eye.w > 0.5)
   {
     float2 uv = DomeUv(dir);
@@ -368,6 +389,8 @@ float4 PSSky(VsOut i) : SV_Target
         new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(1, 0), ShaderVisibility.Pixel),
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 2, 0, 0, 0)), ShaderVisibility.Pixel),
         new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 2, 0, 0)), ShaderVisibility.Pixel),
+        // t3, t4: the stars and the galaxy.
+        new RootParameter1(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 2, 3, 0, 0)), ShaderVisibility.Pixel),
       };
       // The page's: REPEAT, mipmapped, anisotropic (the perlin target has no mips).
       var samplers = new[]
@@ -402,7 +425,7 @@ float4 PSSky(VsOut i) : SV_Target
       // (Into the water's mirror: its target has MeshRenderer.MirrorSamples samples a pixel.)
       _mirrorSkyPipeline = d3d.CreateGraphicsPipelineState<ID3D12PipelineState>(Pipeline("PSSky", lightFormat, (uint)MeshRenderer.MirrorSamples));
 
-      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
+      _srvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 5, DescriptorHeapFlags.ShaderVisible));
       _rtvHeap = d3d.CreateDescriptorHeap(new DescriptorHeapDescription(DescriptorHeapType.RenderTargetView, 1));
       _srvSize = d3d.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
 
@@ -413,7 +436,7 @@ float4 PSSky(VsOut i) : SV_Target
       d3d.CreateRenderTargetView(_perlin, null, _rtvHeap.GetCPUDescriptorHandleForHeapStart());
       // Every slot a valid view from the start: the clouds' slots show the perlin target until their textures come
       // (the sky draws no clouds without them, so they are never read).
-      for (int slot = 0; slot < 3; slot++)
+      for (int slot = 0; slot < 5; slot++)
       {
         d3d.CreateShaderResourceView(_perlin, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + slot * (int)_srvSize);
       }
@@ -452,20 +475,32 @@ float4 PSSky(VsOut i) : SV_Target
     /// their copies recorded into <paramref name="list"/>, the upload buffers added to <paramref name="uploads"/> for the
     /// caller to free once the list is done. Ones before are freed (the GPU done with them first). Null: no clouds.
     /// </summary>
-    public void SetTextures(byte[]? clouds, byte[]? cloudDetail, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads)
+    public void SetTextures(byte[]? clouds, byte[]? cloudDetail, ID3D12GraphicsCommandList list, List<ID3D12Resource> uploads,
+                            byte[]? starField = null, byte[]? galaxy = null)
     {
-      if (_clouds != null || _detail != null)
+      if (_clouds != null || _detail != null || _starField != null || _galaxy != null)
       {
         _device.WaitIdle();
         _clouds?.Dispose();
         _detail?.Dispose();
+        _starField?.Dispose();
+        _galaxy?.Dispose();
         _clouds = null;
         _detail = null;
+        _starField = null;
+        _galaxy = null;
       }
       _clouds = Make(clouds, 0, list, uploads);
       _detail = Make(cloudDetail, 1, list, uploads);
+      _starField = Make(starField, 3, list, uploads);
+      _galaxy = Make(galaxy, 4, list, uploads);
       _perlinPhase = float.NaN;
     }
+
+    private ID3D12Resource? _starField, _galaxy;
+
+    /// <summary>Whether the stars' and the galaxy's textures are on the GPU (drawn only then).</summary>
+    public bool HasStars => _starField != null && _galaxy != null;
 
     // A texture of a "SXT1" blob (format 0 DXT1, 1 DXT3, 2 DXT5, 3 A8R8G8B8, 4 L8; width, height, levels; the levels'
     // data) with all its levels the data holds, its view in the slot; null if it can't be made. As TextureCache's.
@@ -596,6 +631,7 @@ float4 PSSky(VsOut i) : SV_Target
       list.SetGraphicsRootDescriptorTable(2, gpu);
       // t2 isn't read by this pass; the clouds' slot keeps the table from pointing at the target being drawn.
       list.SetGraphicsRootDescriptorTable(3, gpu);
+      list.SetGraphicsRootDescriptorTable(4, gpu + 3 * (int)_srvSize);
       list.DrawInstanced(3, 1, 0, 0);
       list.ResourceBarrierTransition(_perlin, ResourceStates.RenderTarget, ResourceStates.PixelShaderResource);
       _perlinState = ResourceStates.PixelShaderResource;
@@ -648,6 +684,7 @@ float4 PSSky(VsOut i) : SV_Target
       Put(f, 64, new Vector3(p.TopCloud.X, p.TopCloud.Y, p.TopCloud.Z), p.TopCloud.W);
       Put(f, 68, new Vector3(p.CloudShape.X, p.CloudShape.Y, p.CloudShape.Z), p.CloudShape.W);
       Put(f, 72, new Vector3(p.CloudDetail.X, p.CloudDetail.Y, p.CloudDetail.Z), p.CloudDetail.W);
+      Put(f, 76, p.StarField, HasStars && (p.StarField.X > 0 || p.StarField.Y > 0) && !NoStars ? 1 : 0);
 
       var gpu = _srvHeap.GetGPUDescriptorHandleForHeapStart();
       list.OMSetRenderTargets(lightTarget);
@@ -657,9 +694,13 @@ float4 PSSky(VsOut i) : SV_Target
       list.SetGraphicsRootConstantBufferView(1, _constants.GPUVirtualAddress + (ulong)(_constantSlot * ConstantSlotBytes));
       list.SetGraphicsRootDescriptorTable(2, gpu);
       list.SetGraphicsRootDescriptorTable(3, gpu + 2 * (int)_srvSize);
+      list.SetGraphicsRootDescriptorTable(4, gpu + 3 * (int)_srvSize);
       list.DrawInstanced(3, 1, 0, 0);
       profiler?.End(list, mark);
     }
+
+    /// <summary>The stars and the galaxy left out (for comparisons).</summary>
+    public static bool NoStars { get; set; }
 
     private static unsafe void Put(float* f, int at, Vector3 v, float w)
     {
@@ -674,6 +715,8 @@ float4 PSSky(VsOut i) : SV_Target
       _device.WaitIdle();
       _clouds?.Dispose();
       _detail?.Dispose();
+      _starField?.Dispose();
+      _galaxy?.Dispose();
       _perlin.Dispose();
       _perlinFixed?.Dispose();
       _constants.Unmap(0);

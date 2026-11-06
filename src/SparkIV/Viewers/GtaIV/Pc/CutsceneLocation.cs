@@ -132,6 +132,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public byte[]? Clouds { get; private set; }
     public byte[]? CloudDetail { get; private set; }
 
+    /// <summary>The stars and the galaxy (skydome.wtd's starfield and galaxy: gta_atmoscatt_clouds' StarFieldSampler and
+    /// GalaxySampler), as ModelScene.Raw makes them; null without them.</summary>
+    public byte[]? StarField { get; private set; }
+    public byte[]? Galaxy { get; private set; }
+
     /// <summary>The light volumes' lookup texture's key (see <see cref="LightVolume"/>).</summary>
     public const string LightVolumeKey = "mlight/volume";
 
@@ -634,6 +639,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             RageLib.Textures.Texture? Named(string part) => textures.Textures.FirstOrDefault(x => x.Name.Contains(part, StringComparison.OrdinalIgnoreCase));
             location.Clouds = Named("baseperlinnoise") is RageLib.Textures.Texture noise ? ModelScene.Raw(noise) : null;
             location.CloudDetail = Named("noise16_p") is RageLib.Textures.Texture detail ? ModelScene.Raw(detail) : null;
+            location.StarField = Named("starfield") is RageLib.Textures.Texture stars ? ModelScene.Raw(stars) : null;
+            location.Galaxy = Named("galaxy") is RageLib.Textures.Texture galaxy ? ModelScene.Raw(galaxy) : null;
           }
         }
         catch (Exception)

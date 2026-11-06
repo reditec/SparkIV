@@ -95,6 +95,15 @@ namespace SparkIV.WinUI.Rendering.D3D12
 
     /// <summary>The frame's depth of field and fade (#112 step 4h); none by default.</summary>
     public PostParams Post { get; init; }
+
+    /// <summary>
+    /// The background where nothing was drawn, over the finished picture (see <see cref="LineOverlay.DrawBackground"/>: 0
+    /// the gradient, 1 grey, 2 black, 3 white), or null (the sky or black, as drawn).
+    /// </summary>
+    public int? Background { get; init; }
+
+    /// <summary>Lines drawn over the finished picture (pairs of points: the cutscene's camera in the free view), or null.</summary>
+    public System.Collections.Generic.IReadOnlyList<Vector3>? OverlayLines { get; init; }
   }
 
 }

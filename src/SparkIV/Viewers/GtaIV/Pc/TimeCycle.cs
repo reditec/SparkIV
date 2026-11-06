@@ -214,6 +214,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float CloudSpeed { get; private init; }
 
     /// <summary>
+    /// The stars (columns 108 and 109; 0 by day): GTAIV.exe's sky setter (0x615ece) makes gta_atmoscatt_clouds'
+    /// StarFieldBrightness of them, (3 s², 0.24 s, 3 s² g, 4) with s column 108 and g column 109 (GTAIV.3.trace, the
+    /// intro at 05:15 EXTRASUNNY: s 0.3645, g 0.2923 → (0.3986, 0.0875, 0.1165, 4), as traced).
+    /// </summary>
+    public float StarStrength { get; private init; }
+    public float StarGalaxyShare { get; private init; }
+
+    /// <summary>
     /// The name of the weather of this number (a script's FORCE_WEATHER_NOW(1)): the file's blocks in their order,
     /// EXTRASUNNY, SUNNY, SUNNY_WINDY, CLOUDY, RAIN, DRIZZLE, FOGGY, LIGHTNING (bernie3's FORCE_WEATHER_NOW(1)
     /// before bc_3, sunny in the game); null without the file or such a block.
@@ -330,6 +338,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         CloudShadowOffset = a.Length > 119 && b.Length > 119 ? V(87) : 0,
         CloudEdge = a.Length > 119 && b.Length > 119 ? V(89) : 0,
         CloudSpeed = a.Length > 119 && b.Length > 119 ? V(107) : 0,
+        StarStrength = a.Length > 119 && b.Length > 119 ? V(108) : 0,
+        StarGalaxyShare = a.Length > 119 && b.Length > 119 ? V(109) : 0,
       };
     }
 

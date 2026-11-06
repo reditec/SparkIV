@@ -52,6 +52,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
     private readonly PanelSwapChain _swapChain;
     private readonly MeshRenderer _renderer;
     private readonly ToneMapper _toneMapper;
+    private readonly LineOverlay _lines;
     private readonly Thread _thread;
     private volatile bool _stop;
     private readonly object _lock = new object();
@@ -79,6 +80,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       D3D12Device.Log("swap chain: at most " + _swapChain.MaximumFrameLatency + " frame(s) queued");
       _renderer = new MeshRenderer(_device, ToneMapper.LightFormat);
       _toneMapper = new ToneMapper(_device, PanelSwapChain.BackBufferFormat);
+      _lines = new LineOverlay(_device, PanelSwapChain.BackBufferFormat, PanelSwapChain.DepthFormat);
       // SPARKIV_D3D12_PROFILE=1: per pass GPU and CPU times, once a second into the log (see GpuProfiler).
       if (GpuProfiler.EnabledInApp)
       {
@@ -205,6 +207,14 @@ namespace SparkIV.WinUI.Rendering.D3D12
               _lastMeasure = now;
             }
             _toneMapper.Composite(list, _swapChain.RenderTargetView, _swapChain.Width, _swapChain.Height, view.Tone, view.Post, _swapChain.DepthBuffer);
+            if (view.Background is int background)
+            {
+              _lines.DrawBackground(list, _swapChain.RenderTargetView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, background);
+            }
+            if (view.OverlayLines is { Count: > 0 } overlay)
+            {
+              _lines.Draw(list, _swapChain.RenderTargetView, _swapChain.DepthView, _swapChain.Width, _swapChain.Height, view.ViewProjection, overlay);
+            }
             profiler?.CpuSince("recording", stage);
             mark = _swapChain.Submit();
           }
@@ -296,6 +306,7 @@ namespace SparkIV.WinUI.Rendering.D3D12
       (_scene as IDisposable)?.Dispose();
       _renderer.Dispose();
       _toneMapper.Dispose();
+      _lines.Dispose();
       _swapChain.Dispose();
       _device.Dispose();
       System.Runtime.GCSettings.LatencyMode = _latencyMode;

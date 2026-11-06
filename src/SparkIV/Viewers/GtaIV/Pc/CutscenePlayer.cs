@@ -44,7 +44,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     private CutsceneSky? _sky;
     private System.Threading.Tasks.Task<CutsceneSky>? _skyMade;
     private System.Threading.Tasks.Task<CutsceneWater>? _waterMade;
-    private (byte[]? Clouds, byte[]? Detail)? _skyTextures;
+    private (byte[]? Clouds, byte[]? Detail, byte[]? Stars, byte[]? Galaxy)? _skyTextures;
     private bool _skyTexturesNew;
 
     private static bool SameBytes(byte[]? a, byte[]? b) => ReferenceEquals(a, b) || (a != null && b != null && a.AsSpan().SequenceEqual(b));
@@ -52,18 +52,19 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public void DrawBackground(D3D12Device device, Vortice.Direct3D12.ID3D12GraphicsCommandList list, Vortice.Direct3D12.CpuDescriptorHandle lightTarget,
                                int width, int height, SceneView view)
     {
-      if (_lighting == null || _sky == null)
+      // (The sky only with the location shown, as the page's useSky; without it the view's background, see Update.)
+      if (_lighting == null || _sky == null || _visibleLocation == null)
       {
         return;
       }
-      if (_skyTexturesNew && _skyTextures is var (clouds, detail))
+      if (_skyTexturesNew && _skyTextures is var (clouds, detail, stars, galaxy))
       {
         long started = GpuProfiler.Now;
         _skyTexturesNew = false;
         using var allocator = device.Device.CreateCommandAllocator(Vortice.Direct3D12.CommandListType.Direct);
         using var upload = device.Device.CreateCommandList<Vortice.Direct3D12.ID3D12GraphicsCommandList>(0, Vortice.Direct3D12.CommandListType.Direct, allocator, null);
         var uploads = new List<Vortice.Direct3D12.ID3D12Resource>();
-        _sky.SetTextures(clouds, detail, upload, uploads);
+        _sky.SetTextures(clouds, detail, upload, uploads, stars, galaxy);
         upload.Close();
         device.Queue.ExecuteCommandList(upload);
         device.WaitIdle();
@@ -531,9 +532,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _drawDistance = drawDistance;
       CutsceneDrawing.TryFarClip(location, drawDistance, out _far);
       _shownLocation = location != null ? key : null;
-      if (location != null && (_skyTextures is not var (c, d) || !SameBytes(c, location.Clouds) || !SameBytes(d, location.CloudDetail)))
+      if (location != null && (_skyTextures is not var (c, d, _, _) || !SameBytes(c, location.Clouds) || !SameBytes(d, location.CloudDetail)))
       {
-        _skyTextures = (location.Clouds, location.CloudDetail);
+        _skyTextures = (location.Clouds, location.CloudDetail, location.StarField, location.Galaxy);
         _skyTexturesNew = true;
       }
       if (location != null && !ReferenceEquals(location, _waterLocation))
@@ -759,6 +760,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _time += Math.Abs(d) > 0.4 ? d : d * 0.2;
     });
 
+    /// <summary>The cutscene's camera shown as lines in the free view or not (the page's showCamera).</summary>
+    public void ShowCamera(bool on) => Order(() => _showCamera = on);
+
+    private bool _showCamera = true;
+
+    /// <summary>The view's background without the location (0 the gradient, 1 grey, 2 black, 3 white; the page's background).</summary>
+    public void SetBackground(int background) => Order(() => _background = background);
+
+    private int _background;
+
     /// <summary>Through the section's camera or the free view (off: it goes on from where the camera is, as the page's useCamera).</summary>
     public void UseCamera(bool on) => Order(() =>
     {
@@ -912,6 +923,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       Vector3 viewForward, viewUp;
       float viewFov;
       var post = PostParams.None;
+      List<Vector3>? cameraLines = null;
       if (_useCamera && _camera != null)
       {
         var (eye, forward, up, fov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
@@ -941,6 +953,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         viewProjection = _free.ViewProjection(aspect, _free.NearClip(far, _visibleLocation != null), far);
         toLight = _free.HeadLight();
         (viewForward, viewUp, viewFov) = (_free.Forward, _free.Axes().Up, _free.Fov);
+        // The cutscene's camera shown where it is and what it sees (the page's drawFilmCamera, "Show camera").
+        if (_camera != null && _showCamera)
+        {
+          var (cEye, cForward, cUp, cFov) = _camera.At(frame / _fps * _camera.FramesPerSecond);
+          cameraLines = LineOverlay.CameraLines(cEye, cForward, cUp, cFov);
+        }
       }
       var (light, tone) = _lighting?.At(eyeAt, viewProjection) ?? (FrameLight.Plain(toLight), ToneParams.Plain);
       // Through the cutscene's camera nothing beyond the shot's draw distance (the page's drawReach, ModelView.html:
@@ -992,7 +1010,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         float mapReach = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var mapAt) ? mapAt.Reach : float.PositiveInfinity;
         parabolicHaze = CutsceneSunShadow.CasterReach(light.FogEnd, mapReach, null, 0);
       }
-      return new SceneView(viewProjection, eyeAt, light, tone, _playing) { Lights = lights, Coronas = coronas, Volumes = volumes, Post = post, ParabolicHaze = parabolicHaze };
+      return new SceneView(viewProjection, eyeAt, light, tone, _playing)
+      {
+        Lights = lights, Coronas = coronas, Volumes = volumes, Post = post, ParabolicHaze = parabolicHaze, OverlayLines = cameraLines,
+        // Without the location the view's own background (the page's: the dropdown's choice; with it the sky or black).
+        Background = _visibleLocation == null ? _background : null,
+      };
     }
 
     // The page's countFrame (see FpsBelow, FpsMeasured).

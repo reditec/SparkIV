@@ -299,6 +299,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           },
         };
         _player.ShowLights(s_lights);
+        _player.ShowCamera(s_showCamera);
+        _player.SetBackground(Math.Clamp(s_background, 0, BackgroundNames.Length - 1));
         HookFreeView();
         _native = new D3D12View(Native, _player, text =>
         {
@@ -1114,6 +1116,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       BackgroundBox.IsEnabled = !own;
       Post(new { type = "useSky", on = outside });
       Post(new { type = "background", name = own ? (outside ? "" : "black") : BackgroundNames[Math.Clamp(s_background, 0, BackgroundNames.Length - 1)] });
+      _player?.SetBackground(Math.Clamp(s_background, 0, BackgroundNames.Length - 1));
     }
 
     private void PostVisible() =>
@@ -1658,6 +1661,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     {
       s_showCamera = ShowCameraButton.IsChecked == true;
       Post(new { type = "showCamera", on = s_showCamera });
+      _player?.ShowCamera(s_showCamera);
     }
 
     private void Lights_Click(object sender, RoutedEventArgs e)
