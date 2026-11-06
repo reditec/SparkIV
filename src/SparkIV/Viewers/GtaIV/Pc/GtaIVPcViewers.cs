@@ -34,6 +34,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public static void Register(IDictionary<string, IViewer> byExtension)
     {
       byExtension[".cut"] = new CutsceneViewer();
+      // A cutscene's section (.wad in cuts.img with its .cut beside it) in the cutscene view, any other .wad as before.
+      if (byExtension.TryGetValue(".wad", out var animations))
+      {
+        byExtension[".wad"] = new CutsceneWadViewer(animations);
+      }
       var collision = new CollisionViewer();
       byExtension[".wbn"] = collision;
       byExtension[".wbd"] = collision;

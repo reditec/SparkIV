@@ -49,7 +49,12 @@ namespace RageLib.Models.Resource.Models
 
     public void ReadData(BinaryReader br)
     {
-      br.BaseStream.Seek(DataOffset, SeekOrigin.Begin);
+      // GTA IV PC (reditec): the vertices are where piVertexBuffer (+0x18) points. The game's current files
+      // carry the same pointer in pLockedData (+0x08) too, but files of older patches (vigero.wft of 1.1.2.0)
+      // leave pLockedData null; reading from it put every buffer at the start of the graphics segment.
+      // See docs\GtaIV\Pc\formats\drawable.md.
+      uint dataOffset = DataOffset != 0 ? DataOffset : DataOffset2;
+      br.BaseStream.Seek(dataOffset, SeekOrigin.Begin);
       RawData = br.ReadBytes((int)(VertexCount * StrideSize));
     }
 

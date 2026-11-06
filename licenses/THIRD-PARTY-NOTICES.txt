@@ -8,6 +8,11 @@ licenses. The license texts of the components marked [file] are in the files nam
 - SharpZipLib (MIT), https://github.com/icsharpcode/SharpZipLib
 - Ookii.Dialogs.WinForms (BSD-3-Clause), https://github.com/ookii-dialogs/ookii-dialogs-winforms
 - Velopack (MIT), https://github.com/velopack/velopack
+- Vortice.Windows (MIT), https://github.com/amerkoleci/Vortice.Windows
+- DirectX Shader Compiler (Microsoft Software License Terms; LLVM Release License; MIT),
+  https://github.com/microsoft/DirectXShaderCompiler, shipped by Vortice.Dxc.Native
+  [file] DirectXShaderCompiler-LICENSE.txt, DirectXShaderCompiler-LLVM-LICENSE.txt,
+         DirectXShaderCompiler-MIT-LICENSE.txt
 - .NET runtime (MIT), https://github.com/dotnet/runtime
   [file] dotnet-LICENSE.txt, dotnet-THIRD-PARTY-NOTICES.txt
 - Windows App SDK (Microsoft Software License Terms), https://github.com/microsoft/WindowsAppSDK
@@ -69,6 +74,15 @@ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRU
 HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
 TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+-------------------------------------------------------------------------------
+Vortice.Windows (Vortice.Direct3D12, Vortice.DXGI, Vortice.Dxc, Vortice.Mathematics)
+-------------------------------------------------------------------------------
+
+Copyright (c) Amer Koleci and Contributors
+
+Licensed under the MIT License, with the same terms as Velopack's below.
 
 
 -------------------------------------------------------------------------------

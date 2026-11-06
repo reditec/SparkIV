@@ -99,6 +99,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public List<(int Part, int Model, int[] Colours, int Dirt)> VehicleDetails { get; } = new List<(int, int, int[], int)>();
 
     /// <summary>
+    /// Only the lines of a section's own part (as before 2026-11-05: the intro's sections 2 to 6 without any). For
+    /// comparisons.
+    /// </summary>
+    public static bool DrawStepsPerPartOnly { get; set; }
+
+    /// <summary>
     /// A section's draw distances by its frames: [frame, metres] from the one in force at its start on (its
     /// start the durations of the sections before it in its part); empty without any.
     /// </summary>
@@ -110,9 +116,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return steps;
       }
       var section = Sections[sectionIndex];
-      float start = Sections.Take(sectionIndex).Where(s => s.Part == section.Part).Sum(s => s.Duration) * 1000;
-      float end = start + section.Duration * 1000;
       var mine = DrawDistances.Where(d => d.Part == section.Part).OrderBy(d => d.Ms).ToList();
+      // A part without lines of its own (GTA IV's intro: all of them in its first header, its sections in four parts)
+      // takes the file's, timed from the file's start: GTAIV.3.trace's far clip (the depth constants, 1/near -
+      // 1/far) is 15 m in s1 f399.5 (13.3 s) and s3 f569.75 (81.8 s), 1000 m in s2 f682.5 (44.4 s), 800 m in s4
+      // f420.5 (124.4 s), as the lines at 12027, 80182, 43083 and 121057 ms of the whole file say.
+      bool whole = mine.Count == 0 && !DrawStepsPerPartOnly;
+      if (whole)
+      {
+        mine = DrawDistances.OrderBy(d => d.Ms).ToList();
+      }
+      float start = Sections.Take(sectionIndex).Where(s => whole || s.Part == section.Part).Sum(s => s.Duration) * 1000;
+      float end = start + section.Duration * 1000;
       var before = mine.LastOrDefault(d => d.Ms <= start);
       if (before.Metres > 0)
       {
@@ -545,6 +560,52 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return (new JsonObject { ["type"] = "scene", ["materials"] = materials, ["meshes"] = meshes }, visible);
     }
 
+    /// <summary>
+    /// The props an actor wears (its PropScene's checked meshes of each part), each made where its bone is at rest and
+    /// fixed to that bone with weight 1, as <see cref="Scene"/> gives them to the page; for the native renderer.
+    /// </summary>
+    public static List<SceneMesh> WornProps(CutActor actor)
+    {
+      var meshes = new List<SceneMesh>();
+      if (actor.Scene == null || actor.PropScene == null || actor.Props.Count == 0)
+      {
+        return meshes;
+      }
+      var rest = RestOf(actor.Scene.Bones);
+      foreach (var (part, bone) in actor.Props)
+      {
+        var ids = part.CheckedMeshes().ToHashSet();
+        foreach (var mesh in actor.PropScene.Meshes.Where(m => ids.Contains(m.Id)))
+        {
+          var place = rest[bone];
+          int count = mesh.Positions.Length / 3;
+          var bones = new float[count * 4];
+          var weights = new float[count * 4];
+          for (int i = 0; i < count; i++)
+          {
+            bones[i * 4] = bone;
+            weights[i * 4] = 1;
+          }
+          meshes.Add(new SceneMesh(mesh.Id, mesh.Material, Moved(mesh.Positions, place, true),
+                                   mesh.Normals == null ? null : Moved(mesh.Normals, place, false), mesh.Uvs, mesh.Indices, mesh.Bones)
+          {
+            SkinBones = bones,
+            SkinWeights = weights,
+            Alphas = mesh.Alphas,
+            // The rest as the page's prop message keeps it (Section(): mesh.ToMessage() with only the positions,
+            // normals, bones and weights replaced): the vertex colours (a ped's AO is their red - without them a worn
+            // helmet took the whole light from around and its reflections, et01_ba), the tangents as they are, the
+            // layer coordinates and weights.
+            Colors = mesh.Colors,
+            Tangents = mesh.Tangents,
+            LayerUvs = mesh.LayerUvs,
+            LayerWeights = mesh.LayerWeights,
+          });
+        }
+      }
+      return meshes;
+    }
+
     // Where each bone of a skeleton is at rest, in the model: its place and turn on its parent's, as the page
     // makes them (world = local × parent's world).
     private static System.Numerics.Matrix4x4[] RestOf(IReadOnlyList<SceneBone> bones)
@@ -781,14 +842,135 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public static object Fade(CutFile cut, int index, int frames, float fps)
     {
-      var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
+      var f = FadeOf(cut, index, frames, fps);
       return new
       {
         type = "fade",
-        inEnd = index == 0 ? cut.FadeIn * fps : 0,
-        outStart,
-        outEnd = outStart < 0 ? -1 : outStart + cut.FadeOutLength * fps,
+        inEnd = f.InEnd,
+        outStart = f.OutStart,
+        outEnd = f.OutEnd,
       };
+    }
+
+    /// <summary>A section's fades in its frames (see <see cref="Fade"/>), for the native renderer (#112 4h).</summary>
+    public static SectionFade FadeOf(CutFile cut, int index, int frames, float fps)
+    {
+      var outStart = index == cut.Sections.Count - 1 && cut.FadeOut > 0 ? Math.Max(0, frames - 1 - cut.FadeOut * fps) : -1;
+      return new SectionFade(index == 0 ? cut.FadeIn * fps : 0, outStart, outStart < 0 ? -1 : outStart + cut.FadeOutLength * fps);
+    }
+
+    /// <summary>
+    /// A section's fades (frames of the section): from black until InEnd (0: none), to black from OutStart to OutEnd
+    /// (OutStart -1: none).
+    /// </summary>
+    public readonly record struct SectionFade(float InEnd, float OutStart, float OutEnd)
+    {
+      public static SectionFade None => new SectionFade(0, -1, -1);
+
+      /// <summary>How dark the picture is at a frame (0 not, 1 black), as the page's showFade.</summary>
+      public float At(double frame)
+      {
+        double dark = 0;
+        if (InEnd > 0 && frame < InEnd)
+        {
+          dark = 1 - frame / InEnd;
+        }
+        if (OutStart >= 0 && frame > OutStart)
+        {
+          dark = Math.Max(dark, Math.Min(1, (frame - OutStart) / Math.Max(1, OutEnd - OutStart)));
+        }
+        return (float)dark;
+      }
+    }
+
+    /// <summary>
+    /// How an actor of a section moves (GTA IV (PC)), for the page (<see cref="Section"/>) and the native renderer:
+    /// its skeleton (bones by index), its clip (null: none), its bones' tracks (local place and turn every frame, the
+    /// face clip's merged in, tracks made for a sibling as parent moved under the real one), the clip's model tracks
+    /// (where a ped is in the scene; null: none), the bones [VEHICLE_REMOVAL] takes off and the face clip's shape
+    /// weights by the shape's key.
+    /// </summary>
+    public sealed record CastMotion(CutActor Actor, List<SceneBone> Bones, Animation? Clip, Dictionary<int, float[]> Positions,
+                                    Dictionary<int, float[]> Rotations, float[]? RootPosition, float[]? RootRotation, List<int> Removed,
+                                    List<(int Key, float[] Values)> Face);
+
+    /// <summary>The motions of a section's actors that have a model (see <see cref="CastMotion"/>); a missing clip noted.</summary>
+    public static List<CastMotion> Motions(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad,
+                                           IEnumerable<CutSection>? earlier, List<string>? notes)
+    {
+      var clips = wad?.Animations.ToDictionary(a => a.ShortName, StringComparer.OrdinalIgnoreCase) ?? new Dictionary<string, Animation>(StringComparer.OrdinalIgnoreCase);
+      var motions = new List<CastMotion>();
+      foreach (var model in section.Models)
+      {
+        var actor = ActorOf(actors, section, model);
+        var scene = actor?.Scene;
+        if (actor == null || scene == null)
+        {
+          continue;
+        }
+        var bones = scene.Bones.OrderBy(b => b.Index).ToList();
+        var boneOfId = bones.GroupBy(b => b.Id).ToDictionary(g => g.Key, g => g.First().Index);
+        clips.TryGetValue(model.Clip, out var clip);
+        Animation? head = model.HeadClip != null && clips.TryGetValue(model.HeadClip, out var h) ? h : null;
+        if (clip == null)
+        {
+          notes?.Add("no clip " + model.Clip);
+        }
+        var positions = new Dictionary<int, float[]>();
+        var rotations = new Dictionary<int, float[]>();
+        float[]? rootPosition = null, rootRotation = null;
+        if (clip != null)
+        {
+          // The face's clip moves the face's bones of the same skeleton, frame for frame with the body's.
+          foreach (var source in head == null ? new[] { clip } : new[] { clip, head })
+          {
+            foreach (var track in source.Tracks)
+            {
+              bool position = track.Kind == AnimationTrackKind.BonePosition, rotation = track.Kind == AnimationTrackKind.BoneRotation;
+              if ((!position && !rotation) || !track.IsDecoded || !boneOfId.TryGetValue(track.BoneId, out int bone))
+              {
+                continue;
+              }
+              (position ? positions : rotations)[bone] = SampledValues(source, track, position ? 3 : 4);
+            }
+          }
+          ReparentToSiblings(bones, positions, rotations);
+          var rootPositionTrack = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelPosition && t.IsDecoded);
+          var rootRotationTrack = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelRotation && t.IsDecoded);
+          rootPosition = rootPositionTrack == null ? null : SampledValues(clip, rootPositionTrack, 3);
+          rootRotation = rootRotationTrack == null ? null : SampledValues(clip, rootRotationTrack, 4);
+        }
+        // The bones the section's [VEHICLE_REMOVAL] lines take off this model: the game sets their matrices to
+        // nothing while drawing it (GTAIV.exe 0xC66BE0 / 0xC66F80), so what hangs on them isn't seen (bc_3: of the
+        // boat's five tops, extra_1 to extra_4 removed in its first section, an open boat left).
+        // Those of the sections before stay off: the game zeroes them in the vehicle's own skeleton, which
+        // nothing sets again (its extras have no tracks) and which the scene keeps from section to section (bc_3:
+        // extra_3, the top's frame, removed in the first section only, isn't there in the game's second either).
+        var removals = section.VehicleRemovals.Where(r => r.Model == model.Id).Select(r => r.BoneId).ToList();
+        foreach (var before in earlier ?? Enumerable.Empty<CutSection>())
+        {
+          removals.AddRange(before.VehicleRemovals.Where(r => before.Models.FirstOrDefault(m => m.Id == r.Model) is CutModel same &&
+                                                              ReferenceEquals(ActorOf(actors, before, same), actor))
+                                                  .Select(r => r.BoneId));
+        }
+        var removed = removals.Where(boneOfId.ContainsKey).Select(id => boneOfId[id]).Distinct().ToList();
+        // The face clip's shape weights (tracks of type 21, one number a frame, by the shape's key), for the
+        // shapes of the actor's .wbs (see CutActor.Faces).
+        var face = new List<(int Key, float[] Values)>();
+        if (head != null && actor.Faces.Count > 0)
+        {
+          var keys = actor.Faces.Values.SelectMany(f => f.Targets).Select(t => t.Key).ToHashSet();
+          foreach (var track in head.Tracks)
+          {
+            if ((int)track.Kind == 21 && track.DataType == 2 && track.IsDecoded && keys.Contains(track.BoneId))
+            {
+              face.Add((track.BoneId, SampledValues(head, track, 1)));
+            }
+          }
+        }
+        motions.Add(new CastMotion(actor, bones, clip, positions, rotations, rootPosition, rootRotation, removed, face));
+      }
+      return motions;
     }
 
     public static (object Timeline, object Cast, object? Camera, List<string> Notes) Section(CutSection section, IReadOnlyList<CutActor> actors, AnimationFile? wad,
@@ -814,15 +996,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
 
       var cast = new List<object>();
-      foreach (var model in section.Models)
+      foreach (var motion in Motions(section, actors, wad, earlier, notes))
       {
-        var actor = ActorOf(actors, section, model);
-        var scene = actor?.Scene;
-        if (actor == null || scene == null)
-        {
-          continue;
-        }
-        var bones = scene.Bones.OrderBy(b => b.Index).ToList();
+        var (actor, bones, clip) = (motion.Actor, motion.Bones, motion.Clip);
         object? skeleton = bones.Count == 0 ? null : new
         {
           parent = bones.Select(b => b.Parent),
@@ -830,87 +1006,35 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           rotation = bones.SelectMany(b => b.Quaternion),
           names = bones.Select(b => b.Name),
         };
-        var boneOfId = bones.GroupBy(b => b.Id).ToDictionary(g => g.Key, g => g.First().Index);
-        clips.TryGetValue(model.Clip, out var clip);
-        Animation? head = model.HeadClip != null && clips.TryGetValue(model.HeadClip, out var h) ? h : null;
-        if (clip == null)
-        {
-          notes.Add("no clip " + model.Clip);
-        }
         var tracks = new List<object>();
         object? root = null;
         if (clip != null)
         {
-          // The face's clip moves the face's bones of the same skeleton, frame for frame with the body's.
-          var positions = new Dictionary<int, float[]>();
-          var rotations = new Dictionary<int, float[]>();
-          foreach (var source in head == null ? new[] { clip } : new[] { clip, head })
+          foreach (var (bone, values) in motion.Positions)
           {
-            foreach (var track in source.Tracks)
-            {
-              bool position = track.Kind == AnimationTrackKind.BonePosition, rotation = track.Kind == AnimationTrackKind.BoneRotation;
-              if ((!position && !rotation) || !track.IsDecoded || !boneOfId.TryGetValue(track.BoneId, out int bone))
-              {
-                continue;
-              }
-              (position ? positions : rotations)[bone] = SampledValues(source, track, position ? 3 : 4);
-            }
+            tracks.Add(new { bone, kind = "position", values = Floats(values) });
           }
-          ReparentToSiblings(bones, positions, rotations);
-          foreach (var (bone, values) in positions)
+          foreach (var (bone, values) in motion.Rotations)
           {
-            tracks.Add(new { bone, kind = "position", values = Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan())) });
+            tracks.Add(new { bone, kind = "rotation", values = Floats(values) });
           }
-          foreach (var (bone, values) in rotations)
-          {
-            tracks.Add(new { bone, kind = "rotation", values = Convert.ToBase64String(MemoryMarshal.AsBytes(values.AsSpan())) });
-          }
-          var rootPosition = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelPosition && t.IsDecoded);
-          var rootRotation = clip.Tracks.FirstOrDefault(t => t.Kind == AnimationTrackKind.ModelRotation && t.IsDecoded);
-          if (rootPosition != null || rootRotation != null)
+          if (motion.RootPosition != null || motion.RootRotation != null)
           {
             root = new
             {
-              position = rootPosition == null ? null : new { bone = 0, kind = "position", values = Sampled(clip, rootPosition, 3) },
-              rotation = rootRotation == null ? null : new { bone = 0, kind = "rotation", values = Sampled(clip, rootRotation, 4) },
+              position = motion.RootPosition == null ? null : new { bone = 0, kind = "position", values = Floats(motion.RootPosition) },
+              rotation = motion.RootRotation == null ? null : new { bone = 0, kind = "rotation", values = Floats(motion.RootRotation) },
             };
           }
         }
-        // The bones the section's [VEHICLE_REMOVAL] lines take off this model: the game sets their matrices to
-        // nothing while drawing it (GTAIV.exe 0xC66BE0 / 0xC66F80), so what hangs on them isn't seen (bc_3: of the
-        // boat's five tops, extra_1 to extra_4 removed in its first section, an open boat left).
-        // Those of the sections before stay off: the game zeroes them in the vehicle's own skeleton, which
-        // nothing sets again (its extras have no tracks) and which the scene keeps from section to section (bc_3:
-        // extra_3, the top's frame, removed in the first section only, isn't there in the game's second either).
-        var removals = section.VehicleRemovals.Where(r => r.Model == model.Id).Select(r => r.BoneId).ToList();
-        foreach (var before in earlier ?? Enumerable.Empty<CutSection>())
-        {
-          removals.AddRange(before.VehicleRemovals.Where(r => before.Models.FirstOrDefault(m => m.Id == r.Model) is CutModel same &&
-                                                              ReferenceEquals(ActorOf(actors, before, same), actor))
-                                                  .Select(r => r.BoneId));
-        }
-        var removed = removals.Where(boneOfId.ContainsKey).Select(id => boneOfId[id]).Distinct().ToList();
-        // The face clip's shape weights (tracks of type 21, one number a frame, by the shape's key), for the
-        // shapes of the actor's .wbs (see CutActor.Faces).
-        var faceWeights = new List<object>();
-        if (head != null && actor.Faces.Count > 0)
-        {
-          var keys = actor.Faces.Values.SelectMany(f => f.Targets).Select(t => t.Key).ToHashSet();
-          foreach (var track in head.Tracks)
-          {
-            if ((int)track.Kind == 21 && track.DataType == 2 && track.IsDecoded && keys.Contains(track.BoneId))
-            {
-              faceWeights.Add(new { key = track.BoneId, values = Sampled(head, track, 1) });
-            }
-          }
-        }
+        var faceWeights = motion.Face.Select(f => (object)new { key = f.Key, values = Floats(f.Values) }).ToList();
         cast.Add(new
         {
           id = actor.Id,
           skeleton,
           clip = clip == null ? null : new { frames = Math.Max(1, clip.FrameCount), fps = FramesPerSecond(clip), tracks },
           root,
-          removedBones = removed,
+          removedBones = motion.Removed,
           face = faceWeights.Count == 0 ? null : faceWeights,
           lightsOn = actor.LightsOn,
           // A vehicle's model box (its body's least corner, for the tail lamp light; see ModelScene.BodyBoundsMin).
@@ -1293,6 +1417,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var bone = actor.Scene.Bones.FirstOrDefault(b => b.Name.Equals(BoneOfAnchor(prop.Anchor), StringComparison.OrdinalIgnoreCase));
           if (part != null && bone != null)
           {
+            // Shown, at its high level of detail: the dictionary's tree shows only the first prop of each anchor
+            // (p_head_000), so a worn p_head_001 (the intro's white hard hat, M_Y_construct_03) had no mesh checked.
+            part.Initialize(true);
+            part.ShowLevelOfDetail(0);
             actor.Props.Add((part, bone.Index));
           }
         }

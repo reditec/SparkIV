@@ -28,7 +28,7 @@ Models (`.wdr`, `.wdd`, `.wft`) can contain light effects, i.e. lamps and wall l
 | 0x200, 0x1000 | Blinking | ignored | ibid. |
 | 0x4000 | Light flag 2, only if the object (instance flag 0x80) allows it; effect open | **unclear** | ibid. |
 | **0x8000** | **Shadow lamp** (light flag 4), only if the object's instance has flag 0x100 (see [wpl.md](wpl.md)) | used (since 2026-10-22) | ibid. |
-| 0x10000 | Separate path (light colour from 0xC1DAA0) | ignored | ibid. |
+| 0x10000 | Separate path (light colour from 0xC1DAA0); never drawn in the intro's traced frames | used (native: left out) | ibid., [GTAIV.3.trace](#interior-lamps-seen-from-outside-and-flag-0x10000-gtaiv3trace-2026-11-05) |
 | 0x80000 | **Light volume** (light flag 8), see [Light volumes](#light-volumes) | used (since 2026-10-25) | ibid., 0xAC2270 |
 | 0x100000 | Light flag 0x10: the lamp is drawn as a "filler" (`fillerVolumePoint`, see [Which program draws a lamp](#which-program-draws-a-lamp)); the light volume's passes 4–7 instead of 0–3 (see [Light volumes](#light-volumes)) | used | ibid., 0xAC1030, 0xAC2270 |
 
@@ -48,6 +48,12 @@ The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light
     - Indoors: trace GTAIV.3, et01_aa.
     - Outdoors: trace GTAIV.4, et01_ba frame 9350, read out with d3dretrace on 2026-10-23. After `BoothLight_0` (call 145552474) the guard's face rose from 1.72 to 2.69; the booth is unchanged (panel 0.52/0.88/0.94).
   - Since 2026-10-23, SparkIV no longer applies cut lights to any map or prop meshes (`ModelView.html`, `marked < 0 && baked`).
+  - **Corrected 2026-11-06 (#116):** "characters" means the stencil's 1 only: the cut lights' program (ps 9) leaves
+    vehicles (stencil 2) out. And an `env…` light is not drawn by that program but by the lamps' one, lighting
+    everything outside, vehicles too (intro s4 f420.5: `env_car_0` lights the car on the crane). Details and trace calls
+    in [deferred_lighting.md](deferred_lighting.md#which-program-draws-a-cutscene-light-vehicles-116-2026-11-06). The
+    `shd…` lights keep the rule above in SparkIV (location only), see there. The native renderer follows this; the
+    page (`ModelView.html`) still has the rule above.
 
 ## Coronas
 
@@ -262,6 +268,131 @@ With the camera inside an interior, the game draws the deferred lamps of that in
 - **No outside lamps from a room:** in both traced frames of the ship (s3 f569.75 and f749.75) the game draws none of the outside's lamps, though in f569.75 two portals to the outside are on screen. In f749.75 it does draw a lamp of the room above (draw 55308098).
 
 In SparkIV: `sceneLightsNow`, `lightVolumesNow` and `coronasNow` in `ModelView.html` skip lamps of another interior. With the camera in a room, they also skip the outside's lamps and lamps of rooms not seen from it (`seenRooms`). A room is seen when it is the camera's or lies behind a portal on screen, followed on through the portals of the rooms seen. Status: **used**. Not traced: whether the game also clips the view through each portal (SparkIV takes the whole screen); with the camera outside, every room is taken as seen.
+
+### Light_Add's room test, decoded (2026-11-05)
+
+0xA0FE70 is no longer in the encrypted part in the current Ghidra project; decompiled (headless, `DecompileAt.java`):
+- **0xA0FE70 `Light_RoomAllows(interior, room)`**: a lamp of an interior's room (interior > 0, room not 0x3f and not
+  −1) always passes. Any other lamp (outside, or an interior's "outside" room) passes only when 0xA0FB40 returns not 1.
+- **0xA0FB40 `Room_CameraDropsOutsideLights()`**: with the camera in an interior's room (0x12B41A4 the camera's
+  interior, 0x103B110 its room; not 0, 0x3f, −1), bit 3 of the room record's byte +0x52 (record from 0xB226E0); else 0.
+  So outside lamps are dropped only for camera rooms with that flag - the per-room flag field in the `.ide`'s
+  `mlo` room lines is the likely source (not checked which column).
+- **0xB03D30** (`Lights_PointInsideVolumes`), called by Light_Add for an outside lamp (room −1) with flags 0x140: the
+  lamp's place against lists of planes (records of 0x5580 bytes, count at +0x4000); inside one → not made.
+- Before that, Light_Add tests the lamp's sphere (place, radius) with a plane at 0x118D800 + 0x340 (the view) and with
+  **0x431E40**, a sphere test called by some 40 functions. 0x431E40 is in the encrypted part (its decompilation is
+  garbage). That is where an interior lamp seen from outside could be dropped (the intro's harbour, s2 f682.5: the
+  game's picture shows the ship's cabins behind their windows unlit, where SparkIV lights them with the cabins' lamps).
+
+Status: **decoded, not ported** - the rooms' +0x52 flag isn't mapped to the `.ide` yet, and the sphere test that
+decides interior lamps from outside (0x431E40) can't be read. The page keeps: with the camera outside, every room's
+lamps are taken; so does the native renderer (see the next section).
+
+### Interior lamps seen from outside, and flag 0x10000 (GTAIV.3.trace, 2026-11-05)
+
+Method: `apitrace dump` of single frames of `GTAIV.3.trace` (intro.cut), one line per deferred light draw (VS c209 the
+place, VS c212 the radius, PS c76 colour and strength, PS c66 / c73 the light's place and 1/r²; lamp pixel shaders
+0x2d592840, 0x2d5918a0 (shadow), 0x2d5923e0, 0x2d592480, 0x2d5927a0, 0x2d5928e0 (cutscene lights)). Matched with the
+native renderer's lamp list (`D3D12LAMPDUMP=1`, `D3D12LIGHTINFO=1`) after the scene offset (voted over equal radii;
+intro s2: game = native + (-340.57, -1496.42, 14.05)).
+
+| Frame (camera) | Trace calls | Game draws | Interior lamps the game draws |
+|---|---|---|---|
+| s1 f399.5 (in a cabin, room 2) | 3675143-3681352 | 18 lamps | 11 of room 2 (the camera's), none of rooms 0, 1, 3, none outside |
+| s2 f682.5 (outside, ~7 m before the bridge windows) | 27894936-27909727 | 74 lights | room 1 (bridge) lamps without 0x10000; none of rooms 0, 2, 3 (holds and cabins below deck); none of the 24 room-1 lamps with flag 0x10000 (on screen, within 10 m) |
+| s2 f863 (outside, on the foredeck, ~61 m from the bridge) | 34228429-34242275 | 61 lights | only two 0xac060 lamps of room 1 (on the bridge's outer wall); none of room 0 although the camera is inside a room-0 lamp's sphere (r 10 m at 7.7 m); none of the 25 with flag 0x10000 |
+| s3 f569.75 (in room 3) | 52556107-52564305 | lamps of rooms 0 and 3 | 8 of room 3, and 4 of room 0, which SparkIV's `SeenRooms` doesn't count as seen from room 3 (open); none with 0x10000 (rooms 1, 2 not seen) |
+
+Findings:
+- **Flag 0x10000: never drawn.** The 25 lamps with the 2dfx flag 0x10000 (all on the intro's ship, flags 0x110060,
+  0x100040, ...; none in bc_1, et01_aa or the intro's s4 harbour) are drawn in no traced frame, also where they are on
+  screen and near (f682.5). GTAIV.exe's `Light_FromEffect` (0xC1E200) gives these lamps their own path: colour and
+  strength × a runtime table entry (0x15E88F0 + DAT_01174790 × 16, via 0xC1DAA0, w = strength factor) before
+  0xABCC50 / Light_Add. Not traced what sets that entry (it is zero, or the lamp dropped, in all the intro's frames).
+  **Ported (native)**: `CutsceneLights` leaves these lamps out (`D3D12KEEP10000=1` in cutgen keeps them). Their coronas
+  are kept (not checked in the trace).
+- **Rooms from outside: those behind an outside portal on screen?** Status: **observed, not ported (contradicted by
+  f863)**. f682.5 fits: the bridge's windows are on screen, the holds' portals aren't. But in f863 the game draws no
+  lamp of room 0 (the forward hold), whose outside portal SparkIV counts as on screen, and of room 1 only the two
+  0xac060 lamps. SparkIV keeps every room as seen from outside; the portal rule is only behind cutgen
+  `D3D12OUTSIDEPORTALROOMS=1` (`CutsceneLights.OutsidePortalRooms`) for further study. It changes no reference's value.
+- **The game culls lamps by the view**: it draws no outside lamp behind the camera (f863: the row of 0x40 lamps ahead of
+  the camera's back, d 9-50 m); SparkIV takes them (no visible effect).
+- **Cutscene lights**: s1 f399.5 draws one of native's cut lights fewer, s3 f569.75 3 of native's 8, f682.5 6 fewer.
+  Solved (#114): see the next section.
+
+Effect (native, game-frame diff): intro s2 f682.5 2.09 → 2.03 (page 1.98), all of it from the 0x10000 rule (the room
+rule alone: 2.09); every other reference unchanged.
+
+**Update 2026-11-06 (#113): solved for the four outside frames, ported (native).** Matched again with the lamps'
+objects (`D3D12LAMPDUMP=1` now prints `objroom`, the room the lamp's object is listed in by the interior's `.ide`, and
+each room's portals to the outside with their distance and share of the screen):
+
+| Frame (camera outside) | Game draws of the rooms | Nearest outside portal on screen |
+|---|---|---|
+| s2 f71.25 | none | room 1's big window, 162 m, 0.2 % of the screen |
+| s2 f352.75 | none | none on screen |
+| s2 f682.5 | all 45 of room 1 (on, before the far clip), none of rooms 0, 2, 3 | room 1's windows, 7.5-13.7 m (the big one 48 %) |
+| s2 f863 | none | room 0's hatch 16.8 m (2.6 %), room 1's window 62 m |
+
+- **The two 0xac060 lamps** the game draws from outside (f71.25, f863) lie in room 1's box, but their object is in no
+  room of the interior: they are the outside's lamps (the bridge's outer wall). SparkIV took a lamp's room from the box
+  it stands in; now from its object (`LocationObject.Room`; an object of the interior's limbo still by the box).
+- **From outside**, a room's lamps are drawn only when one of its portals to the outside is on screen and within 15 m of
+  the camera (`CutsceneLights.OutsidePortalReach`), on through its portals as from inside. The 15 m is fitted: the
+  game's test lies between 13.7 and 16.8 m - or it is a share of the screen between 2.6 % and 48 %, or the camera's
+  distance from the interior; the four frames don't tell these apart. cutgen `D3D12ALLROOMSOUTSIDE=1` keeps every
+  room's lamps (as before).
+
+Open:
+- What the game's own test from outside is (see above); the sphere test 0x431E40 is in the encrypted part.
+- Seen from room 3 (s3 f569.75) the game also draws 4 lamps of room 0, which `SeenRooms` doesn't reach.
+- What sets the table entry of flag 0x10000 (0x15E88F0 at DAT_01174790), and whether such lamps' coronas are drawn.
+
+### Which of the cutscene's own lights the game draws (#114, 2026-11-05)
+
+`Cut_AddSectionLights` (0x9CA7E0) hands every light of the section whose strength track (0x8C) isn't 0 to Light_Add
+(via 0xABCC50). There is no cap and no other choice there. Light_Add (0xABCCD0) then makes a light only if both hold:
+- **Its sphere lies wholly before the far plane.** The test is against the viewport's plane at +0x340: n·p + w > radius.
+  That plane is the camera's far clip, which in a cutscene is the shot's `.cut` `[DRAW_DISTANCE]` (0xD53280).
+- **Its sphere reaches into the view** (`Light_SphereVisible`, 0x431E40, in the encrypted part).
+
+A cutscene light (flag 0x80) skips only the room tests after that. The far plane is read from each frame's depth
+constants (PS c66 / c78 = (…, …, −(1/n − 1/f), −1/n)).
+
+| Frame | Trace calls | Far clip | Game draws | Skipped (native's name: why) |
+|---|---|---|---|---|
+| intro s1 f399.5 | `GTAIV.3.trace` 3675143-3681352 | 15 m | 7 of 8 | filnko_0 (r 27.5, 1.8 m away: past the far plane) |
+| intro s3 f569.75 | 52556107-52564305 | 15 m | 3 of 8 (rim_kit_0, spt_kit_0, shd_env_kit_0) | hall_spt_0 (r 14.7), fil_wlk_0 (r 30), rim_0 (r 15): past the far plane; hall_spt_2_0, fil_hall_0: out of view |
+| intro s2 f682.5 | 27894936-27909727 | 1000 m | 2 of 8 (sundeck_0, filsundek_0) | sunbnce_0, sunrim_0, rimnko_0, carspt_0, carfil_0, shd_env_car_0: all out of view |
+| intro s2 f863 | 34228429-34242275 | 1000 m | 7 of 8 | rimnko_0: out of view |
+| bc_1 s1 f144 | `GTAIV.trace` 86463106-86474008 | 60 m | 8 of 9 | fil_red_0 (r 0.1): out of view; native's cap of 8 had dropped spt_hall_b_0 instead |
+| et01_aa s3 f49.75 | `GTAIV.2.trace` 78361408-78366087 | 1500 m | 4 of 5 | FillLight1_2: range 0 (native skipped it already) |
+| intro s4 f420.5 | 85655000-85664925 | 800 m | 3 of 7 (filcar_0; env_title_0 and env_car_0 by the lamp program 0x2d592840) | boatrim_0, boatfil_0, sptwrk_0, rimwrk_0: out of view |
+
+Every light the game draws passes both tests, and every light it skips fails one. The closest kept light is
+shd_env_hall_0 in f399.5 (9.0 m before the far plane at r 8).
+
+**The map's lamps** go through the same Light_Add. In f399.5 and f569.75 none of the lamps of the rooms seen fails the
+far test, so no lamp count changes there. In intro s4 f258.5 (calls 78713400-78731585, far 50 m from the line at
+117697 ms), the far test drops 5 floodlights: three with r 50 and two with r 30, with colour ratios 1 : 0.78 : 0.64 and
+1 : 0.83 : 0.56. None of them is among the game's draws. The game does draw that frame's r 28 and r 29.6 lamps, and
+SparkIV keeps those too. Native's picture there: 2.98 → 2.02.
+
+**The draw distance's timing.** The intro's `[DRAW_DISTANCE]` lines all stand in its first `[CUTSCENE_HEADER]`, but
+its sections lie in four parts. The far clips above (15, 15, 1000 m, and 800 m in s4 f420.5, calls 85655000-85664925)
+fit only the lines timed from the start of the whole file (12027, 80182, 43083, 121057 ms). Timed per part, SparkIV
+had no line at all for sections 2 to 6.
+
+In SparkIV:
+- `CutsceneLights.InViewBeforeFar` keeps a cut light only if both tests pass, before the cap of 8. Each lamp is kept
+  only if its sphere lies before the far plane.
+- `CutFile.DrawDistanceSteps` lets a part without its own lines take the file's lines, timed from the file's start.
+- cutgen's `D3D12KEEPCULLEDLIGHTS=1` and `D3D12DRAWSTEPSPERPART=1` give the old behaviour back.
+
+Status: **used**. Not checked: whether the game's 0x431E40 tests more than the view's planes. Every light it skips is
+also out of SparkIV's view.
 
 ## How far from the camera: drawn objects and FadeDistance
 

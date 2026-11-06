@@ -71,6 +71,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public CutsceneScriptIndex.Entry? Script { get; set; }
 
+    /// <summary>
+    /// Only this section is played (the cutscene opened from one section's .wad, see CutsceneWadViewer); null: all.
+    /// </summary>
+    public int? OnlySection { get; set; }
+
     /// <summary>The hour the viewer's user set for the cutscene's start, or null for the script's (else noon).</summary>
     public float? StartHour { get; set; }
 

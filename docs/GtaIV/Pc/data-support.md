@@ -28,6 +28,8 @@ Detailed descriptions of individual formats with all findings are under [formats
 - [ide-mlo.md](formats/ide-mlo.md): interiors, rooms, portals
 - [timecyclemodifiers.md](formats/timecyclemodifiers.md): modifier columns, AmbientDownMult, GlobEnvRefl
 - [2dfx-lights.md](formats/2dfx-lights.md): lights in models, shadow lamps, lights for forward-drawn objects
+- [drawable.md](formats/drawable.md): the vertex buffer's layout in `.wdr` / `.wdd` / `.wft`; older patches' files
+  (1.1.2.0) leave `pLockedData` null
 - [deferred_lighting.md](formats/deferred_lighting.md): lighting shaders, stencil, frame sequence
 - [wbs.md](formats/wbs.md): a cutscene ped's face shapes (blend shapes) and how the face clip weights them
 
@@ -54,12 +56,13 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 | `[MISSION_TEXT_NAME]`, `[TEXT]` | used | Subtitles: table, start time, duration, key. A `.cut` of several scenes one after the other (each from its `[CUTSCENE_HEADER]`) has a `[TEXT]` per part, its times counting from that part's first section: intro.cut's four parts (sections 1, 2, 3, 4–6) each start near 0 again. Checked against four subtitles in the intro's trace frames (e.g. section 5 f782: R1_CUT1_13 at 94.3 s of part 4). |
 | `[MODELS]` | used (partly) | Number, model, clip, face clip. A **fifth field** (`0`, only in rows with a face clip) is **unclear**. |
 | `[OFFSET]`, `[ORIENT]` | used | Position and rotation of the scene in the world, **per section**: each section's actors and camera are relative to its own `[OFFSET]`, unturned (`[ORIENT]` isn't applied to them). intro.cut: section 1 at (−342.2, −1500.2, 14.1), 2 and 3 some 4 m from it, 4–6 at the harbour (752.3, −212.8, 4.8). Checked against the game's camera (`gViewInverse`) of 23 trace frames (`GTAIV.3.trace`): each on its section's track to 0.00–0.03 m with the section's offset, with the first section's only section 1 fits. SparkIV loads a location per origin (the others in the background after the first) and shows the one of the section played. |
-| `[PROPS]`, `[VARIATION]` | used | Props and clothing variations. |
+| `[PROPS]`, `[VARIATION]` | used | Props and clothing variations. A `[PROPS]` line is `<model> <prop index> <anchor>` (the actor's number in its part, `p_<anchor>_<index>` in the ped's prop dictionary in pedprops.img): intro.cut `14 1 0` puts `p_head_001`, the white hard hat, on M_Y_construct_03 (#96; as the game's frame from GTAIV.3.trace shows, intro s6 f146). |
 | `[REMOVE]` | used | World objects hidden during the scene. |
 | `[VEHICLE_DETAILS]`, `[VEHICLE_REMOVAL]` | used | Vehicle colours and dirt; removed vehicle parts. |
 | `[CUTSCENE_HEADER]` | **unclear** | bc_3: `44 1143 2578 3615`, the section boundaries in an overall frame count starting at 44. Possibly an offset for sound or subtitles (44 frames ≈ 1.5 s). The synchronisation in SparkIV still has to be checked. |
 | `[ANIMRANGE]` | **unclear** | `range on 44.0 3615.0`; matches `[CUTSCENE_HEADER]`. |
 | `[COMPRESSION]` | **unclear** | `1 A` everywhere. |
+| Particle effects of the world (smoke, steam: the map's 2dfx particle effects or the scripts', drawn by the game as quads written each frame) | **not drawn** | E.g. two smoke plumes over the toll booths in TLAD et01_ba (`GTAIV.2.trace`, calls 224301524 / 224301543): the grey patch in the sky of f1394.75 (#82). Where they come from (2dfx entry or script) not checked. |
 | `[EFFECTS]` | **ignored** | Particle effects, e.g. `FX_blood_gun_entry:effect2_1 5 1205 71900 71900 <6 numbers> 0`: effect name, clip, numbers for object, bone, time, position and rotation (assumption). The associated `effect` clips have only a `LightDirection` track. |
 | `[CAMCORDER]` | **ignored** | Time spans (ms) in 134 files, presumably the handheld-camera look. |
 | `[BLOCKING_BOUNDS]` | game logic only (assumption) | Four corner points and a radius, probably the blocked area. |
@@ -188,12 +191,15 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 - **Clock in a trace:** every frame sets gDayNightEffects (VS/PS c45) = seconds of the day / 43200, rising until noon and falling after it. Rising or falling over the neighbouring frames gives morning or afternoon. The traces: `GTAIV.1` 10:11–10:57, `GTAIV.2` 08:51–10:17, `GTAIV.3` 11:54–13:20, `GTAIV.4` 11:54–13:07. The clock runs on through the cutscenes; they don't set it.
 - **Two suns** (GTAIV.exe):
   - The sky's (0xDBBDF0 → the shader's SunDirection): the angle from the hour (before 6 t × π/12, to 20 π/2 + (t − 6) × π/14, after it 3π/2 + (t − 20) × π/8), then normalize(sin a − cos a × (0, −0.342, 0.940)). Six sky draws in three traces (09:35 to 13:12, clock from c45) match it to 0.0001.
-  - The light's (0xAEF0E0 → 0x103FBE0, read by 0xAC51F0 into the directional light): the same angle kept within π/2 to 3π/2, then 0.8 × (a − π/2) + 0.6π. Lower than the sky's sun in the morning (at 10:39 by about 6°). Not yet seen in a trace.
+  - The light's (0xAEF0E0 → 0x103FBE0, read by 0xAC51F0 into the directional light): the same angle kept within π/2 to 3π/2, then 0.8 × (a − π/2) + 0.6π. Lower than the sky's sun in the morning (at 10:39 by about 6°).
+  - **At night** (before 6, after 20 o'clock) 0xAEF0E0 then turns the light towards a fixed night light normalize(0.05, −0.5, 1) (0xFE876C = 0.05, 0xFE8D7C = −0.5, z 1; its length's square 1.2525 as a double at 0xEA8230): d = max(6 − t, t − 20), w = min(d / 3, 1), direction = normalize(w × night + (1 − w) × day). So 3 hours into the night the light comes from 63° up, a little south of the axis.
+  - **Seen in a trace:** `GTAIV.3.trace`, the intro (05:15, s2 f863, calls 34228429–34242275): the sun pass (PS 0x2d593060, draws 34238693/34238698) reads `gDirectionalLight` c17 = (−0.8332, 0.2196, −0.5074, 1.9719), set at call 34227404 (the light's travel direction, w the shine). The formula above gives (0.8332, −0.2196, 0.5074) towards the light, to 0.0001; the day formula alone gave (0.951, −0.106, 0.290), 13° lower.
+  - **In SparkIV:** `TimeCycle.SunDirection` (both renderers; the page gets it as the sky message's `sunDirection`). Status: **used** (since 2026-11-05, #115).
 - **In SparkIV:** `SKY_FRAGMENT`, `PERLIN_FRAGMENT`, `perlinNoise` in `ModelView.html`; the values are in `TimeCycle.cs` as `skyHdr`.
 - **Open:**
   - One game hour is assumed to be 120 s of playback time; this is not read from the exe.
-  - `DetailOffset` moves along in the game; in SparkIV it is fixed.
-  - Stars, moon and galaxy (at night) are still missing, as is the blend to the water colour below the horizon (see above).
+  - `DetailOffset` = hour × CloudSpeed (column 107) × 0.0005, as in every traced frame (native renderer; the page keeps a fixed one).
+  - Stars and galaxy (native renderer): `StarFieldBrightness` = (3 s², 0.24 s, 3 s² g, 4) with s = column 108 and g = column 109 (GTAIV.exe 0x615ece; the intro at 05:15: (0.3986, 0.0875, 0.1165), as traced); skydome.wtd's `starfield` (× 8) and `galaxy` at the gta_atmoscatt_clouds vertex program's asin coordinates. The moon is still missing, as is the blend to the water colour below the horizon (see above).
   - The time of the bc_3 and bc_1 reference videos (12:00): the videos don't show the clock; it was around noon when they were recorded, the exact hour isn't known.
   - The light's sun direction (0x103FBE0) has not been found in a trace frame yet.
 
@@ -352,6 +358,16 @@ Not yet fully recorded. Known so far:
 | `misc.BloomIntensityClamp.HD` (10) | used | 0x103F9B4, clamps the bloom. |
 | `misc.HiDof.nearBlur/midBlur/farBlur`, `misc.cutscene.nearBlurMin` | **unclear** | Not used. Whether the PC version uses them is unresolved. |
 | `misc.CrossPMultiplier.*` | **unclear** | Not used (RimLight 0.7, Gamma 1.15, Desaturation 1.29 …). |
+
+## Models: vertex buffers (`.wdr`, `.wdd`, `.wft`)
+
+Details: [formats/drawable.md](formats/drawable.md).
+
+| Field | Status | Content / source |
+|---|---|---|
+| vertex buffer +0x08 `pLockedData` | used when not 0 | The vertices in the graphics segment. Set in the current game's files; **0** in files of older patches (`vigero.wft` of 1.1.2.0). |
+| vertex buffer +0x18 `piVertexBuffer` | used when +0x08 is 0 | The same pointer; the only one in older files. Since 2026-11-06 (before, older files' meshes all read from the segment's start: spikes). |
+| structure vtables (first dword) | ignored | Exe addresses in current files; other values (hashes?) in 1.1.2.0 files. **unclear** what those are. |
 
 ## Other formats and tools
 

@@ -49,6 +49,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     /// <summary>Its placement's instance flags have 0x100: its lamps with their own flag 0x8000 cast shadows (see MapIndex.LampShadows).</summary>
     public bool LampShadows { get; init; }
+
+    /// <summary>An interior's object in none of its rooms (limbo: the walls around them, or listed in no room).</summary>
+    public bool Limbo { get; init; }
   }
 
   /// <summary>
@@ -128,6 +131,11 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public byte[]? Clouds { get; private set; }
     public byte[]? CloudDetail { get; private set; }
+
+    /// <summary>The stars and the galaxy (skydome.wtd's starfield and galaxy: gta_atmoscatt_clouds' StarFieldSampler and
+    /// GalaxySampler), as ModelScene.Raw makes them; null without them.</summary>
+    public byte[]? StarField { get; private set; }
+    public byte[]? Galaxy { get; private set; }
 
     /// <summary>The light volumes' lookup texture's key (see <see cref="LightVolume"/>).</summary>
     public const string LightVolumeKey = "mlight/volume";
@@ -351,7 +359,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           // middle of the room instead of on the shelves where they are in the game).
           var combined = Quaternion.Concatenate(o.Rotation, turn);
           var at = p.Position + Vector3.Transform(o.Position, turn);
-          inside.Add((o.Name, at, Quaternion.Conjugate(combined), o.Room >= 0 ? roomOf[o.Room] : -1));
+          // (-2: the interior's limbo, or in no room; LocationObject.Limbo.)
+          inside.Add((o.Name, at, Quaternion.Conjugate(combined), o.Room >= 0 && roomOf[o.Room] >= 0 ? roomOf[o.Room] : -2));
           if (interior.LampShadows.Contains(k))
           {
             shadowPlaces.Add((o.Name, at));
@@ -586,8 +595,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             // The placement's turn is the inverse of the model's (as the game reads it), then its place,
             // less the scene's origin.
             var place = Matrix4x4.CreateFromQuaternion(Quaternion.Conjugate(placement.Rotation)) * Matrix4x4.CreateTranslation(placement.Position - origin);
-            location.Objects.Add(new LocationObject(model, place, placement.Room)
+            location.Objects.Add(new LocationObject(model, place, Math.Max(-1, placement.Room))
             {
+              Limbo = placement.Room == -2,
               Far = IsFar(placement.Name) || parentPlaces.Contains((placement.Name, placement.Position)),
               MirrorOnly = mirrorPlaces.Contains((placement.Name, placement.Position)),
               LampShadows = shadowPlaces.Contains((placement.Name, placement.Position)),
@@ -629,6 +639,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             RageLib.Textures.Texture? Named(string part) => textures.Textures.FirstOrDefault(x => x.Name.Contains(part, StringComparison.OrdinalIgnoreCase));
             location.Clouds = Named("baseperlinnoise") is RageLib.Textures.Texture noise ? ModelScene.Raw(noise) : null;
             location.CloudDetail = Named("noise16_p") is RageLib.Textures.Texture detail ? ModelScene.Raw(detail) : null;
+            location.StarField = Named("starfield") is RageLib.Textures.Texture stars ? ModelScene.Raw(stars) : null;
+            location.Galaxy = Named("galaxy") is RageLib.Textures.Texture galaxy ? ModelScene.Raw(galaxy) : null;
           }
         }
         catch (Exception)

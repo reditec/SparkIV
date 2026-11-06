@@ -214,6 +214,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float CloudSpeed { get; private init; }
 
     /// <summary>
+    /// The stars (columns 108 and 109; 0 by day): GTAIV.exe's sky setter (0x615ece) makes gta_atmoscatt_clouds'
+    /// StarFieldBrightness of them, (3 s², 0.24 s, 3 s² g, 4) with s column 108 and g column 109 (GTAIV.3.trace, the
+    /// intro at 05:15 EXTRASUNNY: s 0.3645, g 0.2923 → (0.3986, 0.0875, 0.1165, 4), as traced).
+    /// </summary>
+    public float StarStrength { get; private init; }
+    public float StarGalaxyShare { get; private init; }
+
+    /// <summary>
     /// The name of the weather of this number (a script's FORCE_WEATHER_NOW(1)): the file's blocks in their order,
     /// EXTRASUNNY, SUNNY, SUNNY_WINDY, CLOUDY, RAIN, DRIZZLE, FOGGY, LIGHTNING (bernie3's FORCE_WEATHER_NOW(1)
     /// before bc_3, sunny in the game); null without the file or such a block.
@@ -330,6 +338,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         CloudShadowOffset = a.Length > 119 && b.Length > 119 ? V(87) : 0,
         CloudEdge = a.Length > 119 && b.Length > 119 ? V(89) : 0,
         CloudSpeed = a.Length > 119 && b.Length > 119 ? V(107) : 0,
+        StarStrength = a.Length > 119 && b.Length > 119 ? V(108) : 0,
+        StarGalaxyShare = a.Length > 119 && b.Length > 119 ? V(109) : 0,
       };
     }
 
@@ -510,6 +520,49 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     }
 
     /// <summary>
+    /// This time cycle part way (<paramref name="t"/>) towards a room's (<paramref name="room"/>), as the page's mixSky
+    /// eases the outside's message towards the room's by the room's strength (CutsceneLighting.RoomStrength): every
+    /// number eased by t (a colour without a value on either side, and the like, taken from the nearer one); the sun
+    /// and the light from around from the parts apart, colour and multiplier eased each (this one's own, the room's
+    /// from <paramref name="roomParts"/>: its modifier blended in whole, <see cref="Blended"/>), so the frame's sun
+    /// is eased colour x eased multiplier x eased exposure.
+    /// </summary>
+    public TimeCycle Mixed(TimeCycle room, TimeCycle roomParts, float t)
+    {
+      if (t <= 0)
+      {
+        return this;
+      }
+      var mixed = this with { };
+      foreach (var p in typeof(TimeCycle).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+      {
+        if (!p.CanWrite || p.GetIndexParameters().Length > 0)
+        {
+          continue;
+        }
+        object? a = p.GetValue(this), b = p.GetValue(room);
+        object? value = (a, b) switch
+        {
+          (float x, float y) => x + (y - x) * t,
+          (int x, int y) => (int)MathF.Round(x + (y - x) * t),
+          (Vector3 x, Vector3 y) => Vector3.Lerp(x, y, t),
+          (Vector4 x, Vector4 y) => Vector4.Lerp(x, y, t),
+          _ => t < 0.5f ? a : b,
+        };
+        p.SetValue(mixed, value);
+      }
+      return mixed with
+      {
+        Sun = Vector3.Lerp(Sun, roomParts.Sun, t),
+        SunMultiplier = SunMultiplier + (roomParts.SunMultiplier - SunMultiplier) * t,
+        AmbientAbove = Vector3.Lerp(AmbientAbove, roomParts.AmbientAbove, t),
+        AmbientMultiplierAbove = AmbientMultiplierAbove + (roomParts.AmbientMultiplierAbove - AmbientMultiplierAbove) * t,
+        AmbientBelow = Vector3.Lerp(AmbientBelow, roomParts.AmbientBelow, t),
+        AmbientMultiplierBelow = AmbientMultiplierBelow + (roomParts.AmbientMultiplierBelow - AmbientMultiplierBelow) * t,
+      };
+    }
+
+    /// <summary>
     /// The "sky" message for the page: the sun (where it is at the hour: rising in the east, at noon high in
     /// the south, setting in the west; the game's exact path isn't known), the light from around above and
     /// below, the sky's colours, the haze (from where the fog starts to how far is drawn) and the water's colour;
@@ -520,14 +573,26 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// time - before 6 o'clock t x pi/12, from 6 to 20 o'clock pi/2 + (t - 6) x pi/14, after it 3pi/2 + (t - 20) x
     /// pi/8, kept within pi/2 and 3pi/2 - then (1 - 2 x 0.1) x (angle - pi/2) + (0.1 + 0.5) x pi (0x103FC00 = 0.1),
     /// and the direction normalize(sin a - cos a x (0, -0.342, 0.940)) (the sun's axis at 0x103FBF0, 20° from
-    /// upright). At noon (0.179, -0.337, 0.925). Before 6 and after 20 o'clock the game also turns it towards
-    /// the horizon (not done here: the cutscenes so far are by day).
+    /// upright). At noon (0.179, -0.337, 0.925). Before 6 and after 20 o'clock (night) the game turns it towards a
+    /// fixed night light, normalize(0.05, -0.5, 1) (0xAEF0E0 after 0xAEF38E: 0xFE876C, 0xFE8D7C, 1, its length's
+    /// square 1.2525 at 0xEA8230): d = max(6 - t, t - 20) hours into the night, w = min(d / 3, 1), the direction
+    /// normalize(w x that + (1 - w) x the day's). GTAIV.3.trace (the intro at 05:15, s2 f863): the sun pass's c17
+    /// (set at call 34227404) is -(0.8332, -0.2196, 0.5074), this to 0.0001.
     /// </summary>
     public static Vector3 SunDirection(float hour)
     {
       double angle = Math.Clamp(SunAngle(hour), 1.570796, 4.712389);
       const double Offset = 0.1;
-      return SunOnAxis((1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI);
+      var day = SunOnAxis((1 - Offset * 2) * (angle - 1.570796) + (Offset + 0.5) * Math.PI);
+      double t = ((hour % 24) + 24) % 24;
+      double intoNight = Math.Max(6 - t, t - 20);
+      if (intoNight <= 0)
+      {
+        return day;
+      }
+      float w = intoNight < 3 ? (float)(intoNight / 3) : 1;
+      var night = Vector3.Normalize(new Vector3(0.05f, -0.5f, 1f));
+      return Vector3.Normalize(w * night + (1 - w) * day);
     }
 
     /// <summary>

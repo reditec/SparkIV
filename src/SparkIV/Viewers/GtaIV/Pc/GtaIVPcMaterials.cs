@@ -142,6 +142,15 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// </summary>
     public static bool IsTree(string shader) => shader.Equals("gta_trees", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Drawn into the sun's shadow map by its own wd_draw, blended SRCALPHA / INVSRCALPHA by its texture's alpha after
+    /// the solid ones (the page's alphaShadow, ModelView.html; the game's shadow passes in GTAIV.1 and GTAIV.2, see
+    /// gtaiv-pc.js shadowTarget): the see-through, decal and cut-out buckets (1, 2, 3); not a tree's (gta_trees' wd_draw
+    /// blends nothing) nor a vehicle's.
+    /// </summary>
+    public static bool ShadowByAlpha(int drawBucket, string shader) =>
+      drawBucket is 1 or 2 or 3 && !IsTree(shader) && !IsVehicle(shader);
+
     /// <summary>Dirt decals (gta_decal_dirt): colour from the vertices, the texture only says where.</summary>
     public static bool IsDirtDecal(string shader) => shader.Contains("decal_dirt", StringComparison.OrdinalIgnoreCase);
 

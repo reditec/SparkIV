@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
   SparkIV
   Copyright (C) 2026  reditec
@@ -94,6 +94,8 @@
                 <Grid>
                     <!-- Drawn with WebGL by ModelView.html: left drag turns, middle or right drag moves, wheel zooms -->
                     <WebView2 x:Name="Web" Margin="3" DefaultBackgroundColor="Transparent" />
+                    <!-- Drawn by the native Direct3D 12 renderer (#112 step 6, the default; SPARKIV_D3D12=0: the page above) -->
+                    <SwapChainPanel x:Name="Native" Margin="3" Visibility="Collapsed" />
                     <ProgressRing x:Name="Working" IsActive="True" Width="32" Height="32" />
                     <TextBlock x:Name="PedMessage" Visibility="Collapsed" TextWrapping="Wrap" MaxWidth="420" TextAlignment="Center"
                                HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

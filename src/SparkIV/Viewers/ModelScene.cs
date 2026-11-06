@@ -1266,6 +1266,7 @@ namespace SparkIV.WinUI.Viewers
         EmissiveAtNight = GtaIVPcMaterials.IsEmissiveAtNight(shader),
         EmissiveStrong = GtaIVPcMaterials.IsEmissiveStrong(shader),
         Tree = GtaIVPcMaterials.IsTree(shader),
+        ShadowByAlpha = GtaIVPcMaterials.ShadowByAlpha(material.DrawBucket, shader),
         SubSurface = VectorParameter(material, GtaIVPcMaterials.SubColor) is { } sub && VectorParameter(material, GtaIVPcMaterials.SubScatWidth) is { } width
           ? new[] { sub.X, sub.Y, sub.Z, VectorParameter(material, GtaIVPcMaterials.SubScatWrap)?.X ?? 0, width.X }
           : null,
@@ -1571,6 +1572,12 @@ namespace SparkIV.WinUI.Viewers
 
     /// <summary>Whether it is a tree's (gta_trees: the light from around x 0.5, see GtaIV.Pc.GtaIVPcMaterials.IsTree).</summary>
     public bool Tree { get; init; }
+
+    /// <summary>
+    /// Drawn into the sun's shadow map blended by its texture's alpha, after the solid ones (set by the game's rules:
+    /// GtaIV.Pc.GtaIVPcMaterials.ShadowByAlpha; the page's alphaShadow).
+    /// </summary>
+    public bool ShadowByAlpha { get; init; }
 
     /// <summary>gta_ped_skin's light through the skin: SubColor (r, g, b), SubScatWrap, SubScatWidth; or null.</summary>
     public float[]? SubSurface { get; init; }
