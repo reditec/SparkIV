@@ -819,6 +819,36 @@ Native: intro s2 f863 3.93 -> 2.83, s2 f352.75 3.96 -> 2.93, s2 f682.5 1.99 -> 1
 f1833.25, bc_1 s3 f299.75, bc_3 s3 f829.5, et01_aa s2 f79.5 unchanged; et01_ba f468 4.89 -> 4.87, f908.5 4.84 -> 4.82;
 intro s6 f146 3.44 -> 3.46.
 
+### The ring's stone: a cast's glass lit by its vertex red alone (#89, 2026-11-06)
+
+Intro s3 f569.75: the ring's stone (actor `csJewel`, `csjewel.wdr`: one mesh, 2722 vertices / 1018 triangles,
+`gta_glass_reflect` `ec_diamond`, reflectivePower 2.5, vertex colours grey 0.57 on average, vertex alpha 0.75-0.85)
+came out grey (~45 / 255) where the game shows it white (~230). Its draw in `GTAIV.3.trace` is call 52563820
+(`lightweight0_draw`, forward, SRCALPHA / INVSRCALPHA, depth written): the light from around (gLightAmbient0 2.96) x the
+vertex red, with no AmbientDownMult and no AO multiplier (details in
+[fxc.md](GtaIV/Pc/formats/fxc.md#mirrored-surroundings-_reflect)). Native took a cast's AO as a deferred program's:
+x the actor's AmbientDownMult (`Instance.x`, 0 in the galley's room), then 1 + AoMultiplier (0.8) x (AO - 1) = 0.2,
+so the stone got a third of the game's light.
+- `MeshRenderer`: a cast's glass (not a vehicle's) gets `PartFlags.RawAo`; `Shade` then takes AO = the vertex red,
+  without `Instance.x` and the AO multiplier. Map glass is unchanged (its vertex program not checked).
+- cutgen: `CASTMATS=<text>` prints the materials of the actors whose model name holds the text (shader, texture,
+  environment, bucket, glass, reflectivity, per mesh vertices / triangles, vertex colours and alphas) and each actor's
+  AmbientDownMult at the frame.
+
+| Reference | before (run 2026-11-06_13-19) | after |
+|---|---|---|
+| intro s3 f569.75 | 4.26 | 3.39 (stone ~180-216 against the game's ~216-244) |
+| intro s3 f49.5, f470.25, f749.75, f1236.5 | 3.03, 2.97, 2.11, 3.59 | the same |
+| intro s1 f319.75, f399.5, f499.5 | 1.47, 1.20, 2.77 | the same |
+| bc_1 s1 f144 | 0.98 | 0.98 |
+| bc_3 s3 f357.25 | 6.34 | 6.34 |
+| et01_aa s3 f49.75 | 2.52 | 2.52 |
+| et01_ba s1 f220.25 | 3.95 | 3.95 |
+
+The cook's hand in the same frame is not brighter natively: means over 121 x 121 pixels game (97, 81, 73) / native (94,
+80, 72) and game (138, 113, 94) / native (122, 101, 84). The light lines along its outline in the difference picture are
+its silhouette (edges a pixel apart), not its light. The page (`ModelView.html`) keeps the old rule (page 4.22).
+
 ## Profiling (2026-11-05)
 
 `GpuProfiler` (`Rendering/D3D12`, generic) times each pass: a timestamp query heap (8 frame slots x 512 queries) and a

@@ -128,6 +128,16 @@ Added to the albedo before it is lit (`mad oC0, env, weight, albedo`):
   D3D9. SparkIV keeps looking it up as the other `*_reflect` (no visible change either way in the references).
 - Forward glass (`gta_glass`, `gta_glass_reflect` `draw`): env × `specularColorFactor` × `reflectivePower` ÷ alpha
   (so it shows whole on clear glass), then lit.
+- A cast prop's glass (#89, the intro's ring stone `csjewel.wdr`, `gta_glass_reflect` `ec_diamond`, reflectivePower
+  2.5; `GTAIV.3.trace` call 52563820, PS 0x235e24a0 = `lightweight0_draw`, skinned VS 0x2c9b1620): the vertex program
+  hands the vertex colour on unchanged (`mov o4, v5`), the pixel program lights by (`gLightAmbient0` +
+  `gLightAmbient1` × saturate(0.5 − 0.5 n.z)) × the colour's red alone. It reads `globalScalars.x` only (the stipple /
+  alpha), not `.z`: the room's AmbientDownMult (0 in the intro's galley, `globalScalars` = (1, 1, 0, …) at that draw)
+  and `globalScalars2`' AO multiplier don't reach it, unlike the deferred programs' AO (see
+  [timecyclemodifiers.md](timecyclemodifiers.md#ao-under-a-modifier)). Alpha = texture alpha × vertex alpha
+  (0.75-0.85 on the stone), SRCALPHA / INVSRCALPHA, depth written. `gLightAmbient0` = (2.96, 2.97, 2.98) there, so the
+  environment term (× 2.5 ÷ alpha) × ambient × 0.57 saturates it white. Map glass: its (unskinned) vertex program not
+  checked yet.
 
 ## Forward programs (`draw`, `lightweight0_draw`, `lightweight4_draw`)
 

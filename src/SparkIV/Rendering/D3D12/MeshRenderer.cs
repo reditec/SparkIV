@@ -204,7 +204,7 @@ StructuredBuffer<PartData> Parts : register(t2);
 static const uint Baked = 1, Ped = 2, Vehicle = 4, Tree = 8, Emissive = 16, Night = 32, Strong = 64, GlowLit = 128;
 static const uint FNormal = 1, FSpec = 2, FSpecFlat = 4, FEnv = 8, FEnvSpec = 16, FPaint2 = 32, FDirt = 64, FStipple = 128,
   FVehGlass = 256, FVehLights = 512, FDecalBelow = 1024, FDecalAoBelow = 2048, FForwardShine = 4096, FTextureAlpha = 8192,
-  FTextured = 16384, FFixedAlpha = 32768, FForwardLit = 65536;
+  FTextured = 16384, FFixedAlpha = 32768, FForwardLit = 65536, FRawAo = 131072;
 
 // The stipple's share kept per level (stipple.wtd all_stips: of 64) and a vehicle lamp's dimmers (by its vertex alpha).
 static const float Kept[16] = { 0, 6, 8, 12, 11, 12, 16, 24, 32, 40, 48, 52, 52, 56, 58, 64 };
@@ -604,8 +604,19 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
            : emissive ? 1.0
            : vehicle ? saturate(dot(vc, float3(0.2125, 0.7154, 0.0721)))
            : saturate(baked ? dayNight * vc.r + (1 - dayNight) * vc.g : vc.r);
-  ao *= d.Instance.x;
-  if (!tree && !vehicle && !emissive)
+  // (A cast's glass, gta_glass*'s forward draw: its vertex shader hands the vertex colour on unchanged and its pixel
+  // shader takes the light from around x the colour's red - no AmbientDownMult (globalScalars.z), no AoMultiplier
+  // (#89, GTAIV.3.trace call 52563820).)
+  bool rawAo = (bits & FRawAo) != 0;
+  if (rawAo)
+  {
+    ao = saturate(vc.r);
+  }
+  else
+  {
+    ao *= d.Instance.x;
+  }
+  if (!tree && !vehicle && !emissive && !rawAo)
   {
     ao = 1 + (ped ? f.Params.z : 1) * f.Params.w * (ao - 1);
   }
@@ -817,8 +828,7 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
               : debugView == 5 ? alpha.xxx : debugView == 6 ? vc : debugView == 7 ? texel.rgb
               : debugView == 9 ? Tex[p.Tex.x].SampleLevel(Linear, uvP, 0).rgb : debugView == 10 ? float3(frac(input.uv), 0)
               : float3((bits & FPaint2) != 0 ? 1 : 0, (bits & FEnv) != 0 ? 1 : 0, layers > 1 ? 1 : 0);
-    rgb = dv * (debugView == 4 ? 1 : f.Params.y);
-  }
+    rgb = dv * (debugView == 4 ? 1 : f.Params.y);  }
   PsOut o;
   o.light = float4(rgb, deferred ? alpha : a);
   // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
@@ -1390,7 +1400,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     {
       NormalMap = 1, SpecularMap = 2, SpecularFlat = 4, Environment = 8, EnvironmentSpecular = 16, Paint2 = 32, Dirt = 64,
       Stipple = 128, VehicleGlass = 256, VehicleLights = 512, DecalBelow = 1024, DecalAoBelow = 2048, ForwardShine = 4096,
-      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768, ForwardLit = 65536,
+      TextureAlpha = 8192, Textured = 16384, FixedAlpha = 32768, ForwardLit = 65536, RawAo = 131072,
     }
 
     /// <summary>
@@ -2603,6 +2613,11 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         bool culled = false;
         if (material.Glass)
         {
+          // A cast's glass (not a vehicle's): lit by the light from around x the vertex red alone (#89).
+          if (source.Actor && !material.Vehicle)
+          {
+            flags |= PartFlags.RawAo;
+          }
           // A vehicle's glass (gta_vehicle_vehglass, textured) and the map's glass with vertex alpha: by the texture's
           // alpha, back faces culled, writing depth; other glass at 0.45, as a blended material (the page's).
           bool vehicleGlass = material.Vehicle && textured && vehicleShine.Z > 0.5f && vehicleShine.Z < 1.5f;

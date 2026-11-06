@@ -61,6 +61,10 @@ The vertex programs read `globalScalars.z` (the AmbientDownMult, see below) and 
 
 Without a modifier both are 1. On the intro's ship the rooms have `boatcabs`: AmbientDownMult 0, z 0.8, y 0.1. A ped there keeps 0.92 of the light from around, a prop 0.2.
 
+Not the glass's forward draw: `gta_glass_reflect`'s `lightweight0_draw` on a cast prop takes the vertex colour's red
+unchanged and reads neither `globalScalars.z` nor `globalScalars2` (`GTAIV.3.trace` call 52563820, the intro's ring
+stone, #89; details in [fxc.md](fxc.md#mirrored-surroundings-_reflect)).
+
 ## AmbientDownMult in detail
 
 Found in GTAIV.exe and measured in the capture `GTAIV.3.trace` (TLAD, et01_aa):
