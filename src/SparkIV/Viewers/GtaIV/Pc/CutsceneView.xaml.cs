@@ -1617,7 +1617,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         FpsSummary();
       }
       FrameText.Text = TimeSpan.FromSeconds(now - _from).ToString(@"m\:ss\.f") + " / " + TimeSpan.FromSeconds(_to - _from).ToString(@"m\:ss\.f");
-      SectionText.Text = "Section " + (_section + 1) + " of " + _document.Cut.Sections.Count + "   ·   frame " + (_frame + 1) + " / " + _frames;
+      // (One section alone: only its frame.)
+      SectionText.Text = (_only != null ? "" : "Section " + (_section + 1) + " of " + _document.Cut.Sections.Count + "   ·   ") + "Frame " + (_frame + 1) + " / " + _frames;
       _settingSlider = true;
       TimeSlider.Value = Math.Clamp(Math.Round(now * 1000), TimeSlider.Minimum, TimeSlider.Maximum);
       _settingSlider = false;
