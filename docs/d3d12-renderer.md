@@ -198,6 +198,19 @@ stays at 393.984 in every intro frame of GTAIV.3.trace). Below the horizon faded
 dome, and the near fog's share. The main view, the water's mirror (below, "The water's mirror") and the mirrored
 surroundings' map (`toMap`, below). In the app the player draws it through `IRenderScene.DrawBackground`.
 
+**The clouds' DetailOffset (2026-11-06).** The fine detail noise is read at the dome's detail coordinate plus
+DetailOffset (gta_atmoscatt_clouds VS c75, the same value in both components). SparkIV held it at the old TLAD trace's
+0.0109; the game moves it with the clock: **DetailOffset = hour x CloudSpeed (time cycle column 107) x 0.0005**, exact in
+every traced frame (`GTAIV.1.trace`, bc_3, SUNNY, CloudSpeed 8: 12.202 h 0.048808, 12.340 h 0.049359, 12.519 h
+0.050077, 12.760 h 0.05104, 13.084 h 0.052338; `GTAIV.2.trace`, et01_ba, 1.7: 14.004 h 0.012087; TLAD's old GTAIV.4:
+12:50 0.010913). `SkyParams.DetailOffset`, in the shader's `CloudColor.w`. Found by comparing the native light target
+before the tone mapping (cutgen `D3D12LIGHTDUMP=<folder>`) with the game's HDR light (the final post pass's
+HDRSampler, read with `d3dretrace -D`): bc_3 s3 f829.5's clear sky matched to 1 %, its clouds were too dark and cold
+(10.47 / 9.97 / 9.48 against 8.64 / 8.90 / 9.00), and with the game's DetailOffset 10.24 / 10.01 / 9.71. Visual run
+(72 references): bc_3 s3 f829.5 8.71 to 4.97, s3 f975 4.54 to 2.84, s2 f1307 -1.10, 25 more better, sum -13.21; only
+bc_3 s3 f357.25 +0.19. Also checked and not the cause: the game's perlin target (taken over as it is: -0.07), a mip bias
+of 2 on the noise textures (worse).
+
 **Solved: not the sky (#82, 2026-11-06).** The game's HDR light right after its sky draw (call 224299440) holds
 (7.1, 9.5, 11.8) in the box, as the native sky's; it turns grey (5.4, 5.3, 5.3) only at calls 224301524 / 224301543:
 two particle plumes (PS 0x2d241360, quads written each frame into a dynamic vertex buffer of stride 108, 144 and 136

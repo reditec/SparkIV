@@ -76,6 +76,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public float CloudEdge;
     /// <summary>rage_perlinnoise's Phase now (see <see cref="CutsceneSky.CloudPhase"/>).</summary>
     public float CloudPhase;
+    /// <summary>
+    /// The clouds' DetailOffset (gta_atmoscatt_clouds VS c75, both components): the hour x CloudSpeed (column 107) x
+    /// 0.0005, as in every traced frame - GTAIV.1.trace (bc_3, SUNNY, speed 8): 12.202 h 0.048808, 12.340 h 0.049359,
+    /// 12.519 h 0.050077, 12.760 h 0.05104, 13.084 h 0.052338; GTAIV.2.trace (et01_ba, speed 1.7): 14.004 h 0.012087;
+    /// TLAD's GTAIV.4: 12:50 0.010913.
+    /// </summary>
+    public float DetailOffset;
 
     /// <summary>
     /// The sky of a time cycle (outside's, a room's, or a mix) at an hour, as the page's "sky" message has it
@@ -116,6 +123,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         CloudShadowOffset = c.CloudShadowOffset,
         CloudEdge = c.CloudEdge,
         CloudPhase = cloudPhase,
+        DetailOffset = hour * c.CloudSpeed * 0.0005f,
       };
     }
   }
@@ -163,7 +171,7 @@ struct Sky
   float4 Hdr;           // HDRExposure, HDRSunExposure.xy, HDRExposureClamp
   float4 FogNear;       // rgb: the near fog's light, w: CloudShadowOffset
   float4 FogFar;        // rgb: the far fog's light, w: column 89 (1 / EdgeSmooth)
-  float4 CloudColor;
+  float4 CloudColor;    // rgb, w: DetailOffset (both of its components)
   float4 Sunset;
   float4 TopCloudColor;
   float4 TopCloud;      // bias, detail, threshold, height
@@ -229,8 +237,6 @@ static const float3 DOME[17] = {
   float3(0.765367, 1.511670, 0.169894), float3(0.580569, 1.565755, 0.128873), float3(0.390181, 1.604780, 0.086611),
   float3(0.196034, 1.628340, 0.043515), float3(0.0, 1.636219, 0.0) };
 
-// VS c75 in TLAD's trace; it moves with time in the game, fixed here.
-static const float2 DetailOffset = 0.01091306;
 
 // Where a view direction meets the dome, as its texture coordinate (dome y = world z, dome z = world -y).
 float2 DomeUv(float3 d)
@@ -298,7 +304,7 @@ float4 PSSky(VsOut i) : SV_Target
     float2 edge = uv * 2 - 1;
     float r2 = dot(fromMiddle, fromMiddle);
     float2 shadowUv = uv + float2(sunDir.x - dir.x, dir.y - sunDir.y) * 0.1 * s.FogNear.w * (1 - dot(edge, edge));
-    float2 detailUv = fromMiddle * rsqrt(max(r2, 1e-12)) * r2 * s.CloudDetail.y + DetailOffset;
+    float2 detailUv = fromMiddle * rsqrt(max(r2, 1e-12)) * r2 * s.CloudDetail.y + s.CloudColor.w;
     float2 topUv = fromMiddle * s.TopCloud.w + 0.5;
     float topFade = 1 - length(fromMiddle * s.TopCloud.w);
 
@@ -636,7 +642,7 @@ float4 PSSky(VsOut i) : SV_Target
       Put(f, 40, new Vector3(p.HdrExposure, p.HdrSunExposure.X, p.HdrSunExposure.Y), p.HdrClamp);
       Put(f, 44, p.FogNear, p.CloudShadowOffset);
       Put(f, 48, p.FogFar, p.CloudEdge);
-      Put(f, 52, p.CloudColor, 0);
+      Put(f, 52, p.CloudColor, p.DetailOffset);
       Put(f, 56, p.SunsetColor, 0);
       Put(f, 60, p.TopCloudColor, 0);
       Put(f, 64, new Vector3(p.TopCloud.X, p.TopCloud.Y, p.TopCloud.Z), p.TopCloud.W);
