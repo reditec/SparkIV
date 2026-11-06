@@ -62,6 +62,7 @@ openFormats export (`.onim`) of all 357 cutscene dictionaries.
 | `[CUTSCENE_HEADER]` | **unclear** | bc_3: `44 1143 2578 3615`, the section boundaries in an overall frame count starting at 44. Possibly an offset for sound or subtitles (44 frames ≈ 1.5 s). The synchronisation in SparkIV still has to be checked. |
 | `[ANIMRANGE]` | **unclear** | `range on 44.0 3615.0`; matches `[CUTSCENE_HEADER]`. |
 | `[COMPRESSION]` | **unclear** | `1 A` everywhere. |
+| Particle effects of the world (smoke, steam: the map's 2dfx particle effects or the scripts', drawn by the game as quads written each frame) | **not drawn** | E.g. two smoke plumes over the toll booths in TLAD et01_ba (`GTAIV.2.trace`, calls 224301524 / 224301543): the grey patch in the sky of f1394.75 (#82). Where they come from (2dfx entry or script) not checked. |
 | `[EFFECTS]` | **ignored** | Particle effects, e.g. `FX_blood_gun_entry:effect2_1 5 1205 71900 71900 <6 numbers> 0`: effect name, clip, numbers for object, bone, time, position and rotation (assumption). The associated `effect` clips have only a `LightDirection` track. |
 | `[CAMCORDER]` | **ignored** | Time spans (ms) in 134 files, presumably the handheld-camera look. |
 | `[BLOCKING_BOUNDS]` | game logic only (assumption) | Four corner points and a radius, probably the blocked area. |

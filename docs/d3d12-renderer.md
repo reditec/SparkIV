@@ -198,7 +198,14 @@ stays at 393.984 in every intro frame of GTAIV.3.trace). Below the horizon faded
 dome, and the near fog's share. The main view, the water's mirror (below, "The water's mirror") and the mirrored
 surroundings' map (`toMap`, below). In the app the player draws it through `IRenderScene.DrawBackground`.
 
-**Checked against the trace, still open (#82, 2026-11-06).** TLAD et01_ba f1394.75 (`GTAIV.2.trace`, sky draw 224299438,
+**Solved: not the sky (#82, 2026-11-06).** The game's HDR light right after its sky draw (call 224299440) holds
+(7.1, 9.5, 11.8) in the box, as the native sky's; it turns grey (5.4, 5.3, 5.3) only at calls 224301524 / 224301543:
+two particle plumes (PS 0x2d241360, quads written each frame into a dynamic vertex buffer of stride 108, 144 and 136
+triangles, world about x 614-633, y 658-687 and 762-789, z 42-60; the second ~70 m east of the camera, in the box's
+direction). They aren't in et01_ba.cut's `[EFFECTS]` (only `FX_blood_stun_punch`): the map's or the script's smoke.
+SparkIV draws no particle effects (see data-support.md). The findings below stand as checks of the sky.
+
+**Checked against the trace (#82, 2026-11-06).** TLAD et01_ba f1394.75 (`GTAIV.2.trace`, sky draw 224299438,
 PS 0x2ce67260, perlin pass 224279527): every constant of the sky and the clouds matches the native `SkyParams`
 (SkyColor, the azimuth colours and height, SunColor, HDRExposure 44.78 / 44.95, the cloud colour, threshold, bias,
 detail, top clouds, fade), the clouds' Phase too (595.4131 / 595.4086), and the rage_perlinnoise program is the native
@@ -206,8 +213,7 @@ one step for step. The dome's texture coordinates (vertex buffer, call 188512) a
 dome's space (z = the world's -y), as `DomeUv`. In the box between the pillars the game's HDR light shows grey clouds
 (about 5.4 / 5.3 / 5.3) darker than the clear sky beside them (6.3 / 9.3 / 12.3); natively the clouds are there (cover
 and fade as the game's: the box lies at 11-13° above the horizon, fade 0.43-0.54) but come out about as bright as the
-sky, so the box stays even and pale. The formula with the traced constants gives clouds of 0.22-0.3 x HDRExposure,
-brighter than the sky, so something darkens the game's clouds (by about 2.5) that isn't found yet. cutgen helpers:
+sky, so the box stays even and pale - the grey is the smoke above, drawn after the sky. cutgen helpers:
 `D3D12SKYINFO=1` (the frame's SkyParams), `D3D12CLOUDFADE=<x>` (CloudFadeOut set), `D3D12PERLINFILE=<file>` (the
 clouds' noise from 256 x 256 BGRA bytes, e.g. the game's perlin target; `CutsceneSky.FixPerlin`).
 
