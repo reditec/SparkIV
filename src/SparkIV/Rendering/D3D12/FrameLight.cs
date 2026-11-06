@@ -134,16 +134,26 @@ namespace SparkIV.WinUI.Rendering.D3D12
     Filler = 1,
     /// <summary>A cutscene's own light (ps09 / program 29): no AO factor.</summary>
     Cut = 2,
+    /// <summary>
+    /// A cutscene's own light the game draws as a lamp (GTA IV: a name starting with env, flag 0x100): the lamp's
+    /// formula (as <see cref="Lamp"/>), but like <see cref="Cut"/> not handed to forward-lit materials.
+    /// </summary>
+    CutLamp = 3,
   }
 
   /// <summary>Which pixels a light reaches, by whether their light is baked into vertex colours (the game's stencil).</summary>
   public enum DeferredLightMask
   {
     All = 0,
-    /// <summary>Only peds and vehicles (a cutscene's own light).</summary>
+    /// <summary>
+    /// Only peds: neither baked nor vehicles (a cutscene's own light; GTA IV's ps09 lights only where the stencil mod 8
+    /// is 1, a character's, not a vehicle's 2).
+    /// </summary>
     NotBaked = 1,
     /// <summary>Only the location and the cast's props (a cutscene's env*/shd* light).</summary>
     BakedOnly = 2,
+    /// <summary>Peds and vehicles, nothing baked (a cutscene's own light as SparkIV had it before 2026-11-06; for comparisons).</summary>
+    NotBakedWithVehicles = 3,
   }
 
   /// <summary>

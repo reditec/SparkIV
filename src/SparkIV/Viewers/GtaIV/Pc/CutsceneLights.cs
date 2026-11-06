@@ -445,6 +445,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// 2026-11-05, the page's). For comparisons.</summary>
     public static bool KeepCulledLights { get; set; }
 
+    /// <summary>The section's own lights as before 2026-11-06 (#116): env* only on the location, the others on peds and
+    /// vehicles. For comparisons.</summary>
+    public static bool CutLightMasksBefore116 { get; set; }
+
     /// <summary>
     /// GTA IV (PC): whether GTAIV.exe's Light_Add (0xABCCD0) makes a light at <paramref name="at"/> reaching
     /// <paramref name="range"/>: its sphere reaches into the view (Light_SphereVisible 0x431E40, against the view's
@@ -520,6 +524,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         float cosInner = spot ? MathF.Cos(MathF.Max(1, V1(l.Cone, 89)) * 0.5f * MathF.PI / 180) : 1;
         var way = dir is Vector3 w && w.LengthSquared() > 0 ? Vector3.Normalize(w) : new Vector3(0, 0, -1);
         bool env = Regex.IsMatch(l.Name, "^(env|shd)", RegexOptions.IgnoreCase);
+        // How the game draws it (#116): 0x9CA7E0 gives every cut light flag 0x80, an env... one 0x100 as well, a shd...
+        // one also 4 (a shadow). Without 0x100 Light_Add's light goes to deferred_lighting's ps09, which lights only
+        // where the stencil mod 8 is 1 (characters; a vehicle's is 2): NotBaked, peds only. An env... light the game
+        // draws with its lamps' program (GTAIV.3.trace intro s4 f420.5: env_car_0 and env_title_0 by PS 0x2d592840, as
+        // the map's lamps, no stencil test, lighting the car on the crane): the lamp's formula on everything. A shd...
+        // light goes to the shadowed lamps' ps14 with its shadow map, which isn't made for cut lights here: kept on the
+        // location only (the cook in s3 f569.75 gets nothing from shd_env_kit in the game).
+        bool envLamp = !CutLightMasksBefore116 && Regex.IsMatch(l.Name, "^env", RegexOptions.IgnoreCase);
         list.Add((new DeferredLight
         {
           Position = at,
@@ -528,8 +540,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           CosOuter = cosOuter,
           ConeScale = 1 / MathF.Max(cosInner - cosOuter, 1e-3f),
           Color = color,
-          Model = DeferredLightModel.Cut,
-          Mask = env ? DeferredLightMask.BakedOnly : DeferredLightMask.NotBaked,
+          Model = envLamp ? DeferredLightModel.CutLamp : DeferredLightModel.Cut,
+          Mask = envLamp ? DeferredLightMask.All : env ? DeferredLightMask.BakedOnly
+               : CutLightMasksBefore116 ? DeferredLightMask.NotBakedWithVehicles : DeferredLightMask.NotBaked,
         }, strength));
       }
       // (Stable, as the page's sort: equal strengths keep their order.)

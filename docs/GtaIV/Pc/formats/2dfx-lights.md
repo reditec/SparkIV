@@ -48,6 +48,12 @@ The fields at +0x30 and +0x34 (RageLib's `Unknown2C`, `Unknown30`) are the light
     - Indoors: trace GTAIV.3, et01_aa.
     - Outdoors: trace GTAIV.4, et01_ba frame 9350, read out with d3dretrace on 2026-10-23. After `BoothLight_0` (call 145552474) the guard's face rose from 1.72 to 2.69; the booth is unchanged (panel 0.52/0.88/0.94).
   - Since 2026-10-23, SparkIV no longer applies cut lights to any map or prop meshes (`ModelView.html`, `marked < 0 && baked`).
+  - **Corrected 2026-11-06 (#116):** "characters" means the stencil's 1 only: the cut lights' program (ps 9) leaves
+    vehicles (stencil 2) out. And an `env…` light is not drawn by that program but by the lamps' one, lighting
+    everything outside, vehicles too (intro s4 f420.5: `env_car_0` lights the car on the crane). Details and trace calls
+    in [deferred_lighting.md](deferred_lighting.md#which-program-draws-a-cutscene-light-vehicles-116-2026-11-06). The
+    `shd…` lights keep the rule above in SparkIV (location only), see there. The native renderer follows this; the
+    page (`ModelView.html`) still has the rule above.
 
 ## Coronas
 

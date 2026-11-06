@@ -401,8 +401,8 @@ the albedo, as the game's decals write GB0's colour only); the lights are then a
 (a box round its sphere, its faces turned away from the camera only, depth test "greater or equal", one instanced
 draw), before the water and the see-through materials, which are drawn forward (the map's ones with the lamps, below). No cap: the
 page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `CutsceneLights` (GTA IV PC) picks them
-per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; env*/shd* only on baked
-surfaces, the others only on peds and vehicles), the tail lamps of vehicles whose lamps the script turns on, the
+per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; since #116 env* as lamps on
+everything, shd* only on baked surfaces, the others only on peds - see "The car on the crane" below), the tail lamps of vehicles whose lamps the script turns on, the
 location's lamps on at the hour, of the rooms seen, in view, faded by FadeDistance - with the page's formulas (light
 and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Lamp shadows as the
 page's: the 4 shadow lamps nearest to the camera (distance less radius; `CutsceneLights.LampShadowSlots`) get a slot in
@@ -687,6 +687,42 @@ vertex red, so the toll keeper's helmet in et01_ba (CS_DeSean's prop `p_head_000
 from around, its *_reflect environment texture and the mirrored surroundings at AO 1 (at (1320, 440): game 47, page 4d,
 native a2). Now the colours, tangents (unmoved, as the page's), layer coordinates and weights come along. et01_ba
 f1394.75 4.25 -> 4.04 (page 4.02), f1292.25 3.27 -> 3.25 (page 3.18).
+
+### The car on the crane: the cutscene's env lights and vehicles under the lamps (#116, 2026-11-06)
+
+In the intro's harbour (s4) the car on the crane (schafter; paint 10/255 black, dirt 0, shine all 1 - the same in the
+game's G-buffer draws, `GTAIV.3.trace` calls 85653384-85653473) had near-black rims and body where the game shows
+bright chrome and a lit body. Its paint, the mirrored surroundings and globalScalars weren't the cause: the game lights
+it with the section's `env_car_0`, a spot 7.5 m away pointing at it (colour x 65, radius 21.5), drawn by the lamps'
+program (PS 0x2d592840) with no stencil test. Native gave every env*/shd* light the location only (`BakedOnly`), so
+the car got none of it. Details and calls in `docs/GtaIV/Pc/formats/deferred_lighting.md` ("Which program draws a
+cutscene light; vehicles").
+
+- `CutsceneLights.CutLightsNow`: an env... light is now `DeferredLightModel.CutLamp` (PSLight: the lamp's formula, x
+  saturate(AO² + 0.5) outside, with its shine) with `DeferredLightMask.All`; like `Cut` it isn't handed to forward-lit
+  materials (Shade's forward loop skips models >= 2). shd... lights stay `Cut` / `BakedOnly` (they need the shadowed
+  program's shadow map, not made for cut lights). The others stay `Cut` / `NotBaked`, which now leaves vehicles out
+  too, as the game's ps 9 (stencil mod 8 = 1, characters; a vehicle's is 2).
+- The G-buffer's place.w marks a vehicle's pixel 3 (1 other, 2 baked, + 4 x the shine's power in 64ths).
+- The deferred vehicle shaders (paint, mesh, tyre, chrome, ...) now write the lamps' shine: amount strength x (1 - dirt)
+  (= 2 x GB2.x), power their vehicle power (= GB2.y² x 512); before, vehicles had no lamp shine at all.
+- cutgen: `D3D12CUTLIGHTSBEFORE116=1` (the old masks; the vehicles' lamp shine stays), `CASTLOOKS=1` (each vehicle's
+  paint, dirt, shine and lamps).
+
+| Reference | before (run 2026-11-06_09-12) | after |
+|---|---|---|
+| intro s4 f420.5 | 2.28 | 2.18 (env light only: 2.20; vehicle lamp shine only: 2.28) |
+| intro s4 f258.5 | 2.02 | 1.86 |
+| intro s4 f1833.25 | 5.58 | 4.53 |
+| intro s4 f2013.5 | 2.02 | 2.02 |
+| intro s6 f469.75 | 3.03 | 2.31 |
+| intro s1 f399.5, s2 f682.5, s2 f863, s3 f569.75, s5 f291.5 | 1.20, 1.91, 2.83, 4.26, 3.39 | the same |
+| bc_1 s1 f144 | 0.98 | 0.98 |
+| bc_3 s3 f829.5 | 8.71 | 8.71 |
+| et01_aa s3 f49.75 | 2.52 | 2.52 |
+| et01_ba f220.25 | 3.98 | 3.95 |
+
+Nothing worse. Not done: a full run of all 72; the page (`ModelView.html`) keeps the old rule.
 
 ### Gaps counted as noise (decided 2026-11-05)
 

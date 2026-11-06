@@ -61,6 +61,33 @@ SparkIV added rim on 2026-10-23 (`pedRim` in `gtaiv-pc.js`) and **switched it of
 
 In SparkIV: cutscene lights in a room hit only characters; without AO factor.
 
+### Which program draws a cutscene light; vehicles (#116, 2026-11-06)
+
+- **The stencil test is in the program, not in the draw state.** `lightVolumePoint` ps 7–9 read the stencil through
+  `GBufferStencilTextureSampler` (s5): s = 255 × the texel, less 128 when it's 128 or more, less 8 when it's 7.9 or more.
+  ps 7 keeps s ≥ 8, ps 8 s < 8 (that one × sat(AO² + 0.5), as ps 6, which has no test), ps 9 only |s − 1| ≤ 0.1:
+  **characters only**. A vehicle writes 2 (`GTAIV.3.trace`, intro s4 f420.5: `STENCILREF` 2 before the car on the
+  crane's G-buffer draws, call 85653355; draws 85653384–85653473), so a cut light drawn by ps 9 never lights a vehicle.
+  During the light draws the device's stencil test is off (`STENCILENABLE` FALSE from call 85658719 in f420.5, from
+  52562700 in s3 f569.75).
+- **A light named env… (flag 0x100) is drawn by the lamps' program**, not by ps 9. f420.5 draws three of the section's
+  lights: `filcar_0` by PS 0x2d5928e0 (ps 9, call 85658885), `env_title_0` and `env_car_0` by PS 0x2d592840, the program
+  the harbour's lamps use (calls 85658910, 85658934). `env_car_0`: at (741.39, −237.36, 22.29), colour (0.734, 0.931, 1)
+  × 65, radius 21.5, cone cos 0.5, scale 2.73, pointing along (−0.326, 0.727, −0.604) - at the car 7.5 m away
+  (its G-buffer world place (738.82, −231.23, 18.70)). So the car's bright rims and body in the game are this lamp's
+  light and the vehicle's shine under it.
+- **Vehicles' shine under the lamps:** the deferred vehicle shaders' GB2.x (0.5 × strength × (1 − dirt)) and GB2.y
+  (the power) are read by the lamps' 2 · GB2.x · sat(L·R)^(GB2.y² · 512) as any surface's.
+- Which program a shd… light (flag 4 too) takes: the shadowed lamps' ps 14 (`shd_env_kit` in s3 f569.75, PS 0x2d5918a0,
+  call 52562883). Not checked why the cook gets nothing from it (its shadow is the likely reason; SparkIV draws no
+  shadow for a cut light).
+
+In SparkIV (`CutsceneLights.CutLightsNow`, `MeshRenderer` PSLight; since 2026-11-06): a cut light without env/shd
+lights only peds (the G-buffer's place.w marks vehicles 3); an env… light takes the lamp's formula (×
+sat(AO² + 0.5) outside, its shine) on everything and, as a cut light, isn't handed to forward-lit materials; a shd…
+light stays on the location only. Vehicles write their shine amount and power for the lamps. cutgen
+`D3D12CUTLIGHTSBEFORE116=1` gives the old masks back. Status: **used**.
+
 ## Measured constants (et01_aa)
 
 | Register | Value | Meaning |

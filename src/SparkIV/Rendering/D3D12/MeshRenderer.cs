@@ -665,6 +665,10 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
       vehicleShine = strength * (1 - dirtAmount) * (sunShine * 2 * shineScale
                    + 10 * f.Params2.y * vehicleAo * fresnel * MirroredAround(mapDir, 4 - 4 * saturate(power / 230))
                      * saturate(mapDir.z * 5) * (1 - saturate(away * 0.01)));
+      // The lamps' shine from the same G-buffer (deferred_lighting ps06-ps09, ps14: 2 x GB2.x x the lamp's light x
+      // saturate(L.R)^(GB2.y² x 512)): amount 2 x GB2.x = strength x (1 - dirt), the vehicle's power (#116).
+      gShine = strength * (1 - dirtAmount);
+      gPower = power;
     }
     // gta_vehicle_paint2's second shine, into the colour (lit with it).
     if (p.Misc.x > 0)
@@ -713,7 +717,7 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
     {
       Light l = Lights[li];
       float range = l.At.w;
-      if ((uint)(l.Kind.x + 0.5) == 2 || range <= 4)
+      if ((uint)(l.Kind.x + 0.5) >= 2 || range <= 4)
       {
         continue;
       }
@@ -819,11 +823,12 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
   o.light = float4(rgb, deferred ? alpha : a);
   // (A decal blends its albedo by its alpha into the surface's, keeping the surface's normal, AO and place: as the
   // game's decals write GB0's colour only, the page's outBelow.)
-  // The solid pass also writes the lamps' shine (albedo's alpha: its amount; place.w = 1 or 2 (baked) + 4 x the power
-  // in 64ths, see PSLight); a decal's alpha blends its albedo and keeps the surface's shine x (1 - its alpha).
+  // The solid pass also writes the lamps' shine (albedo's alpha: its amount; place.w = 1, 2 (baked) or 3 (a vehicle: the
+  // game's stencil 2, which its cutscene lights' ps09 leaves out) + 4 x the power in 64ths, see PSLight); a decal's alpha
+  // blends its albedo and keeps the surface's shine x (1 - its alpha).
   o.albedo = float4(lampAlbedo, solid ? gShine : a);
   o.normal = float4(n, ao);
-  o.place = float4(input.world, (baked ? 2 : 1) + 4 * floor(min(gPower, 60000) * 64));
+  o.place = float4(input.world, (baked ? 2 : vehicle ? 3 : 1) + 4 * floor(min(gPower, 60000) * 64));
   return o;
 }
 
@@ -1252,11 +1257,14 @@ float4 PSLight(LvOut input) : SV_Target
     discard;
   }
   Light l = Lights[input.light];
-  // (place.w: 1, or 2 where baked, + 4 x the shine's power in 64ths, see Shade.)
-  bool baked = fmod(place.w, 4) > 1.5;
+  // (place.w: 1, 2 where baked, 3 a vehicle's, + 4 x the shine's power in 64ths, see Shade.)
+  float placeKind = fmod(place.w, 4);
+  bool baked = abs(placeKind - 2) < 0.5, vehiclePixel = placeKind > 2.5;
   float3 shineLight = 0;
   uint mask = (uint)(l.Kind.w + 0.5);
-  if ((mask == 1 && baked) || (mask == 2 && !baked))
+  // (Mask 1, a cutscene's own light: only peds, as GTA IV's ps09 (stencil mod 8 = 1: a character's 1, not a vehicle's 2);
+  // 3 peds and vehicles, as before 2026-11-06.)
+  if ((mask == 1 && (baked || vehiclePixel)) || (mask == 3 && baked) || (mask == 2 && !baked))
   {
     discard;
   }
@@ -1278,6 +1286,11 @@ float4 PSLight(LvOut input) : SV_Target
     spot = saturate((dot(-L, l.Dir.xyz) - l.Dir.w) * l.Color.w);
   }
   uint model = (uint)(l.Kind.x + 0.5);
+  // (3: a cutscene's light the game draws as a lamp, see DeferredLightModel.CutLamp: the lamp's formula.)
+  if (model == 3)
+  {
+    model = 0;
+  }
   bool inRoom = l.Kind.y > 0.5, shadowed = l.Kind.z > 0.5;
   // (Kind.z: 0 no shadow, 1 shadowed without a map, 2 + its slot in the atlas.)
   int slot = (int)(l.Kind.z + 0.5) - 2;
