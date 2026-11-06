@@ -314,7 +314,7 @@ Findings:
 - **The game culls lamps by the view**: it draws no outside lamp behind the camera (f863: the row of 0x40 lamps ahead of
   the camera's back, d 9-50 m); SparkIV takes them (no visible effect).
 - **Cutscene lights**: s1 f399.5 draws one of native's cut lights fewer, s3 f569.75 3 of native's 8, f682.5 6 fewer.
-  The game's choice of the cutscene's own lights is open.
+  Solved (#114): see the next section.
 
 Effect (native, game-frame diff): intro s2 f682.5 2.09 → 2.03 (page 1.98), all of it from the 0x10000 rule (the room
 rule alone: 2.09); every other reference unchanged.
@@ -323,8 +323,51 @@ Open:
 - What drops interior lamps seen from outside (f863: room 0 in full, room 1 but two): a portal occlusion or facing
   test, or a distance limit; the sphere test 0x431E40 is in the encrypted part.
 - Seen from room 3 (s3 f569.75) the game also draws 4 lamps of room 0, which `SeenRooms` doesn't reach.
-- The game's choice of the cutscene's own lights (fewer than native's 8).
 - What sets the table entry of flag 0x10000 (0x15E88F0 at DAT_01174790), and whether such lamps' coronas are drawn.
+
+### Which of the cutscene's own lights the game draws (#114, 2026-11-05)
+
+`Cut_AddSectionLights` (0x9CA7E0) hands every light of the section whose strength track (0x8C) isn't 0 to Light_Add
+(via 0xABCC50). There is no cap and no other choice there. Light_Add (0xABCCD0) then makes a light only if both hold:
+- **Its sphere lies wholly before the far plane.** The test is against the viewport's plane at +0x340: n·p + w > radius.
+  That plane is the camera's far clip, which in a cutscene is the shot's `.cut` `[DRAW_DISTANCE]` (0xD53280).
+- **Its sphere reaches into the view** (`Light_SphereVisible`, 0x431E40, in the encrypted part).
+
+A cutscene light (flag 0x80) skips only the room tests after that. The far plane is read from each frame's depth
+constants (PS c66 / c78 = (…, …, −(1/n − 1/f), −1/n)).
+
+| Frame | Trace calls | Far clip | Game draws | Skipped (native's name: why) |
+|---|---|---|---|---|
+| intro s1 f399.5 | `GTAIV.3.trace` 3675143-3681352 | 15 m | 7 of 8 | filnko_0 (r 27.5, 1.8 m away: past the far plane) |
+| intro s3 f569.75 | 52556107-52564305 | 15 m | 3 of 8 (rim_kit_0, spt_kit_0, shd_env_kit_0) | hall_spt_0 (r 14.7), fil_wlk_0 (r 30), rim_0 (r 15): past the far plane; hall_spt_2_0, fil_hall_0: out of view |
+| intro s2 f682.5 | 27894936-27909727 | 1000 m | 2 of 8 (sundeck_0, filsundek_0) | sunbnce_0, sunrim_0, rimnko_0, carspt_0, carfil_0, shd_env_car_0: all out of view |
+| intro s2 f863 | 34228429-34242275 | 1000 m | 7 of 8 | rimnko_0: out of view |
+| bc_1 s1 f144 | `GTAIV.trace` 86463106-86474008 | 60 m | 8 of 9 | fil_red_0 (r 0.1): out of view; native's cap of 8 had dropped spt_hall_b_0 instead |
+| et01_aa s3 f49.75 | `GTAIV.2.trace` 78361408-78366087 | 1500 m | 4 of 5 | FillLight1_2: range 0 (native skipped it already) |
+| intro s4 f420.5 | 85655000-85664925 | 800 m | 3 of 7 (filcar_0; env_title_0 and env_car_0 by the lamp program 0x2d592840) | boatrim_0, boatfil_0, sptwrk_0, rimwrk_0: out of view |
+
+Every light the game draws passes both tests, and every light it skips fails one. The closest kept light is
+shd_env_hall_0 in f399.5 (9.0 m before the far plane at r 8).
+
+**The map's lamps** go through the same Light_Add. In f399.5 and f569.75 none of the lamps of the rooms seen fails the
+far test, so no lamp count changes there. In intro s4 f258.5 (calls 78713400-78731585, far 50 m from the line at
+117697 ms), the far test drops 5 floodlights: three with r 50 and two with r 30, with colour ratios 1 : 0.78 : 0.64 and
+1 : 0.83 : 0.56. None of them is among the game's draws. The game does draw that frame's r 28 and r 29.6 lamps, and
+SparkIV keeps those too. Native's picture there: 2.98 → 2.02.
+
+**The draw distance's timing.** The intro's `[DRAW_DISTANCE]` lines all stand in its first `[CUTSCENE_HEADER]`, but
+its sections lie in four parts. The far clips above (15, 15, 1000 m, and 800 m in s4 f420.5, calls 85655000-85664925)
+fit only the lines timed from the start of the whole file (12027, 80182, 43083, 121057 ms). Timed per part, SparkIV
+had no line at all for sections 2 to 6.
+
+In SparkIV:
+- `CutsceneLights.InViewBeforeFar` keeps a cut light only if both tests pass, before the cap of 8. Each lamp is kept
+  only if its sphere lies before the far plane.
+- `CutFile.DrawDistanceSteps` lets a part without its own lines take the file's lines, timed from the file's start.
+- cutgen's `D3D12KEEPCULLEDLIGHTS=1` and `D3D12DRAWSTEPSPERPART=1` give the old behaviour back.
+
+Status: **used**. Not checked: whether the game's 0x431E40 tests more than the view's planes. Every light it skips is
+also out of SparkIV's view.
 
 ## How far from the camera: drawn objects and FadeDistance
 

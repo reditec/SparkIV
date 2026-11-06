@@ -99,6 +99,12 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     public List<(int Part, int Model, int[] Colours, int Dirt)> VehicleDetails { get; } = new List<(int, int, int[], int)>();
 
     /// <summary>
+    /// Only the lines of a section's own part (as before 2026-11-05: the intro's sections 2 to 6 without any). For
+    /// comparisons.
+    /// </summary>
+    public static bool DrawStepsPerPartOnly { get; set; }
+
+    /// <summary>
     /// A section's draw distances by its frames: [frame, metres] from the one in force at its start on (its
     /// start the durations of the sections before it in its part); empty without any.
     /// </summary>
@@ -110,9 +116,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         return steps;
       }
       var section = Sections[sectionIndex];
-      float start = Sections.Take(sectionIndex).Where(s => s.Part == section.Part).Sum(s => s.Duration) * 1000;
-      float end = start + section.Duration * 1000;
       var mine = DrawDistances.Where(d => d.Part == section.Part).OrderBy(d => d.Ms).ToList();
+      // A part without lines of its own (GTA IV's intro: all of them in its first header, its sections in four parts)
+      // takes the file's, timed from the file's start: GTAIV.3.trace's far clip (the depth constants, 1/near -
+      // 1/far) is 15 m in s1 f399.5 (13.3 s) and s3 f569.75 (81.8 s), 1000 m in s2 f682.5 (44.4 s), 800 m in s4
+      // f420.5 (124.4 s), as the lines at 12027, 80182, 43083 and 121057 ms of the whole file say.
+      bool whole = mine.Count == 0 && !DrawStepsPerPartOnly;
+      if (whole)
+      {
+        mine = DrawDistances.OrderBy(d => d.Ms).ToList();
+      }
+      float start = Sections.Take(sectionIndex).Where(s => whole || s.Part == section.Part).Sum(s => s.Duration) * 1000;
+      float end = start + section.Duration * 1000;
       var before = mine.LastOrDefault(d => d.Ms <= start);
       if (before.Metres > 0)
       {

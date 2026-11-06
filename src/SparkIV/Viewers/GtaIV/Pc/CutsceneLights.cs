@@ -244,13 +244,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// seen from <paramref name="eye"/> through <paramref name="viewProjection"/> (Direct3D's: z from 0 at the near
     /// plane), at an hour, with the time cycle's exposure there; the cast posed at the frame (their tail lamps).
     /// <paramref name="cap"/>: at most that many lights in the page's order (cutscene lights, tail lamps, then the
-    /// nearest lamps), for comparisons with the page's 80; null for all.
+    /// nearest lamps), for comparisons with the page's 80; null for all. <paramref name="farClip"/>: the game camera's
+    /// far clip, the shot's draw distance (CutsceneSunShadow.DrawDistance; infinity without one or off the cutscene's
+    /// camera): GTAIV.exe's Light_Add (0xABCCD0) makes only a light whose sphere lies wholly before it (see
+    /// <see cref="BeforeFarClip"/>).
     /// </summary>
     public List<DeferredLight> Now(double timelineFrame, float timelineFps, Vector3 eye, Matrix4x4 viewProjection, float hour,
-                                   float exposure, IEnumerable<CutscenePose> cast, int? cap = null)
+                                   float exposure, IEnumerable<CutscenePose> cast, int? cap = null, float farClip = float.PositiveInfinity)
     {
       var now = new List<DeferredLight>();
-      CutLightsNow(now, timelineFrame, timelineFps, exposure);
+      CutLightsNow(now, timelineFrame, timelineFps, exposure, eye, FrustumPlanes(viewProjection), farClip);
       TailLampsNow(now, cast, exposure);
       if (_lamps.Count == 0)
       {
@@ -271,7 +274,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         bool otherInterior = camAt is Vector3 at0 && m.Room >= 0 && _rooms[m.Room].At != at0;
         if (dump)
         {
-          Console.WriteLine($"D3D12 lamp at {m.At} radius {m.Radius:0.00} strength {m.Strength:0.00} rgb {m.Rgb} flags 0x{m.Flags:x} room {m.Room} other {otherInterior} seen {seen?.Contains(m.Room)} on {LampOn(m.Flags, NightFactor(hour))} fade {m.Fade:0.0} d {Vector3.Distance(m.At, eye):0.00}");
+          Console.WriteLine($"D3D12 lamp at {m.At} radius {m.Radius:0.00} strength {m.Strength:0.00} rgb {m.Rgb} flags 0x{m.Flags:x} room {m.Room} other {otherInterior} seen {seen?.Contains(m.Room)} on {LampOn(m.Flags, NightFactor(hour))} fade {m.Fade:0.0} d {Vector3.Distance(m.At, eye):0.00} beforeFar {BeforeFarClip(m.At, m.Radius, planes, farClip)}");
         }
         if (otherInterior || (seen != null && !seen.Contains(m.Room)))
         {
@@ -296,7 +299,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             break;
           }
         }
-        if (!inView)
+        // Nor one reaching past the far clip (Light_Add makes the lamps too: see InViewBeforeFar).
+        if (!inView || (!KeepCulledLights && !BeforeFarClip(m.At, range, planes, farClip)))
         {
           continue;
         }
@@ -437,13 +441,53 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return now;
     }
 
+    /// <summary>The section's own lights out of view and every light reaching past the far clip kept (as before
+    /// 2026-11-05, the page's). For comparisons.</summary>
+    public static bool KeepCulledLights { get; set; }
+
+    /// <summary>
+    /// GTA IV (PC): whether GTAIV.exe's Light_Add (0xABCCD0) makes a light at <paramref name="at"/> reaching
+    /// <paramref name="range"/>: its sphere reaches into the view (Light_SphereVisible 0x431E40, against the view's
+    /// planes: <paramref name="planes"/>) and lies wholly before the far plane of the viewport (+0x340: n.p + w &gt;
+    /// range), the camera's far clip <paramref name="farClip"/> metres ahead (the shot's draw distance, 0xD53280).
+    /// GTAIV.3.trace (intro): s1 f399.5 (calls 3675143-3681352, far 15 m) skips filnko_0 (r 27.5); s3 f569.75
+    /// (52556107-52564305, far 15 m) draws 3 of 8 (skips hall_spt_0, fil_wlk_0, rim_0 past the far plane,
+    /// hall_spt_2_0 and fil_hall_0 out of view); s2 f682.5 (27894936-27909727, far 1000 m) and f863 (34228429-34242275)
+    /// skip only those out of view. Also GTAIV.trace bc_1 s1 f144 and GTAIV.2.trace et01_aa s3 f49.75.
+    /// </summary>
+    public static bool InViewBeforeFar(Vector3 at, float range, Vector4[] planes, float farClip)
+    {
+      foreach (var p in planes)
+      {
+        if (p.X * at.X + p.Y * at.Y + p.Z * at.Z + p.W < -range)
+        {
+          return false;
+        }
+      }
+      return BeforeFarClip(at, range, planes, farClip);
+    }
+
+    // Whether a sphere lies wholly before the far clip, farClip metres ahead of the camera along the view (the near
+    // plane's normal, planes[4]; its w the camera's place along it, the near clip aside).
+    private static bool BeforeFarClip(Vector3 at, float range, Vector4[] planes, float farClip)
+    {
+      if (!float.IsFinite(farClip) || farClip <= 0)
+      {
+        return true;
+      }
+      var p = planes[4];
+      return farClip - (p.X * at.X + p.Y * at.Y + p.Z * at.Z + p.W) > range;
+    }
+
     // cutLightsNow: each light's tracks at the frame (whole frames of its clip, no easing between them), its strength
-    // over 0.15; colour x strength x exposure; a spot from its outer angle (1° to 89°) to half its track's angle; the 8
-    // strongest. A light named env... or shd... (GTAIV.exe 0x9CA7E0: flag 0x100) lights only the location, the others
-    // only peds and vehicles (the game's stencil; see the page's shader).
-    private void CutLightsNow(List<DeferredLight> now, double timelineFrame, float timelineFps, float exposure)
+    // over 0.15; colour x strength x exposure; a spot from its outer angle (1° to 89°) to half its track's angle; only
+    // those the game makes (InViewBeforeFar); the 8 strongest of them. A light named env... or shd... (GTAIV.exe
+    // 0x9CA7E0: flag 0x100) lights only the location, the others only peds and vehicles (the game's stencil; see the
+    // page's shader).
+    private void CutLightsNow(List<DeferredLight> now, double timelineFrame, float timelineFps, float exposure, Vector3 eye, Vector4[] planes, float farClip)
     {
       var list = new List<(DeferredLight Light, float Strength)>();
+      bool dump = Environment.GetEnvironmentVariable("D3D12LAMPDUMP") == "1";
       foreach (var l in _cut)
       {
         int f = Math.Min((int)Math.Floor(timelineFrame / timelineFps * l.Fps + 1e-6), l.Frames - 1);
@@ -453,6 +497,18 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         float strength = V1(l.Strength, 1);
         float range = V1(l.Range, 10);
         if (strength <= 0.15f || range <= 0)
+        {
+          continue;
+        }
+        // As GTAIV.exe's Light_Add (0xABCCD0) takes it (0x9CA7E0 hands each light to it): only a light whose sphere
+        // reaches into the view and lies wholly before the camera's far clip (InViewBeforeFar).
+        var at = V3(l.Position) ?? Vector3.Zero;
+        bool kept = KeepCulledLights || InViewBeforeFar(at, range, planes, farClip);
+        if (dump)
+        {
+          Console.WriteLine($"D3D12 cutlight {l.Name} f {f} strength {strength:0.000} range {range:0.00} d {Vector3.Distance(at, eye):0.00} far {farClip:0.0} kept {kept}");
+        }
+        if (!kept)
         {
           continue;
         }
@@ -466,7 +522,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         bool env = Regex.IsMatch(l.Name, "^(env|shd)", RegexOptions.IgnoreCase);
         list.Add((new DeferredLight
         {
-          Position = V3(l.Position) ?? Vector3.Zero,
+          Position = at,
           Range = range,
           Direction = way,
           CosOuter = cosOuter,

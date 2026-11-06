@@ -714,8 +714,38 @@ In f682.5 the game draws 74 lights, native drew 137; every game light has a nati
   screen fits f682.5 (bridge yes, below deck no), but in f863 the game also drops room 0's and most of room 1's lamps.
   Native keeps every room as seen from outside (as before); the portal rule is behind cutgen
   `D3D12OUTSIDEPORTALROOMS=1` for study (no measurable effect on any reference).
-- Open: what drops interior lamps from outside (f863); room 0 seen from room 3 (s3 f569.75); the game draws fewer of
-  the cutscene's own lights than native's 8 (s3 f569.75: 3); it culls lamps outside the view (no visible effect).
+- Open: what drops interior lamps from outside (f863); room 0 seen from room 3 (s3 f569.75); it culls lamps outside
+  the view (no visible effect).
+
+### The cutscene's own lights the game draws (#114, 2026-11-05)
+
+GTAIV.exe's Light_Add (0xABCCD0) makes a light only if two tests pass. Its sphere must reach into the view, and it must
+lie wholly before the camera's far clip, which is the shot's `.cut` draw distance. Details and trace calls are in
+[2dfx-lights.md](GtaIV/Pc/formats/2dfx-lights.md#which-of-the-cutscenes-own-lights-the-game-draws-114-2026-11-05).
+- The rule fits every traced frame checked: intro s1 f399.5 (game 7 / native 8), s3 f569.75 (3 / 8), s2 f682.5
+  (2 / 8), s2 f863 (7 / 8), bc_1 s1 f144 (8 / 8, but one other light), and et01_aa s3 f49.75 (4 / 4).
+- `CutsceneLights` now keeps a cut light only if both tests pass (`InViewBeforeFar`), before the cap of 8. Lamps are
+  also dropped past the far clip.
+- `Now` takes the far clip: `CutscenePlayer` passes the shot's draw distance through the cutscene's camera, cutgen
+  passes it always.
+- `CutFile.DrawDistanceSteps` now times the intro's lines from the file's start; they all stand in its first part. Before,
+  sections 2 to 6 had no draw distance. The trace's far clips (15 / 15 / 1000 / 800 m in s1, s3, s2 and s4) fit only
+  this timing. This also sets those sections' draw reach and their sun casters' reach.
+- cutgen `D3D12KEEPCULLEDLIGHTS=1` and `D3D12DRAWSTEPSPERPART=1` restore the old behaviour.
+- The extra cut lights natively lit nothing visible: s3 f569.75 renders byte-identical with and without the 5 the game
+  skips (they are out of view, or light only peds and reach none). So the cook's hand is brighter for another reason.
+
+Effect (one5, game-frame diff, old behaviour -> new): intro s3 f569.75 4.26 -> 4.26 (cut lights 8 -> 3), s1 f399.5
+1.20 -> 1.20 (8 -> 7), s2 f682.5 1.91 -> 1.91 (8 -> 2), s2 f863 2.83 -> 2.83 (8 -> 7), s4 f420.5 2.29 -> 2.28 (7 -> 3,
+as the game: filcar_0, env_title_0, env_car_0; lights 254 -> 187, the game draws 155), bc_1 s1 f144 0.98 -> 0.98,
+bc_3 s3 f357.25 6.34 -> 6.34, et01_aa s3 f49.75 2.52 -> 2.52, et01_ba s1 f220.25 3.98 -> 3.98.
+
+The other 18 intro references were rendered with the new behaviour and compared with run 2026-11-05_23-32:
+- None got worse.
+- s4 f258.5 3.0 -> 2.02. The 50 m far clip drops 5 floodlights (r 50 / r 30); none of them is among the game's draws
+  in `GTAIV.3.trace` 78713400-78731585. With either change alone the value stays 2.98.
+- s4 f1177.5 -0.01, s4 f2013.5 -0.02, s5 f291.5 and s5 f782 -0.01 each, s6 f146 -0.03, s6 f469.75 -0.02.
+- The rest are unchanged.
 
 ### et01_ba f1292.25 (+0.07 against the page, round 8)
 

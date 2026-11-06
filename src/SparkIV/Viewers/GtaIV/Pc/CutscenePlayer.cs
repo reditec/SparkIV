@@ -972,7 +972,9 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
         var lamps = _visibleLocation != null && _locations.TryGetValue(_visibleLocation, out var shown) ? shown.Lights : null;
         lamps ??= _noLamps;
         lamps.SetSection(_cutLights);
-        lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values);
+        // (Through the cutscene's camera only the lights before its far clip, the shot's draw distance, as the game's.)
+        lights = lamps.Now(frame, _fps, eyeAt, viewProjection, _lighting.Hour, light.Exposure, _poses.Values,
+                           farClip: _useCamera && _camera != null ? CutsceneSunShadow.DrawDistance(_drawSteps, frame) : float.PositiveInfinity);
         if (profiler != null)
         {
           profiler.CpuSince("  update: lights list", stage);
