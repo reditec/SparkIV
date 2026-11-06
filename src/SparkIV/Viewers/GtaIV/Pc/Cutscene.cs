@@ -1417,6 +1417,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           var bone = actor.Scene.Bones.FirstOrDefault(b => b.Name.Equals(BoneOfAnchor(prop.Anchor), StringComparison.OrdinalIgnoreCase));
           if (part != null && bone != null)
           {
+            // Shown, at its high level of detail: the dictionary's tree shows only the first prop of each anchor
+            // (p_head_000), so a worn p_head_001 (the intro's white hard hat, M_Y_construct_03) had no mesh checked.
+            part.Initialize(true);
+            part.ShowLevelOfDetail(0);
             actor.Props.Add((part, bone.Index));
           }
         }
