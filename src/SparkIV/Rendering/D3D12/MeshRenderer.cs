@@ -820,13 +820,15 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
     rgb += albedo * vc * Dimmers[clamp((int)(input.alpha * 255 + 0.5), 0, 14)] * p.Misc.w * f.Params.y;
   }
   // (Debug views, MeshRenderer.DebugView in f.Params2.w: 1 the albedo, 2 the normal (0.5 + 0.5 n), 3 AO, 4 the light
-  // without albedo, 5 the texture's alpha x the vertex's, 6 the vertex colour - each x the exposure, for the picture.)
+  // without albedo, 5 the texture's alpha x the vertex's, 6 the vertex colour - each x the exposure, for the picture;
+  // 11 the world place, 12 the vertex normal as it comes in - both raw in the light target, for D3D12LIGHTDUMP.)
   uint debugView = (uint)(f.Params2.w + 0.5);
   if (debugView != 0 && debugView != 99)
   {
     float3 dv = debugView == 1 ? albedo : debugView == 2 ? 0.5 + 0.5 * n : debugView == 3 ? ao.xxx : debugView == 4 ? lit
               : debugView == 5 ? alpha.xxx : debugView == 6 ? vc : debugView == 7 ? texel.rgb
               : debugView == 9 ? Tex[p.Tex.x].SampleLevel(Linear, uvP, 0).rgb : debugView == 10 ? float3(frac(input.uv), 0)
+              : debugView == 11 ? input.world / f.Params.y : debugView == 12 ? input.normal / f.Params.y
               : float3((bits & FPaint2) != 0 ? 1 : 0, (bits & FEnv) != 0 ? 1 : 0, layers > 1 ? 1 : 0);
     rgb = dv * (debugView == 4 ? 1 : f.Params.y);  }
   PsOut o;
@@ -2748,8 +2750,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
           Kind = kind,
           Glow = glowing ? material.EmissiveMultiplier!.Value : 0,
           // The page culls the back faces of map objects' and props' solids (not trees'), vehicle glass, the map's
-          // glass and see-through materials.
-          Culled = culled || (baked && !material.Tree && pass == Pass.Solid),
+          // glass and see-through materials. GTA IV (PC) also culls a ped's solid parts (#155): GTAIV.3.trace, intro s6
+          // f146, the G-buffer pass (calls 256138821-256160900) draws all but one with D3DCULL_CW. Without it, a hi-vis
+          // vest (M_Y_construct_02/03) showed its inner faces, normals turned away, and the lamp above barely lit it.
+          Culled = culled || (baked && !material.Tree && pass == Pass.Solid) || (material.Ped && pass == Pass.Solid),
           Index = partIndex,
           SeeThrough = material.Glass || (material.Blend && textured),
           AlphaShadow = material.ShadowByAlpha,

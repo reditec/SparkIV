@@ -163,7 +163,9 @@ picture from it:
   trees 0.5; glowing materials 1; 0.45 for baked meshes without colours), times the actor's AmbientDownMult, then
   scaled by AoMultiplier (peds also by PedAoMultiplier). Glowing materials (gta_emissive*) laid over or added by their
   multiplier x the exposure (the night ones only at night and not in a room). Peds' and vehicles' normals turned to
-  the camera; the back faces of map objects' and props' solids culled (counter-clockwise front, as in GL). Sun and
+  the camera; the back faces of map objects', props' and peds' solids culled (counter-clockwise front, as in GL; peds
+  since #155: GTA IV's G-buffer pass draws nearly all with D3DCULL_CW, GTAIV.3.trace intro s6 f146 calls
+  256138821-256160900 - without it a hi-vis vest showed its inner faces and the lamp above lit it 4x too weakly). Sun and
   light from around already include the exposure (`FrameLight`).
 - **Where the light comes from** (`CutsceneLighting`, GTA IV PC): the time cycle of the weather and hour under the
   map's modifier boxes at the camera, inside a room the room's modifier, eased from the outside's by how much of the
