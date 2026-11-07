@@ -438,28 +438,44 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       return list;
     }
 
-    /// <summary>How many lamps' shadow maps a frame draws (the page's LampShadowSlots; the game's atlas holds 16 tiles).</summary>
-    public const int LampShadowSlots = 4;
+    /// <summary>
+    /// How many lamps' shadow maps a frame draws: the game's atlas holds 16 tiles, two halves a lamp, so 8 lamps
+    /// (GTAIV.3.trace, intro s4 f420.5, calls 85661432-85661695: 8 lamps through the shadow program).
+    /// </summary>
+    public const int LampShadowSlots = 8;
 
-    // At most the cap, then the shadow lamps' maps given out (the page's choice, an estimate: the game's is not known):
-    // the lamps with a shadow nearest to the camera by their distance less their radius, as many as there are slots;
-    // the others keep the shadow programs' formulas, fully lit.
+    // At most the cap, then the shadow lamps' maps given out: the lamps with a shadow nearest to the camera by their
+    // distance less their radius, as many as there are slots (the game's order isn't known exactly: in the trace above it
+    // took 8 of the nearest, not strictly by distance). The others the game draws with the ordinary lamp programs
+    // (ps06/ps08: sat(AO² + 0.5), not the shadow program's sat(0.5 AO⁴ + AO²) - #146: with the shadow formula the
+    // harbour's lamps beyond the first maps gave the crane's foot less than half the game's light).
     private static List<DeferredLight> Capped(List<DeferredLight> list, int? cap, Vector3 eye)
     {
       var now = cap is int c && list.Count > c ? list.GetRange(0, c) : list;
-      var chosen = Enumerable.Range(0, now.Count)
+      var shadowed = Enumerable.Range(0, now.Count)
         .Where(i => now[i].Shadowed && now[i].Model != DeferredLightModel.Cut)
         .OrderBy(i => Vector3.Distance(now[i].Position, eye) - now[i].Range)
-        .Take(Math.Min(LampShadowSlots, MeshRenderer.ShadowSlots))
         .ToList();
-      for (int slot = 0; slot < chosen.Count; slot++)
+      int slots = Math.Min(LampShadowSlots, MeshRenderer.ShadowSlots);
+      for (int k = 0; k < shadowed.Count; k++)
       {
-        var l = now[chosen[slot]];
-        l.ShadowSlot = slot;
-        now[chosen[slot]] = l;
+        var l = now[shadowed[k]];
+        if (k < slots)
+        {
+          l.ShadowSlot = k;
+        }
+        else if (!KeepShadowFormulaPastSlots)
+        {
+          l.Shadowed = false;
+        }
+        now[shadowed[k]] = l;
       }
       return now;
     }
+
+    /// <summary>The lamps with a shadow past the shadow maps kept on the shadow program's formula (as before 2026-11-07,
+    /// #146). For comparisons.</summary>
+    public static bool KeepShadowFormulaPastSlots { get; set; }
 
     /// <summary>The section's own lights out of view and every light reaching past the far clip kept (as before
     /// 2026-11-05, the page's). For comparisons.</summary>

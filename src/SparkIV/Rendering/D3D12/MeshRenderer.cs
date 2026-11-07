@@ -1210,7 +1210,7 @@ float4 PSHalve(float4 position : SV_Position) : SV_Target
 Texture2D<float4> GAlbedo : register(t4);
 Texture2D<float4> GNormal : register(t5);
 Texture2D<float4> GPlace : register(t6);
-// The shadow atlas: a row of 1024 x 1024 a slot (4), each light's halves side by side (the axis's negative side left).
+// The shadow atlas: a row of 1024 x 1024 a slot (8, as the game's 16 tiles), each light's halves side by side (the axis's negative side left).
 Texture2D<float> LampShadows : register(t7);
 static const int ShadowSize = 1024;
 
@@ -1416,7 +1416,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     /// How many lights' shadow maps a frame can draw (the atlas's rows; see <see cref="DeferredLight.ShadowSlot"/>): each
     /// light two halves of 1024 x 1024, R32F (the shader's ShadowSize).
     /// </summary>
-    public const int ShadowSlots = 4;
+    public const int ShadowSlots = 8;
     private const int ShadowSize = 1024;
     // (The frame's constants, FrameFloats, rounded up to the constant buffers' 256-byte steps.)
     private const int FrameSlotBytes = (FrameFloats * 4 + 255) / 256 * 256;
