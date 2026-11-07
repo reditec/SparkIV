@@ -176,6 +176,22 @@ Effect in et01_aa, measured against game snapshots of the same moment:
   - In SparkIV the patches appear only with all four fixes together: bumpiness set again, B = T × N × w, z from the absolute value, skinned N and T not normalised.
   - Bumpiness is set again for peds only. The other materials' normal maps (`bumped`, tangent space from screen derivatives, not checked against the game's shaders) stay off: switched on, they made bc_3's harbour wall further from the game (s3 f506.75 +0.53, s2 f1307 +0.43).
 
+**How many lamps get a shadow map, and the others** (#146, 2026-11-07): `GTAIV.3.trace`, intro s4 f420.5 (frame
+85641334-85664925, the harbour crane at 05:15). The game draws 8 lamps with a shadow through the shadow program (PS
+0x2d5918a0, calls 85661432-85661695) - its atlas holds 16 tiles, two halves a lamp. Every other lamp with the 2dfx shadow
+flag (0x8000) goes through the ordinary lamp programs (PS 0x2d592840 / 0x2d5923e0), with their AO term sat(AO² + 0.5)
+instead of the shadow program's sat(0.5 · AO⁴ + AO²). The game's choice is among the nearest (by distance from the
+camera; not strictly in that order: a sodium lamp at 33.4 m went the ordinary way while one at 35.1 m got a map).
+- Measured in the trace at the crane's foot (pixels 640,700 / 620,760, HDR before and after the lamps): +0.60/+0.46/+0.22
+  and +1.41/+1.10/+0.63, all of it from the lamps drawn after the 8 shadowed ones. The 8 shadow maps themselves add
+  nothing there.
+- SparkIV gave 4 lamps a map and kept the shadow formula for the rest: their light at the crane's foot was 0.42-0.51 of
+  the game's (in the same units: SparkIV's light is the game's × the time cycle's Exposure, 1.77 at 05:15; the light
+  from around matched it to 1 %).
+- **In SparkIV** since 2026-11-07: 8 maps (`MeshRenderer.ShadowSlots`, `CutsceneLights.LampShadowSlots`); the shadow
+  lamps past them lose `Shadowed` and take the ordinary formula (`CutsceneLights.Capped`; cutgen
+  `D3D12SHADOWFORMULABEFORE146=1` keeps the old way).
+
 ## Light volumes
 
 Some lamps show a cone of light in the air. GTA IV draws it after the deferred lights (`FUN_00AC2270`).
