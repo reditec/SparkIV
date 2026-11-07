@@ -766,7 +766,9 @@ PsOut Shade(VsOut input, bool deferred, bool solid = false)
   else if (textureAlpha)
   {
     a = (bits & FVehLights) != 0 ? baseA : alpha;
-    if (a < 0.01)
+    // (Not the map's forward see-through materials (#142): the game draws them with its alpha test ALWAYS, writing
+    // depth even where the texture is clear, so what lies behind in the same mesh, drawn later, stays hidden.)
+    if (a < 0.01 && (bits & FForwardLit) == 0)
     {
       discard;
     }
