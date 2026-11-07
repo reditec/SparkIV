@@ -2683,7 +2683,10 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         {
           normal = Texture(material.NormalKey);
           specular = Texture(material.SpecularKey);
-          environment = material.Vehicle ? 0 : Texture(material.EnvironmentKey);
+          // (Not a ped's (#156): GTA IV (PC)'s gta_ped_reflect G-buffer program is gta_ped's, albedo = texture x
+          // matMaterialColorScale, no environment texture - GTAIV.2.trace et01_aa s4 f484, DeSean's cap p_head_000, draw
+          // 88904219, PS 0x2d2446a0. With it the cap came out 2.8 times its texture.)
+          environment = material.Vehicle || material.Ped ? 0 : Texture(material.EnvironmentKey);
           flags |= (normal != 0 ? PartFlags.NormalMap : 0) | (specular != 0 ? PartFlags.SpecularMap : 0) |
                    (specular == 0 && material.SpecularFlat ? PartFlags.SpecularFlat : 0) |
                    (environment != 0 ? PartFlags.Environment : 0) | (material.EnvSpecular ? PartFlags.EnvironmentSpecular : 0);
