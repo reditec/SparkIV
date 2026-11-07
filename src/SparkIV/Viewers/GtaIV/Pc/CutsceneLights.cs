@@ -111,8 +111,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           float cone = light.Spot ? light.Falloff : 0;
           float hotSpot = light.Spot ? light.HotSpot : 0;
           // The model's angles are from the spot's axis; the game fades from the outer to the inner: scale =
-          // 1 / (cos inner - cos outer), the outer kept within 1° and 85° (the page's setMapLights).
-          float cosOuter = cone > 0 ? MathF.Cos(Math.Clamp(cone, 1, 85) * MathF.PI / 180) : -1;
+          // 1 / (cos inner - cos outer), the outer kept within 1° and 89° as GTAIV.exe's Light_Add does (#152; the page
+          // kept 85°): GTAIV.3.trace intro s3 f749.75, the galley's spot over the pans (draw 55611615, r 6, white x 15)
+          // has c74 0.01745 = cos 89°, c75 2.468 (inner 65°, as here).
+          float cosOuter = cone > 0 ? MathF.Cos(Math.Clamp(cone, 1, 89) * MathF.PI / 180) : -1;
           _lamps.Add(new Lamp
           {
             At = at,
