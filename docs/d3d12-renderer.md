@@ -436,7 +436,8 @@ the albedo, as the game's decals write GB0's colour only); the lights are then a
 (a box round its sphere, its faces turned away from the camera only, depth test "greater or equal", one instanced
 draw), before the water and the see-through materials, which are drawn forward (the map's ones with the lamps, below). No cap: the
 page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `CutsceneLights` (GTA IV PC) picks them
-per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; since #116 env* as lamps on
+per frame as the page's `sceneLightsNow`: the section's own lights (all the game makes - since #151 no longer the page's 8 strongest: GTAIV.trace bc_1 s3 f401
+draws nine; since #116 env* as lamps on
 everything, shd* only on baked surfaces, the others only on peds - see "The car on the crane" below), the tail lamps of vehicles whose lamps the script turns on, the
 location's lamps on at the hour, of the rooms seen, in view, faded by FadeDistance - with the page's formulas (light
 and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Lamp shadows as the
