@@ -191,9 +191,14 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// plain gta_glass, whatever its name says: Bernie's bedroom pane, the GTA IV trace GTAIV.trace, draw 114115710, PS
     /// 0x2cc5d340). Not gta_glass_spec, which has none, nor gta_glass_emissive: it has the sampler, but the game draws it
     /// only as its glow (the same trace's lamp glass km_bernilite, draw 114115061: texture x vertex colour x multiplier).
+    /// Nor the cube-map ones (gta_normal_cubemap_reflect, gta_normal_spec_cubemap_reflect, #143): they sample their
+    /// EnvironmentSampler as a cube, but it is an ordinary 2D texture (the game creates no cube texture) and adds nothing:
+    /// et01_aa's wall lamp plate ab_metalsheet (TLAD trace GTAIV.2, frame of s2 f640.25) took 10.30 / 9.89 / 8.53 from
+    /// the lamps in the game; with the environment SparkIV had 14.0 / 14.1 / 11.6, without it 10.40 / 10.02 / 8.60.
     /// </summary>
     public static bool IsMapReflect(string shader) =>
-      (shader.Contains("_reflect", StringComparison.OrdinalIgnoreCase) || shader.Equals("gta_glass", StringComparison.OrdinalIgnoreCase)) && !IsVehicle(shader);
+      (shader.Contains("_reflect", StringComparison.OrdinalIgnoreCase) || shader.Equals("gta_glass", StringComparison.OrdinalIgnoreCase)) && !IsVehicle(shader) &&
+      !shader.Contains("cubemap", StringComparison.OrdinalIgnoreCase);
 
     // A vehicle's "matdiffusecolor": (2, slot, slot) a placeholder for one of the vehicle's colours (the
     // game's shader multiplies the texture by it: gta_vehicle_mesh's pixel shader, texture x c66).

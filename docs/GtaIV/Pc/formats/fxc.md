@@ -145,7 +145,11 @@ Added to the albedo before it is lit (`mad oC0, env, weight, albedo`):
 - The cube-map ones (`dcl_cube`): texCUBE(`EnvironmentSampler`, R.xzy). But their `EnvironmentSampler` is an ordinary
   2D texture (et01_aa's `eliza_loungestuf` / `ab_metalsheet`: 256 × 256 DXT1), and the game creates no cube texture at
   all (`GTAIV.3.trace` up to et01_aa's frame: no `CreateCubeTexture`): a 2D texture on a cube sampler, undefined in
-  D3D9. SparkIV keeps looking it up as the other `*_reflect` (no visible change either way in the references).
+  D3D9. **It adds nothing** (#143, 2026-11-07): et01_aa's wall lamp plate `ab_metalsheet` took 10.30 / 9.89 / 8.53
+  from its lamp in the game (`GTAIV.2.trace`, frame of s2 f640.25, lamp draw 76816800); SparkIV with the 2D
+  environment looked up as the other `*_reflect` had 14.0 / 14.1 / 11.6 (game units), without it 10.40 / 10.02 / 8.60.
+  Since then SparkIV gives the cube-map ones no environment (`GtaIVPcMaterials.IsMapReflect`): 5 et01_aa references
+  closer (up to −0.04), none worse. Status: **used** (as nothing).
 - Forward glass (`gta_glass`, `gta_glass_reflect` `draw`): env × `specularColorFactor` × `reflectivePower` ÷ alpha
   (so it shows whole on clear glass), then lit.
 - A cast prop's glass (#89, the intro's ring stone `csjewel.wdr`, `gta_glass_reflect` `ec_diamond`, reflectivePower
