@@ -31,7 +31,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   /// <summary>
   /// The lights of a GTA IV (PC) cutscene frame for the native renderer (#112 step 5), as the page's sceneLightsNow
   /// (ModelView.html) picks them, but without its cap of 80 (issue #106: the game draws each lamp as a light volume over
-  /// its G-buffer): the section's own lights (cutLightsNow: the 8 strongest), the tail lamps of the vehicles whose lamps
+  /// its G-buffer): the section's own lights (cutLightsNow: all the game makes, #151), the tail lamps of the vehicles whose lamps
   /// the mission's script turns on (vehicleLightsNow), and the location's lamps (its objects' 2dfx lights) that are on at
   /// the hour (gtaiv-pc.js lampOn / outdoorLamp), seen (the camera's interior and the rooms seen through its portals on
   /// screen: seenRooms), whose sphere reaches into the view, faded by their FadeDistance; the shadow lamps nearest to
@@ -111,8 +111,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
           float cone = light.Spot ? light.Falloff : 0;
           float hotSpot = light.Spot ? light.HotSpot : 0;
           // The model's angles are from the spot's axis; the game fades from the outer to the inner: scale =
-          // 1 / (cos inner - cos outer), the outer kept within 1° and 85° (the page's setMapLights).
-          float cosOuter = cone > 0 ? MathF.Cos(Math.Clamp(cone, 1, 85) * MathF.PI / 180) : -1;
+          // 1 / (cos inner - cos outer), the outer kept within 1° and 89° as GTAIV.exe's Light_Add does (#152; the page
+          // kept 85°): GTAIV.3.trace intro s3 f749.75, the galley's spot over the pans (draw 55611615, r 6, white x 15)
+          // has c74 0.01745 = cos 89°, c75 2.468 (inner 65°, as here).
+          float cosOuter = cone > 0 ? MathF.Cos(Math.Clamp(cone, 1, 89) * MathF.PI / 180) : -1;
           _lamps.Add(new Lamp
           {
             At = at,
@@ -503,7 +505,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
 
     // cutLightsNow: each light's tracks at the frame (whole frames of its clip, no easing between them), its strength
     // over 0.15; colour x strength x exposure; a spot from its outer angle (1° to 89°) to half its track's angle; only
-    // those the game makes (InViewBeforeFar); the 8 strongest of them. A light named env... or shd... (GTAIV.exe
+    // those the game makes (InViewBeforeFar); all of them (#151). A light named env... or shd... (GTAIV.exe
     // 0x9CA7E0: flag 0x100) lights only the location, the others only peds and vehicles (the game's stencil; see the
     // page's shader).
     private void CutLightsNow(List<DeferredLight> now, double timelineFrame, float timelineFps, float exposure, Vector3 eye, Vector4[] planes, float farClip)
@@ -563,8 +565,10 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
                : CutLightMasksBefore116 ? DeferredLightMask.NotBakedWithVehicles : DeferredLightMask.NotBaked,
         }, strength));
       }
-      // (Stable, as the page's sort: equal strengths keep their order.)
-      now.AddRange(list.Select((x, i) => (x, i)).OrderByDescending(x => x.x.Strength).ThenBy(x => x.i).Take(8).Select(x => x.x.Light));
+      // All of them (#151): the page kept the 8 strongest (its forward light count), the game draws every one it makes -
+      // GTAIV.trace bc_1 s3 f401, nine cut lights by PS 0x2df95380 (calls 138922152-138922343), the weakest of them,
+      // fil_red_2 (strength 3, range 40), lighting Bernie's hand. (Strongest first, stable, as before.)
+      now.AddRange(list.Select((x, i) => (x, i)).OrderByDescending(x => x.x.Strength).ThenBy(x => x.i).Select(x => x.x.Light));
     }
 
     // vehicleLightsNow: a vehicle with its lamps on (CutActor.LightsOn) and both bones taillight_l and taillight_r.

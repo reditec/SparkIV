@@ -12,7 +12,7 @@ Models (`.wdr`, `.wdd`, `.wft`) can contain light effects, i.e. lamps and wall l
 | Colour (RGB, bytes) | Colour | |
 | `Distance` (+0x38) | **Radius** of the light | GTAIV.exe 0xC1E200 → 0xABCCD0 |
 | `Range` (+0x3C) | **Strength** | ibid. |
-| Falloff, HotSpot | Outer and inner cone angle of a spot | |
+| Falloff, HotSpot | Outer and inner cone angle of a spot; the outer kept to at most **89°** (the game's Light_Add; SparkIV kept 85° until #152) | `GTAIV.3.trace` intro s3 f749.75, draw 55611615: c74 0.01745 = cos 89°, c75 2.468 (inner 65°) |
 | `CoronaSize` (+0x40) | Size of its corona, see [Coronas](#coronas) | |
 | Intensity (+0x5C) | Strength of its corona (0.4 for the track spots in Bernie's flat). The light itself doesn't use it | GTAIV.exe 0xC1E200 |
 | Flags (+0x4C) | see below | |

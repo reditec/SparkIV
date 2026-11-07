@@ -163,7 +163,9 @@ picture from it:
   trees 0.5; glowing materials 1; 0.45 for baked meshes without colours), times the actor's AmbientDownMult, then
   scaled by AoMultiplier (peds also by PedAoMultiplier). Glowing materials (gta_emissive*) laid over or added by their
   multiplier x the exposure (the night ones only at night and not in a room). Peds' and vehicles' normals turned to
-  the camera; the back faces of map objects' and props' solids culled (counter-clockwise front, as in GL). Sun and
+  the camera; the back faces of map objects', props' and peds' solids culled (counter-clockwise front, as in GL; peds
+  since #155: GTA IV's G-buffer pass draws nearly all with D3DCULL_CW, GTAIV.3.trace intro s6 f146 calls
+  256138821-256160900 - without it a hi-vis vest showed its inner faces and the lamp above lit it 4x too weakly). Sun and
   light from around already include the exposure (`FrameLight`).
 - **Where the light comes from** (`CutsceneLighting`, GTA IV PC): the time cycle of the weather and hour under the
   map's modifier boxes at the camera, inside a room the room's modifier, eased from the outside's by how much of the
@@ -434,7 +436,8 @@ the albedo, as the game's decals write GB0's colour only); the lights are then a
 (a box round its sphere, its faces turned away from the camera only, depth test "greater or equal", one instanced
 draw), before the water and the see-through materials, which are drawn forward (the map's ones with the lamps, below). No cap: the
 page lit at most 80 forward (#106); the intro's harbour adds some 130 at once. `CutsceneLights` (GTA IV PC) picks them
-per frame as the page's `sceneLightsNow`: the section's own lights (the 8 strongest; since #116 env* as lamps on
+per frame as the page's `sceneLightsNow`: the section's own lights (all the game makes - since #151 no longer the page's 8 strongest: GTAIV.trace bc_1 s3 f401
+draws nine; since #116 env* as lamps on
 everything, shd* only on baked surfaces, the others only on peds - see "The car on the crane" below), the tail lamps of vehicles whose lamps the script turns on, the
 location's lamps on at the hour, of the rooms seen, in view, faded by FadeDistance - with the page's formulas (light
 and filler families, AO terms, cones). The sun and the light from around stay exactly as before. Lamp shadows as the

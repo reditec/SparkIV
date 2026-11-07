@@ -99,6 +99,14 @@ The peds' skin G-buffer pass runs with the engine's alpha test (ref 100, `GTAIV.
 `globalScalars.x` × vertex alpha (not the texture's: its alpha holds the subsurface mask); with the engine's
 `ALPHAFUNC` `ALWAYS` (see Hair) it cuts nothing anyway.
 
+## gta_ped_reflect
+
+Its G-buffer program is gta_ped's (#156, 2026-11-08): albedo = texture × `matMaterialColorScale` (c66, 1 for all peds
+in the frame), the bent normal, GB2 as gta_ped; **no environment texture** is read (`GTAIV.2.trace` et01_aa s4 f484,
+DeSean's cap `p_head_000`, draw 88904219, PS 0x2d2446a0; samplers only Texture, damage, Bump, Spec, Stipple). SparkIV
+had added the environment texture as for the map's *_reflect materials, which made the white cap 2.8 times its
+texture; since 2026-11-08 a ped material takes none (`MeshRenderer`). Status: **used**.
+
 ## Hair
 
 `gta_hair_sorted_alpha_exp`'s `deferred_draw` has two passes: ps 5 writes only zeros (colour-write alpha only, depth
