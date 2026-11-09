@@ -1625,7 +1625,7 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
     private readonly int _solidDepthSlot;
     private ID3D12Resource? _solidDepth;
     private int _solidDepthWidth, _solidDepthHeight;
-    // The light volumes: their pipeline, the scene's whole depth (after the see-through materials) and its number, the
+    // The light volumes: their pipeline, the scene's depth before the see-through materials (#142) and its number, the
     // lookup texture's number (0: none), the spot's and the point lamp's unit meshes (upload heap) and c213 scales.
     private readonly ID3D12PipelineState _volumePipeline;
     private readonly int _fullDepthSlot;
@@ -3185,6 +3185,16 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
       }
       // What goes between the solid scene and the see-through materials (the water), with its own states.
       afterSolid?.Invoke(list);
+      // The depth the lamps' light volumes are drawn against (DrawVolumes, after the scene): taken here, before the
+      // see-through materials. GTA IV (PC), GTAIV.2.trace et01_aa s4 f484: over the glass globe (a forward see-through
+      // shade writing depth, draw 88906023) the game's two volumes (88906243-88906299) add +0.35-0.60 as on the wall
+      // beside it; against the depth with the globe SparkIV added nothing there, against this one every region matches
+      // the game's HDR before the post-processing within ~1 % (#142).
+      bool volumesOn = volumes != null && volumes.Count > 0 && depthTexture != null && !NoVolumes;
+      if (volumesOn)
+      {
+        CopyDepth(list, depthTexture!, width, height, ref _fullDepth, ref _fullDepthWidth, ref _fullDepthHeight, _fullDepthSlot);
+      }
       Bind(false);
       profiler?.Begin(list, "see-through + glows", DrawCalls);
       if (blendLists != null)
@@ -3198,13 +3208,12 @@ float4 PSSunConvert(float4 position : SV_Position) : SV_Target
         Inline(list, (l, b) => b.Draws += DrawPass(l, Pass.Blend));
       }
       profiler?.End(list, "see-through + glows", DrawCalls);
-      // After the scene, as the page's gamePostEnd (gtaiv-pc.js ~1504-1507): the lamps' light volumes against the whole
-      // depth, then the coronas.
-      if (volumes != null && volumes.Count > 0 && depthTexture != null && !NoVolumes)
+      // After the scene, as the page's gamePostEnd (gtaiv-pc.js ~1504-1507): the lamps' light volumes (against the depth
+      // before the see-through materials, see above), then the coronas.
+      if (volumesOn)
       {
         profiler?.Begin(list, "volumes", DrawCalls);
-        CopyDepth(list, depthTexture, width, height, ref _fullDepth, ref _fullDepthWidth, ref _fullDepthHeight, _fullDepthSlot);
-        DrawVolumes(list, volumes, eye);
+        DrawVolumes(list, volumes!, eye);
         profiler?.End(list, "volumes", DrawCalls);
       }
       if (coronasOn)
