@@ -196,6 +196,16 @@ camera; not strictly in that order: a sodium lamp at 33.4 m went the ordinary wa
 
 Some lamps show a cone of light in the air. GTA IV draws it after the deferred lights (`FUN_00AC2270`).
 
+**The depth they are drawn against (#142, 2026-11-09):** the deferred scene's, not the forward-drawn see-through
+materials'. `GTAIV.2.trace` et01_aa s4 f484: the volumes (draws 88906243-88906299, PS 0x2d5a5d40 / 0x2d5a5de0) read
+texture 0x22f033a0, the depth copied at 88905102-88905118 before the lamps; the forward pass (the glass globe 88906023,
+writing depth) draws into another depth surface (0x4db2be00). So the globe hides nothing of the volume: the game adds
++0.35-0.60 over it, as on the wall beside it. **In SparkIV** (`MeshRenderer`, since 2026-11-09): the depth is taken
+before the see-through pass (it was taken after it, and the globe got no volume light, ~20 % too dark); every measured
+region now within ~1 % of the game's HDR before the post-processing. Status: **used**. Side effect: a glass shelf and
+an emissive lamp shade in et01_aa s1/s3/s4 now show the volume through them, about 1.3 grey levels brighter than the
+game (the volume there slightly too strong, before hidden by the wrong depth; +0.001 per reference).
+
 - **Which lamps:** light flag 8 (2dfx flag 0x80000), type point or spot, volume strength and size not 0, and visible (`FUN_00431E40` with radius × size).
 - **Values** (0xC1E200 → `Light_Add` 0xABCCD0 → 0x5B8580):
   - strength (light +0x70) = 2dfx +0x30 × Range;
