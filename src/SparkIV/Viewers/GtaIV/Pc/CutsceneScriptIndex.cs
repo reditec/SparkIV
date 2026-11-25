@@ -45,7 +45,7 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
   public sealed class CutsceneScriptIndex
   {
     // Raised when what is read from the scripts changes, so older indexes are built again.
-    private const int Format = 4;
+    private const int Format = 5;
 
     /// <summary>
     /// A vehicle a script makes: its model's hash, the four colours it gives it (-1: not set) and how it forces its
@@ -59,10 +59,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
     /// (FORCE_WEATHER_NOW: the number of its block in timecyc.dat, -1 none), the wind (FORCE_WIND, null none) and the
     /// hour (SET_TIME_OF_DAY / FORCE_TIME_OF_DAY, hours and minutes as hours; null none); whether it holds the clock
     /// there while the cutscene plays (<paramref name="ClockHeld"/>); and where the mission's marker
-    /// stands (null none), where the player is when the mission and its first cutscene start (main.sco: the
-    /// mission's registration names its marker, another call places that marker - Bernie3's
-    /// sub_879a(18, 2, 0, 32, "M_78", ..., "Bernie3", ...) and sub_5d16(32, 487.5043, -499.1311, 3.6922, ...)).
-    /// GTAIV.exe keeps the sea's swell round the player (see the page's dynamicWaterStep).
+    /// stands (null none). The marker is the player's position at mission start (main.sco: the registration names its
+    /// marker, another call places it - Bernie3's sub_879a(..., "Bernie3", ...) and sub_5d16(32, 487.5043, -499.1311,
+    /// 3.6922, ...)). It is only attached where the script evidence keeps the player there: the script's first
+    /// START_CUTSCENE_NOW, or a later one in the same function immediately after a marker-trusted start with no
+    /// obvious player-moving native between them (#38, FAU1_B after FAU1_A). Later cutscenes may move the player; a
+    /// stale mission marker would place the swell window wrongly, so they fall back to camera-centred swell until a
+    /// reliable player position is known. GTAIV.exe keeps the sea's swell round the player (see dynamicWaterStep).
     /// </summary>
     public sealed record Entry(string Script, List<ScriptVehicle> Vehicles, int Weather = -1, float? Wind = null, float? Hour = null, float[]? Marker = null, bool ClockHeld = false);
 
@@ -188,6 +191,13 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       // of the markers by the function that places them.
       var markerOf = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
       var placed = new Dictionary<int, float[]>();
+      // Cutscenes that get the mission marker: only where the player is still at the mission start (the
+      // marker). A later cutscene's player may have moved (issue #38) - giving it the stale marker puts the
+      // swell window at the wrong place, worse than keeping it round the camera; so only the first start in
+      // the script, or one straight after a trusted start in the same function with no player-moving call
+      // between (FAU1_B after FAU1_A), keeps it. Everything else falls back to camera-centred swell until
+      // its player position is known.
+      var markerTrusted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
       try
       {
         var scripts = img.RootDirectory.OfType<File>().Where(f => f.Name.EndsWith(".sco", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -216,10 +226,30 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
             continue;
           }
           var vehicles = Vehicles(code);
-          foreach (Match start in starts)
+          bool prevTrustedInFunction = false;
+          int prevStart = -1;
+          int prevFunction = -1;
+          foreach (Match start in starts.Cast<Match>())
           {
+            int fn = FunctionStart(code, start.Index);
+            bool trusted = prevStart < 0;
+            if (!trusted && fn == prevFunction && prevTrustedInFunction)
+            {
+              // Same function, immediately after a marker-trusted start: keep the marker only when no
+              // obvious player-moving native appears between them (FAU1_B after FAU1_A). A move means the
+              // mission marker is stale; camera-centred swell is the safe fallback (#38).
+              string between = code.Substring(prevStart, start.Index - prevStart);
+              trusted = !PlayerMovingCall.IsMatch(between);
+            }
+            string cutscene = start.Groups[1].Value;
             var (weather, wind, hour, clockHeld) = SetBefore(code, start.Index);
-            index.Cutscenes.TryAdd(start.Groups[1].Value, new Entry(name, vehicles, weather, wind, hour, ClockHeld: clockHeld));
+            if (index.Cutscenes.TryAdd(cutscene, new Entry(name, vehicles, weather, wind, hour, ClockHeld: clockHeld)) && trusted)
+            {
+              markerTrusted.Add(cutscene);
+            }
+            prevStart = start.Index;
+            prevFunction = fn;
+            prevTrustedInFunction = trusted;
           }
         }
         progress?.Invoke(scripts.Count, scripts.Count);
@@ -230,7 +260,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       }
       foreach (var (cutscene, entry) in index.Cutscenes.ToList())
       {
-        if (markerOf.TryGetValue(entry.Script, out int marker) && placed.TryGetValue(marker, out var at))
+        if (markerTrusted.Contains(cutscene) &&
+            markerOf.TryGetValue(entry.Script, out int marker) && placed.TryGetValue(marker, out var at))
         {
           index.Cutscenes[cutscene] = entry with { Marker = at };
         }
@@ -268,6 +299,16 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       time != null ? int.Parse(time.Groups[1].Value, CultureInfo.InvariantCulture) + int.Parse(time.Groups[2].Value, CultureInfo.InvariantCulture) / 60f : null;
 
     private const string TimeOfDay = @"(?:SET|FORCE)_TIME_OF_DAY\((\d+),\s*(\d+)\)";
+
+    // Calls that can move, warp, or gate on the player being somewhere else between cutscenes: if any
+    // appears between two START_CUTSCENE_NOW in the same function, the later cutscene may not still be at
+    // the mission's marker (#38). Conservative: a false positive only drops to camera-centred swell, while
+    // a false negative can place the swell window at a stale marker far from the camera. LOCATE_* checks
+    // are included because they are evidence the player moved/reached a position (IMGER4/Rom8_c); warp/
+    // coordinate natives are direct movement.
+    private static readonly Regex PlayerMovingCall = new(
+      @"\b(?:SET_CHAR_COORDINATES\w*|SET_CAR_COORDINATES\w*|SET_ENTITY_COORDINATES\w*|WARP_CHAR\w*|TASK_WARP_CHAR\w*|LOCATE_CHAR_\w*|LOCATE_ENTITY_\w*|TASK_CAR_DRIVE\w*|TASK_GO_TO_COORD\w*|TASK_FOLLOW_NAV_MESH_TO_COORD\w*)\b",
+      RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     // What the script sets before a START_CUTSCENE_NOW: the last FORCE_WEATHER_NOW(1), FORCE_WIND(0.0f) and
     // SET_TIME_OF_DAY(5, 0) / FORCE_TIME_OF_DAY, with numbers written out, in its function and, before that, in

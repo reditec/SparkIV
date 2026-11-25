@@ -829,7 +829,8 @@ namespace SparkIV.WinUI.Viewers.GtaIV.Pc
       _locationsSent.Add(_locationKey);
       _lit = SendLighting();
       // The water as the mission script leaves it: the wind it forces, and the sea's swell kept round where the
-      // player stands, the mission's marker (CutsceneScriptIndex.Entry), in the scene's metres (less the origin).
+      // player stands. The mission marker is only attached when the script keeps the player at mission start
+      // (CutsceneScriptIndex.Entry, #38); otherwise swellAt is null and the swell stays round the camera.
       var script = _document.Script;
       float[]? origin = OriginOf(Math.Max(0, _section));
       Vector3? swellAt = script?.Marker is float[] marker && origin != null ? new Vector3(marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2]) : null;
