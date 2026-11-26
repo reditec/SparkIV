@@ -74,6 +74,10 @@ namespace RageLib.FileSystem.IMG
       }
 
       int stringDataSize = File.Header.TocSize - File.Header.EntryCount * EntrySize;
+      if (stringDataSize > br.BaseStream.Length - br.BaseStream.Position)
+      {
+        throw new Exception("Invalid table of contents size");
+      }
       byte[] stringData = br.ReadBytes(stringDataSize);
       string nameStringTable = Encoding.ASCII.GetString(stringData);
       _nameTable = nameStringTable.Split((char)0);

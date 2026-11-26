@@ -44,15 +44,20 @@ namespace RageLib.FileSystem.RPF
       get { return _entries[index]; }
     }
 
+    public int Count
+    {
+      get { return _entries.Count; }
+    }
+
     public string GetName(int offset)
     {
-      if (offset > _nameStringTable.Length)
+      if (offset >= _nameStringTable.Length)
       {
         throw new Exception("Invalid offset for name");
       }
 
       int endOffset = offset;
-      while (_nameStringTable[endOffset] != 0)
+      while (endOffset < _nameStringTable.Length && _nameStringTable[endOffset] != 0)
       {
         endOffset++;
       }
@@ -92,6 +97,10 @@ namespace RageLib.FileSystem.RPF
       }
 
       int stringDataSize = File.Header.TOCSize - File.Header.EntryCount * 16;
+      if (stringDataSize < 0 || stringDataSize > br.BaseStream.Length - br.BaseStream.Position)
+      {
+        throw new Exception("Invalid table of contents size");
+      }
       byte[] stringData = br.ReadBytes(stringDataSize);
       _nameStringTable = Encoding.ASCII.GetString(stringData);
     }

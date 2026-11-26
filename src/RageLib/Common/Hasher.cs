@@ -34,7 +34,7 @@ namespace RageLib.Common
         index++;
       }
 
-      str = str.ToLower();
+      str = str.ToLowerInvariant();
 
       for (; index < str.Length; index++)
       {

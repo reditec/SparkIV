@@ -182,7 +182,12 @@ namespace RageLib.FileSystem
 
       for (int i = 0; i < dirEntry.ContentEntryCount; i++)
       {
-        TOCEntry entry = _rpfFile.TOC[dirEntry.ContentEntryIndex + i];
+        int entryIndex = dirEntry.ContentEntryIndex + i;
+        if (entryIndex < 0 || entryIndex >= _rpfFile.TOC.Count)
+        {
+          throw new Exception("Invalid entry index in table of contents");
+        }
+        TOCEntry entry = _rpfFile.TOC[entryIndex];
         if (entry.IsDirectory)
         {
           var dir = new Directory();
@@ -218,6 +223,10 @@ namespace RageLib.FileSystem
     {
       RootDirectory = new Directory();
 
+      if (_rpfFile.TOC.Count == 0)
+      {
+        throw new Exception("Empty table of contents");
+      }
       TOCEntry entry = _rpfFile.TOC[0];
       BuildFSDirectory(entry as DirectoryEntry, RootDirectory);
     }
