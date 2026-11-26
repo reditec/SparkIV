@@ -238,7 +238,7 @@ namespace RageLib.Audio.SoundBank
 
             int count = _blockInfo[blockIndex].codeIndices[i].endIndex -
                         _blockInfo[blockIndex].codeIndices[i].startIndex;
-            for (int j = 0; j <= count; j++)
+            for (int j = 0; j <= count && j < block.Length; j++)
             {
               writer.Write(block[j]);
             }

@@ -122,6 +122,12 @@ namespace RageLib.Audio.SoundBank
         throw new SoundBankException("WaveInfo is outside of header");
       }
 
+      if (Header.numBlocks < 0 ||
+          Header.numBlocks > (br.BaseStream.Length - Header.offsetWaveInfo) / 16)
+      {
+        throw new SoundBankException("Unexpected number of blocks in Header");
+      }
+
       // Read block info headers
 
       var blockInfoHeaders = new WaveInfoHeader[Header.numBlocks];
