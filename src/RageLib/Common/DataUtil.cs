@@ -62,11 +62,30 @@ namespace RageLib.Common
 
     public static byte[] DecompressDeflate(byte[] data, int decompSize)
     {
+      if (decompSize < 0)
+      {
+        throw new Exception("Invalid decompressed size");
+      }
+
       var decompData = new byte[decompSize];
 
       var inflater = new Inflater(true);
       inflater.SetInput(data);
-      inflater.Inflate(decompData);
+      int written = 0;
+      while (written < decompSize && !inflater.IsFinished)
+      {
+        int n = inflater.Inflate(decompData, written, decompSize - written);
+        if (n <= 0)
+        {
+          break;
+        }
+        written += n;
+      }
+
+      if (written != decompSize)
+      {
+        throw new Exception("Unexpected decompressed size");
+      }
 
       return decompData;
     }

@@ -66,6 +66,10 @@ namespace RageLib.FileSystem.RPF
       if (File.Header.Encrypted)
       {
         int tocSize = File.Header.TOCSize;
+        if (tocSize < 0 || tocSize > br.BaseStream.Length - br.BaseStream.Position)
+        {
+          throw new Exception("Invalid table of contents size");
+        }
         byte[] tocData = br.ReadBytes(tocSize);
 
         tocData = DataUtil.Decrypt(tocData);

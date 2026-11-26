@@ -71,6 +71,11 @@ namespace RageLib.FileSystem.IMG
         return false;
       }
 
+      if (Header.TocSize < 0 || Header.TocSize > _stream.Length - _stream.Position)
+      {
+        _stream.Close();
+        return false;
+      }
       byte[] tocData = br.ReadBytes(Header.TocSize);
 
       if (encrypted)
