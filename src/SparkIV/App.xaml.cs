@@ -20,6 +20,7 @@
 
 using System;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using SparkIV.WinUI.Services;
 
 namespace SparkIV.WinUI
@@ -30,7 +31,9 @@ namespace SparkIV.WinUI
 
     public App()
     {
-      InitializeComponent();    }
+      InitializeComponent();
+      UnhandledException += ReportUnhandledException;
+    }
 
     /// <summary>
     /// Started with a file ("Open with" in Explorer): an archive opens in the main window, any other file
@@ -119,6 +122,37 @@ namespace SparkIV.WinUI
       _window = main;
       main.Activate();
       return main;
+    }
+
+    private void ReportUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+      e.Handled = true;
+      ShowFailure(e.Message);
+    }
+
+    private async void ShowFailure(string message)
+    {
+      try
+      {
+        XamlRoot? root = _window?.Content?.XamlRoot;
+        if (root == null)
+        {
+          return;
+        }
+        var dialog = new ContentDialog
+        {
+          XamlRoot = root,
+          Title = "Something went wrong",
+          Content = message,
+          CloseButtonText = "Close",
+          DefaultButton = ContentDialogButton.Close,
+        };
+        await dialog.ShowAsync();
+      }
+      catch (Exception)
+      {
+        // Reporting must never crash SparkIV in turn.
+      }
     }
   }
 }

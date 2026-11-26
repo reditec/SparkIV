@@ -143,7 +143,7 @@ namespace SparkIV.WinUI.Services
           s_data = null;
         }
         s_data ??= new Data();
-        s_data.GamePaths = new Dictionary<string, string>(s_data.GamePaths, StringComparer.OrdinalIgnoreCase);
+        s_data.GamePaths = s_data.GamePaths is null ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(s_data.GamePaths, StringComparer.OrdinalIgnoreCase);
       }
       return s_data;
     }

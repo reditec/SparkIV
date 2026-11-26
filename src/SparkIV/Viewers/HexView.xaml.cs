@@ -292,8 +292,15 @@ namespace SparkIV.WinUI.Viewers
       string? path = await ViewerPages.PickSaveFileAsync(_context.Window, name, System.IO.Path.GetExtension(name));
       if (path != null)
       {
-        await System.IO.File.WriteAllBytesAsync(path, _data);
-        _context.ShowMessage("Exported", path, false);
+        try
+        {
+          await System.IO.File.WriteAllBytesAsync(path, _data);
+          _context.ShowMessage("Exported", path, false);
+        }
+        catch (Exception ex)
+        {
+          _context.ShowMessage("Could not export the file", ex.Message, true);
+        }
       }
     }
 
