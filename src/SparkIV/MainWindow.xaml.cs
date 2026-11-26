@@ -379,15 +379,19 @@ namespace SparkIV.WinUI
     /// </summary>
     internal async Task OpenArchiveAsync(string path, GameInstall? install = null)
     {
-      install ??= Games.ForFile(path) ?? await GameChooserWindow.AskAsync(path, optional: false);
-      if (install == null)
+      install ??= Games.ForFile(path);
+      if (install == null && Games.NeedsGame(path))
       {
-        return;
+        install = await GameChooserWindow.AskAsync(path, optional: false);
+        if (install == null)
+        {
+          return;
+        }
       }
 
       await RunBusyAsync(async () =>
       {
-        if (!await LoadKeyAsync(install))
+        if (install != null && !await LoadKeyAsync(install))
         {
           return;
         }
@@ -395,7 +399,7 @@ namespace SparkIV.WinUI
         ResetVolumes();
         Volume volume = await Task.Run(() => _volumes.OpenArchive(path));
         Games.SetCurrent(install);
-        ShowVolume(volume, install.Game.Name + "  ·  " + path);
+        ShowVolume(volume, (install == null ? "" : install.Game.Name + "  ·  ") + path);
       });
     }
 

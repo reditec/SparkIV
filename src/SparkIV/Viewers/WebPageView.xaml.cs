@@ -743,12 +743,13 @@ namespace SparkIV.WinUI.Viewers
 
       // On disk the links are relative, so a folder of exported pages links up.
       string html = Html.Replace("href=\"/", "href=\"" + up);
-      string htmlPath = System.IO.Path.Combine(folder, Path.Substring(pageFolder.Length));
+      string htmlPath = System.IO.Path.Combine(folder, Path);
+      System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(htmlPath)!);
       System.IO.File.WriteAllText(htmlPath, html);
 
       foreach (var image in Images)
       {
-        string relative = image.Key.Substring(pageFolder.Length);
+        string relative = image.Key;
         string target = System.IO.Path.Combine(folder, relative.Replace('/', System.IO.Path.DirectorySeparatorChar));
         System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!);
         System.IO.File.WriteAllBytes(target, image.Value);
